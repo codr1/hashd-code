@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # hashd installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | sh
-set -euo pipefail
+# Usage: curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
+set -e
 
 REPO="codr1/hashd-code"
 

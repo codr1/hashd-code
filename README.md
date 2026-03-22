@@ -5,7 +5,7 @@ Human-Agent Synchronized Handoff Development -- an orchestration system that coo
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
 ### Requirements
@@ -36,7 +36,7 @@ wf watch
 ## Update
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
 The installer automatically replaces the previous version.
