@@ -41,6 +41,12 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 The installer automatically replaces the previous version.
 
+## Documentation
+
+- [Quick Start Guide](docs/QUICKSTART.md)
+- [Command Reference](docs/WF.md)
+- [Agent Configuration](docs/AGENT_MANAGEMENT.md)
+
 ## License
 
 (c) Coderica Inc. All rights reserved.
