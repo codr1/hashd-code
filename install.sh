@@ -5,6 +5,15 @@ set -e
 
 REPO="codr1/hashd-code"
 
+extract_first_major_minor() {
+    sed -nE 's/.*([0-9]+\.[0-9]+).*/\1/p' | head -1
+}
+
+extract_json_string_field() {
+    local field="$1"
+    sed -nE "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" | head -1
+}
+
 # --- Detect platform ---
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -33,13 +42,15 @@ echo "  Platform: $PLATFORM ($MACHINE)"
 
 # --- Check Python ---
 PYTHON=""
+PYTHON_VERSION=""
 for cmd in python3.14 python3.13 python3.12 python3.11 python3; do
     if command -v "$cmd" &>/dev/null; then
-        version=$("$cmd" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+        version=$("$cmd" --version 2>&1 | extract_first_major_minor)
         major=$(echo "$version" | cut -d. -f1)
         minor=$(echo "$version" | cut -d. -f2)
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+        if [ -n "$major" ] && [ -n "$minor" ] && { [ "$major" -gt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -ge 11 ]; }; }; then
             PYTHON="$cmd"
+            PYTHON_VERSION="$version"
             echo "  Python:   $version ($cmd)"
             break
         fi
@@ -62,7 +73,7 @@ fi
 if ! command -v pipx &>/dev/null; then
     echo ""
     echo "Installing pipx..."
-    "$PYTHON" -m pip install --user pipx 2>/dev/null || {
+    if ! "$PYTHON" -m pip install --user pipx; then
         echo ""
         echo "ERROR: Could not install pipx."
         echo ""
@@ -72,7 +83,7 @@ if ! command -v pipx &>/dev/null; then
         echo "    macOS:         brew install pipx"
         echo "    Or:            $PYTHON -m pip install --user pipx"
         exit 1
-    }
+    fi
     "$PYTHON" -m pipx ensurepath 2>/dev/null || true
 fi
 
@@ -87,7 +98,7 @@ if command -v gh &>/dev/null; then
     RELEASE_TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo "")
 else
     RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 | grep -oP '(?<=": ")[^"]+' || echo "")
+        | extract_json_string_field "tag_name" || echo "")
 fi
 
 if [ -z "$RELEASE_TAG" ]; then
@@ -100,7 +111,7 @@ echo "  Latest:   $RELEASE_TAG"
 
 # --- Find matching wheel ---
 # Wheel naming: hashd-{version}-cp{pyver}-cp{pyver}-{platform}_{machine}.whl
-PY_TAG="cp$(echo "$version" | tr -d '.')"
+PY_TAG="cp$(echo "$PYTHON_VERSION" | tr -d '.')"
 WHEEL_PATTERN="hashd-*-${PY_TAG}-${PY_TAG}-*${MACHINE}*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
@@ -119,11 +130,11 @@ else
         | grep "$MACHINE" \
         | grep "$PY_TAG" \
         | head -1 \
-        | grep -oP '(?<=": ")[^"]+')
+        | extract_json_string_field "browser_download_url")
 
     if [ -z "$WHEEL_URL" ]; then
         echo ""
-        echo "ERROR: No wheel found for Python $version on $PLATFORM/$MACHINE"
+        echo "ERROR: No wheel found for Python $PYTHON_VERSION on $PLATFORM/$MACHINE"
         echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
         exit 1
     fi
@@ -134,7 +145,7 @@ fi
 WHEEL=$(ls "$TMPDIR"/*.whl 2>/dev/null | head -1)
 if [ -z "$WHEEL" ]; then
     echo ""
-    echo "ERROR: No matching wheel found for Python $version on $PLATFORM/$MACHINE"
+    echo "ERROR: No matching wheel found for Python $PYTHON_VERSION on $PLATFORM/$MACHINE"
     echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
     exit 1
 fi
