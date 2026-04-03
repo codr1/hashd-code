@@ -216,7 +216,7 @@ flowchart TD
     RETRY --> TRIGGER
     AI -->|"CONCERNS (manual wf review)"| AUTORETRY["Auto-retry: unmark last commit,\nstore feedback, dispatch via Prefect"]
     AUTORETRY --> TRIGGER
-    AI -->|"CONCERNS (after retries exhausted)"| HUMAN[awaiting_final_decision\nHuman reviews concerns]
+    AI -->|"CONCERNS (after retries exhausted)"| HUMAN[final_review_with_concerns\nHuman reviews concerns]
     HUMAN -->|"wf merge: proceed\ndespite concerns"| READY
     HUMAN -->|"wf reject -f: generate\nfix commit"| FIX["Fix commit generated\nwf run to implement"] --> TRIGGER
 ```
@@ -225,7 +225,7 @@ flowchart TD
 
 ## Phase 4: Merge
 
-**Default: direct merge to main.** Use `--pr` to opt in to forge PR workflow for external review. Supports GitHub and Bitbucket; GitLab is planned. The forge is auto-detected from your git remote or set explicitly via `forge:` in config.yaml.
+**Default: direct merge to main.** Use `--pr` to opt in to forge PR workflow for external review. Supports GitHub, Bitbucket, and GitLab. The forge is auto-detected from your git remote or set explicitly via `forge:` in config.yaml.
 
 ```mermaid
 flowchart TD
@@ -254,7 +254,7 @@ flowchart TD
 
 The merge mode can also be set as a project default in config.yaml (`merge_mode: pr`). The `--pr` CLI flag overrides the project default for a single invocation.
 
-The forge platform (GitHub, Bitbucket, GitLab) is auto-detected from the git remote URL, or set explicitly with `forge: github` in config.yaml.
+The forge platform is auto-detected from the git remote URL, or set explicitly in config.yaml (e.g. `forge: github`, `forge: bitbucket`, or `forge: gitlab`).
 
 ---
 
@@ -281,7 +281,7 @@ The forge platform (GitHub, Bitbucket, GitLab) is auto-detected from the git rem
 | `wf list` | List stories and workstreams |
 | `wf show <id> [--stats]` | Show story or workstream details |
 | `wf approve <id>` | Accept story or approve gate |
-| `wf reject [id] [-f ".."] [--reset]` | Reject with feedback (-f required for PR states) |
+| `wf reject [id] [-f ".."] [--reset]` | Reject with feedback (-f required for PR states). Use `@directive <text>` in feedback to add durable constraints (e.g. `-f "fix X @directive do not modify RBAC"`) |
 | `wf pr` | Create PR/MR on forge for current workstream |
 | `wf pr create [id]` | Create PR/MR for specified workstream |
 | `wf pr feedback [id]` | View PR/MR review comments |
@@ -428,7 +428,7 @@ When the diff panel is active (`d`):
 | `r` | Reject with feedback, iterate on current commit |
 | `R` | Reset (discard changes, start fresh) |
 
-### Status: ready_to_merge / awaiting_final_decision
+### Status: ready_to_merge / final_review_with_concerns
 
 | Key | Action |
 |-----|--------|
@@ -439,7 +439,7 @@ When the diff panel is active (`d`):
 
 When `merge_mode: pr` is set in config.yaml, `P` (create PR) and `m` (merge PR) swap roles -- `P` appears when no PR exists, `m` appears once a PR is created.
 
-**Note:** `awaiting_final_decision` has the same bindings as `ready_to_merge`. The difference is informational - the AI final review flagged concerns. The Details panel shows these concerns; review them before proceeding.
+**Note:** `final_review_with_concerns` has the same bindings as `ready_to_merge`. The difference is informational - the AI final review flagged concerns. The Details panel shows these concerns; review them before proceeding.
 
 ### Status: merge_conflicts
 
@@ -584,14 +584,14 @@ stateDiagram-v2
     active --> ready_to_merge : all_commits_done
     active --> merge_conflicts : rebase_conflict
 
-    ready_to_merge --> awaiting_final_decision : final_review_concerns
-    awaiting_final_decision --> ready_to_merge : final_review_approve
-    awaiting_final_decision --> active : address_concerns (fix commit)
+    ready_to_merge --> final_review_with_concerns : final_review_concerns
+    final_review_with_concerns --> ready_to_merge : final_review_approve
+    final_review_with_concerns --> active : address_concerns (fix commit)
 
     ready_to_merge --> merging : wf merge (local)
     ready_to_merge --> pr_open : wf pr create (pr mode)
-    awaiting_final_decision --> merging : wf merge
-    awaiting_final_decision --> pr_open : wf pr create
+    final_review_with_concerns --> merging : wf merge
+    final_review_with_concerns --> pr_open : wf pr create
 
     pr_open --> pr_approved : PR approved
     pr_open --> active : wf reject -f (closes PR, fix commit)
@@ -625,23 +625,23 @@ stateDiagram-v2
 
 **Terminal states:** `merged` (archived), `closed` (wf close), `closed_no_changes` (wf close --no-changes). `closed` can be reopened via `wf open`.
 
-### ready_to_merge vs awaiting_final_decision
+### ready_to_merge vs final_review_with_concerns
 
 Both states indicate all micro-commits are complete. The difference is the final branch review verdict:
 
 | State | Final Review | Meaning |
 |-------|--------------|---------|
 | `ready_to_merge` | APPROVE | Green light - no concerns |
-| `awaiting_final_decision` | CONCERNS | Human should review concerns before proceeding |
+| `final_review_with_concerns` | CONCERNS | Human should review concerns before proceeding |
 
-**Functionally identical:** Both states allow the same actions (create PR, merge, edit). The distinction is informational - `awaiting_final_decision` means the AI reviewer flagged concerns that a human should acknowledge before proceeding.
+**Functionally identical:** Both states allow the same actions (create PR, merge, edit). The distinction is informational - `final_review_with_concerns` means the AI reviewer flagged concerns that a human should acknowledge before proceeding.
 
 **Transitions:**
-- `ready_to_merge` -> `awaiting_final_decision`: Via `final_review_concerns` trigger (final review found issues)
-- `awaiting_final_decision` -> `ready_to_merge`: Via `final_review_approve` trigger (concerns addressed)
-- `awaiting_final_decision` -> `active`: Via `address_concerns` trigger (generate fix commit)
+- `ready_to_merge` -> `final_review_with_concerns`: Via `final_review_concerns` trigger (final review found issues)
+- `final_review_with_concerns` -> `ready_to_merge`: Via `final_review_approve` trigger (concerns addressed)
+- `final_review_with_concerns` -> `active`: Via `address_concerns` trigger (generate fix commit)
 
-**In TUI:** When in `awaiting_final_decision`, the Details panel shows the specific concerns from the final review (stored in SQLite).
+**In TUI:** When in `final_review_with_concerns`, the Details panel shows the specific concerns from the final review (stored in SQLite).
 
 ---
 
@@ -947,7 +947,7 @@ This section is the source of truth for what actions are available at each state
 |-------|-----|-----|----------|
 | awaiting_human_review | `wf approve` / `wf reject [-f ".."]` | [a] Approve / [r] Reject | [Approve] [Reject] [Review] |
 | ready_to_merge | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
-| awaiting_final_decision | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
+| final_review_with_concerns | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
 | pr_open | `wf reject -f ".."` | [r] Reject / [o] Open PR | [Open PR]* [Reject] [Review] |
 | pr_approved | `wf merge` / `wf reject -f ".."` | [a] Merge / [o] Open PR | [Open PR]* [Merge] [Review] |
 
@@ -962,7 +962,7 @@ At decision points, each modality must surface the AI review findings:
 | Decision Point | What to show |
 |---------------|-------------|
 | awaiting_human_review | Per-commit review: decision, blockers, concerns, suggestions, notes |
-| awaiting_final_decision | Final branch review: full markdown with verdict and concerns |
+| final_review_with_concerns | Final branch review: full markdown with verdict and concerns |
 | ready_to_merge | Final review summary (approve verdict) |
 | pr_open / pr_approved | PR feedback from GitHub (CodeRabbit, team comments) |
 
@@ -991,7 +991,7 @@ The verification checklist (loaded from `prompts/review_verification_section.md`
 | State | Feedback | Effect |
 |-------|----------|--------|
 | awaiting_human_review | Typed feedback (optional) | Iterate on current commit |
-| awaiting_final_decision | Typed feedback (required) | Generate fix commit |
+| final_review_with_concerns | Typed feedback (required) | Generate fix commit |
 | ready_to_merge | Typed feedback (required) | Generate fix commit |
 | pr_open | Pre-filled from PR comments | Close PR, generate fix commit |
 | pr_approved | Pre-filled from PR comments | Close PR, generate fix commit |

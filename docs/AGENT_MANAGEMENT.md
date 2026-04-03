@@ -105,6 +105,118 @@ All stage overrides can also be set by editing `config.yaml` directly. See `conf
 
 ---
 
+## Authentication
+
+Most CLI coding agents support both OAuth (interactive login) and API key authentication. When both are configured, agents differ on which takes precedence -- leading to silent auth failures or unexpected billing. Hashd detects the auth state per agent and builds a clean subprocess environment.
+
+### Auth mode
+
+Set with `wf project config set auth-mode <mode>`:
+
+| Mode | Behavior |
+|------|----------|
+| **auto** (default) | Detect OAuth per-agent; prefer it when available |
+| **oauth** | Always strip API keys for agents where key overrides OAuth |
+| **api-key** | Never strip; always use API keys |
+
+Most users should leave this at `auto`. It does the right thing: if you have a valid OAuth session, it uses OAuth. If you only have an API key, it uses the key.
+
+### Per-agent auth behavior
+
+Each agent handles the OAuth/API-key conflict differently:
+
+| Agent | Key overrides OAuth? | What hashd does | OAuth credential file |
+|-------|---------------------|-----------------|----------------------|
+| **Claude** | Yes (`ANTHROPIC_API_KEY` wins) | Strips key when OAuth is valid | `~/.claude/.credentials.json` |
+| **Gemini** | Yes (`GEMINI_API_KEY` wins) | Strips key when OAuth is valid | `~/.gemini/oauth_creds.json` or OS keychain |
+| **Codex** | No (OAuth wins) | Nothing to strip | `~/.codex/auth.json` |
+| **Kimi** | No (OAuth wins) | Nothing to strip | `~/.kimi/credentials/kimi-code.json` |
+| **Qwen** | Mutually exclusive | Nothing to strip | `~/.qwen/oauth_creds.json` |
+| **OpenCode** | N/A (API keys only) | Nothing to strip | N/A |
+
+### Login and logout commands
+
+| Agent | Login | Logout |
+|-------|-------|--------|
+| Claude | `claude` (opens browser) | N/A |
+| Codex | `codex login` | `codex logout` |
+| Gemini | Interactive `/auth` in TUI | Interactive `/auth signout` in TUI |
+| Kimi | `kimi login` | `kimi logout` |
+| Qwen | `qwen auth` | `qwen auth` (select different method) |
+| OpenCode | N/A (set env vars) | N/A |
+
+### Diagnostics
+
+Run `wf doctor` to see the auth state for each installed agent:
+
+```
+Agent Authentication (mode: auto):
+
+  claude:
+    [OK] OAuth: valid (expires 2026-04-29)
+    [INFO] API key: ANTHROPIC_API_KEY is set -- will be ignored (OAuth preferred in auto mode)
+    [INFO] To use API key instead: wf project config set auth-mode api-key
+
+  codex:
+    [OK] OAuth: ChatGPT session active
+    [WARN] API key: CODEX_API_KEY is set -- Codex ignores it when OAuth is active
+    [INFO] To use API key instead: codex logout
+```
+
+### Common scenarios
+
+**"I only have an API key (no OAuth)"**
+
+It just works. `auto` mode detects no OAuth session and keeps the API key in the environment.
+
+**"I use OAuth but also have an API key in my shell"**
+
+`auto` mode detects the valid OAuth session and strips the API key for agents where the key would override OAuth (Claude, Gemini). For agents where OAuth already wins (Codex, Kimi), no action is needed.
+
+**"I want to switch from OAuth to API key"**
+
+```bash
+wf project config set auth-mode api-key
+```
+
+This tells hashd to never strip API keys, regardless of OAuth state.
+
+**"Codex/Kimi ignores my API key"**
+
+These agents prefer OAuth when both are present. Hashd can't change this via environment manipulation. You need to clear the OAuth session:
+
+```bash
+# For Codex
+codex logout
+
+# For Kimi
+kimi logout
+```
+
+**"Claude auth fails after I changed nothing"**
+
+Your OAuth token may have expired. Check with `wf doctor` -- it shows the expiry date. Re-authenticate:
+
+```bash
+claude
+```
+
+This opens the browser login flow and refreshes the token.
+
+### Environment variables
+
+Hashd always strips `CLAUDECODE` from the subprocess environment for all agents. This prevents nested Claude Code session interference when spawning agents from within a Claude Code terminal.
+
+The following API key env vars are stripped based on auth mode and OAuth detection:
+
+| Env var | Stripped when | Agent |
+|---------|-------------|-------|
+| `ANTHROPIC_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Claude |
+| `GEMINI_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Gemini |
+| `GOOGLE_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Gemini |
+
+---
+
 ## Prompt Management
 
 ### How prompts work
@@ -129,7 +241,7 @@ prompt = render_prompt('review', commit_title='Add auth', diff='...')
 | `implement_history.md` | implement | Conversation history section inserted on retries |
 | `implement_review_context.md` | implement | Previous review output context |
 | `implement_directives.md` | implement | Project/feature directives section |
-| `implement_oscillation_check.md` | implement | Oscillation detection for FIX-004+ commits |
+| `concern_triage.md` | concern_triage | Triage pending review concerns against next micro-commit |
 
 #### Review pipeline
 
