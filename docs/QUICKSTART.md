@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 - **Python 3.11+**
 - **Node.js 18+** (required by Claude Code and Codex CLI)
-- **git** (and **gh**/**glab** if using PR workflow with GitHub/GitLab)
+- **git** (and **gh**/**bkt**/**glab** if using PR workflow with GitHub/Bitbucket/GitLab)
 - **Claude Code** (`npm i -g @anthropic-ai/claude-code`) - planning, review, breakdown
 - **Codex CLI** (`npm i -g @openai/codex`) - implementation
 
@@ -19,14 +19,17 @@ For development setup (working on hashd source), see [DEVELOPMENT.md](DEVELOPMEN
 ## Project Setup
 
 ```bash
-# Your project repo should exist locally with a git remote configured
-
-# Register the project (runs interactive interview)
+# Register an existing local repo
 wf project add /path/to/your/repo
 
+# Or clone and register in one step (works with any git host)
+wf project add /path/to/repo --clone https://github.com/user/repo
+wf project add /path/to/repo --clone https://gitlab.com/user/repo
+wf project add /path/to/repo --clone https://bitbucket.org/team/repo
+
 # This will:
-# - Detect project name from git remote
-# - Auto-detect build system (Makefile, package.json, etc.)
+# - Auto-detect forge from git remote (GitHub, Bitbucket, GitLab)
+# - Detect build system (Makefile, package.json, etc.)
 # - Ask for project description, tech preferences
 # - Configure test/build commands
 # - Set it as the current project

@@ -436,10 +436,13 @@ When the diff panel is active (`d`):
 | `P` | Create PR/MR (for external review) |
 | `r` | Reject with feedback |
 | `e` | Edit pending microcommit |
+| `+` | Add new micro-commit to plan |
 
 When `merge_mode: pr` is set in config.yaml, `P` (create PR) and `m` (merge PR) swap roles -- `P` appears when no PR exists, `m` appears once a PR is created.
 
 **Note:** `final_review_with_concerns` has the same bindings as `ready_to_merge`. The difference is informational - the AI final review flagged concerns. The Details panel shows these concerns; review them before proceeding.
+
+**Note:** `+` (add micro-commit) is also available in active and implementing states when the workstream is idle.
 
 ### Status: merge_conflicts
 
