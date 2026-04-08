@@ -8,7 +8,7 @@
 wf agents
 ```
 
-Shows all 6 registered agents (Claude, Codex, Gemini, OpenCode, Kimi, Qwen), their install status, supported shapes, and current stage assignments.
+Shows all 7 registered agents (Claude, Codex, Gemini, OpenCode, Kimi, Qwen, Copilot), their install status, supported shapes, and current stage assignments.
 
 ### Per-stage assignment
 
@@ -68,12 +68,13 @@ Which agents can serve which stage shapes (`wf agents` shows this live):
 
 | Agent | print | json | edit | review | review_resume | implement | implement_resume |
 |-------|-------|------|------|--------|---------------|-----------|-----------------|
-| claude | x | x | x | x | x | x | -- |
+| claude | x | x | x | x | x | x | x |
 | codex | -- | -- | -- | -- | -- | x | x |
-| gemini | x | x | x | x | x | x | -- |
+| gemini | x | x | x | x | x | x | x |
 | opencode | x | x | -- | -- | -- | x | -- |
 | kimi | x | x | x | -- | -- | x | -- |
 | qwen | x | x | x | x | -- | x | -- |
+| copilot | x | x | x | x | x | x | x |
 
 ### Restoring defaults
 
@@ -133,6 +134,7 @@ Each agent handles the OAuth/API-key conflict differently:
 | **Kimi** | No (OAuth wins) | Nothing to strip | `~/.kimi/credentials/kimi-code.json` |
 | **Qwen** | Mutually exclusive | Nothing to strip | `~/.qwen/oauth_creds.json` |
 | **OpenCode** | N/A (API keys only) | Nothing to strip | N/A |
+| **Copilot** | N/A (token hierarchy) | Nothing to strip | `gh` CLI fallback |
 
 ### Login and logout commands
 
@@ -144,6 +146,7 @@ Each agent handles the OAuth/API-key conflict differently:
 | Kimi | `kimi login` | `kimi logout` |
 | Qwen | `qwen auth` | `qwen auth` (select different method) |
 | OpenCode | N/A (set env vars) | N/A |
+| Copilot | `copilot login` | `copilot logout` |
 
 ### Diagnostics
 
