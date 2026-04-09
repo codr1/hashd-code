@@ -82,8 +82,8 @@ if ! command -v pipx &>/dev/null; then
         echo "ERROR: Could not install pipx (pip is not available)."
         echo ""
         echo "  Install pipx for your platform, then re-run this script:"
+        echo "    Debian/Ubuntu: sudo apt update && sudo apt install pipx"
         echo "    Arch:          sudo pacman -S python-pipx"
-        echo "    Debian/Ubuntu: sudo apt install python3-pip && $PYTHON -m pip install --user pipx"
         echo "    macOS:         brew install pipx"
         exit 1
     fi
@@ -113,9 +113,18 @@ fi
 echo "  Latest:   $RELEASE_TAG"
 
 # --- Find matching wheel ---
-# Wheel naming: hashd-{version}-cp{pyver}-cp{pyver}-{platform}_{machine}.whl
-PY_TAG="cp$(echo "$PYTHON_VERSION" | tr -d '.')"
-WHEEL_PATTERN="hashd-*-${PY_TAG}-${PY_TAG}-*${MACHINE}*.whl"
+# Wheels use abi3 stable ABI (cp311-abi3): works with any Python 3.11+.
+# If minimum Python changes, update this tag AND pyproject.toml requires-python.
+ABI_TAG="cp311-abi3"
+
+# macOS wheels use "universal2" instead of arch-specific names
+if [ "$PLATFORM" = "macosx" ]; then
+    WHEEL_MACHINE="universal2"
+else
+    WHEEL_MACHINE="$MACHINE"
+fi
+
+WHEEL_PATTERN="hashd-*-${ABI_TAG}-*${WHEEL_MACHINE}*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
 
@@ -130,8 +139,8 @@ else
     ASSETS_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
     WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
         | grep '"browser_download_url"' \
-        | grep "$MACHINE" \
-        | grep "$PY_TAG" \
+        | grep "$WHEEL_MACHINE" \
+        | grep "$ABI_TAG" \
         | head -1 \
         | extract_json_string_field "browser_download_url")
 
@@ -145,10 +154,10 @@ else
     curl -fsSL -o "$WORK_DIR/$(basename "$WHEEL_URL")" "$WHEEL_URL"
 fi
 
-WHEEL=$(ls "$WORK_DIR"/*.whl 2>/dev/null | head -1)
+WHEEL=$(find "$WORK_DIR" -name '*.whl' | head -1)
 if [ -z "$WHEEL" ]; then
     echo ""
-    echo "ERROR: No matching wheel found for Python $PYTHON_VERSION on $PLATFORM/$MACHINE"
+    echo "ERROR: No wheel found for $PLATFORM/$MACHINE"
     echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
     exit 1
 fi
