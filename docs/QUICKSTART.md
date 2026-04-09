@@ -49,29 +49,35 @@ gh auth login
 
 #### AI Coding Agents
 
-Hashd uses AI agents for planning, implementation, and review. The default setup uses Claude for planning/review and Codex for implementation:
+Hashd uses AI agents for planning, implementation, and review. The default setup uses Claude for planning/review and Codex for implementation. You only need one agent to get started - Claude can handle all stages if you prefer a single-agent setup.
 
 ```bash
-# Claude Code >= 2.1 (planning, review, breakdown)
+# Claude Code >= 2.1 (planning, review, breakdown - and optionally implementation)
 npm i -g @anthropic-ai/claude-code
 
-# Codex CLI >= 0.98 (implementation)
+# Codex CLI >= 0.98 (implementation - optional if using Claude for everything)
 npm i -g @openai/codex
 ```
 
-Both require API keys:
+Each agent needs either **OAuth login** or an **API key**. If both are configured, hashd prefers OAuth:
 
 ```bash
-# Anthropic (for Claude Code)
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Option A: OAuth (interactive login, no API key needed)
+claude auth login
+codex login
 
-# OpenAI (for Codex CLI)
-export OPENAI_API_KEY="sk-..."
+# Option B: API keys (add to your shell profile)
+export ANTHROPIC_API_KEY="sk-ant-..."    # for Claude Code
+export OPENAI_API_KEY="sk-..."           # for Codex CLI
 ```
 
-Add these to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) so they persist.
+To use Claude for all stages (no Codex needed):
 
-Run `wf agents` to see all six supported agents and their install status. See [AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for switching agents and per-project overrides.
+```bash
+wf project config set coder claude
+```
+
+Run `wf agents` to see all seven supported agents and their install status. See [AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.
 
 #### Optional Tools
 
