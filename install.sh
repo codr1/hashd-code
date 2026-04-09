@@ -167,11 +167,24 @@ echo "  Downloaded: $(basename "$WHEEL")"
 # --- Install ---
 echo ""
 echo "Installing hashd..."
-pipx install --force "$WHEEL" 2>&1 | grep -v "^$"
+pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+
+# Ensure ~/.local/bin is on PATH
+pipx ensurepath 2>/dev/null || true
 
 echo ""
-echo "Done! Run 'wf --help' to get started."
+echo "Done! Installed hashd $RELEASE_TAG."
 echo ""
+if ! command -v wf &>/dev/null; then
+    echo "NOTE: wf is not yet on your PATH. Run:"
+    echo ""
+    echo "  source ~/.bashrc"
+    echo ""
+    echo "Or open a new terminal."
+    echo ""
+fi
 echo "Next steps:"
+echo ""
+echo "  wf --help"
 echo "  wf project add /path/to/your/repo"
 echo ""
