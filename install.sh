@@ -6,7 +6,7 @@ set -e
 REPO="codr1/hashd-code"
 
 extract_first_major_minor() {
-    sed -nE 's/.*([0-9]+\.[0-9]+).*/\1/p' | head -1
+    sed -nE 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/p' | head -1
 }
 
 extract_json_string_field() {
@@ -64,7 +64,7 @@ if [ -z "$PYTHON" ]; then
     echo "  Install Python:"
     echo "    Arch:          sudo pacman -S python"
     echo "    Debian/Ubuntu: sudo apt install python3"
-    echo "    macOS:         brew install python@3.13"
+    echo "    macOS:         brew install python@3.14"
     echo "    Or:            https://www.python.org/downloads/"
     exit 1
 fi
@@ -116,12 +116,12 @@ WHEEL_PATTERN="hashd-*-${PY_TAG}-${PY_TAG}-*${MACHINE}*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 # Download matching wheel
 if command -v gh &>/dev/null; then
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$TMPDIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
 else
     # Fall back to curl from release assets
     ASSETS_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
@@ -142,7 +142,7 @@ else
     curl -fsSL -o "$TMPDIR/$(basename "$WHEEL_URL")" "$WHEEL_URL"
 fi
 
-WHEEL=$(ls "$TMPDIR"/*.whl 2>/dev/null | head -1)
+WHEEL=$(ls "$WORK_DIR"/*.whl 2>/dev/null | head -1)
 if [ -z "$WHEEL" ]; then
     echo ""
     echo "ERROR: No matching wheel found for Python $PYTHON_VERSION on $PLATFORM/$MACHINE"
