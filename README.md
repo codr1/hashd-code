@@ -2,15 +2,21 @@
 
 (حشد = Arabic for "crowd")
 
-**Hashd is a full-lifecycle AI development platform that transforms unstructured requirements into production-ready code—at scale, with confidence.**
+Hashd coordinates a fleet of AI coding agents working in parallel across
+the full development lifecycle - planning, implementing, testing, and
+reviewing. Code context graphs, structured quality gates, and configurable
+autonomy keep accuracy high and minimize token burn as throughput scales.
 
-Specialized agents handle each phase of the development cycle: discovery, planning, implementation, testing, and review. Work flows through an agile-aligned pipeline where stories decompose into micro-commits, each validated by automated tests and AI-powered code review with confidence scoring. Parallel workstreams execute concurrently in isolated environments, with built-in conflict detection and intelligent merge orchestration.
+10x token burn reduction in code exploration. 10x developer throughput.
+15%+ accuracy improvement through better context management.
 
-Choose your autonomy level. In **supervised mode**, every gate pauses for human approval. In **gatekeeper mode**, only low-confidence changes require intervention. In **autonomous mode**, the pipeline executes end-to-end within your configured thresholds. Every mode delivers enterprise-grade observability: structured audit trails, per-commit transcripts, and full artifact lineage from requirement to merged code.
+```bash
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
+```
 
-Hashd provides an agent-friendly CLI, a real-time TUI for monitoring parallel workstreams, and a **persistent pair programming** experience where an AI architect can be called in on-demand at any stage with full context of the story, code changes, and conversation history.
-
-The result: a technical PM can ingest a raw requirements backlog, refine it into executable stories, and orchestrate parallel agent execution—shipping faster without sacrificing quality, traceability, or control.
+- [QUICKSTART.md](docs/QUICKSTART.md) - Installation, first project setup, basic workflows
+- [AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
+- [WF.md](docs/WF.md) - Full lifecycle documentation, state machines, merge behavior
 
 ```mermaid
 graph TB
@@ -93,10 +99,6 @@ The Context Graph eliminates this cost by pre-computing structural and relationa
 
 **The result:** Agents that receive a Context Graph summary use 4-6% of the context window for structural awareness -- a 10-15x reduction compared to agentic exploration. Fewer tool calls, shorter prompts, more grounded output, lower cost per operation.
 
-
-## Quick Start
-
-See **[QUICKSTART.md](docs/QUICKSTART.md)** for installation and basic workflows.
 
 
 ## Shell Completion
@@ -702,15 +704,16 @@ The merge respects GitHub's configured review requirements:
 
 ## Agent Configuration
 
-Hashd supports six CLI coding agents. Any agent can be assigned to any workflow stage, as long as it supports the stage's required invocation shape.
+Hashd supports seven CLI coding agents. Any agent can be assigned to any workflow stage, as long as it supports the stage's required invocation shape.
 
 ### Supported Agents
 
 | Agent | Binary | Status | Shapes | Install | Auth |
 |-------|--------|--------|--------|---------|------|
-| **Claude Code** | `claude` | active | print, json, edit, review, review_resume, implement | `npm i -g @anthropic-ai/claude-code` | Anthropic API key |
+| **Claude Code** | `claude` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @anthropic-ai/claude-code` | Anthropic API key |
 | **Codex** | `codex` | active | implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
-| **Gemini CLI** | `gemini` | available | print, json, edit, review, implement | `npm i -g @google/gemini-cli` | Google account (free) |
+| **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
+| **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
 | **OpenCode** | `opencode` | available | print, json, implement | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
 | **Kimi Code** | `kimi` | available | print, json, edit, implement | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
 | **Qwen Code** | `qwen` | available | print, json, edit, review, implement | `npm i -g @qwen-code/qwen-code` | Qwen OAuth (free) |
@@ -806,6 +809,7 @@ Connectors are hashd's plugin system for external integrations. They're auto-dis
 | Connector | What it does | Docs |
 |---|---|---|
 | **GitHub Sync** | Sync stories with GitHub Issues -- pull, push, auto-sync via labels | [docs](docs/CONNECTORS.md#github-sync) |
+| **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](orchestrator/connectors/jira_sync/README.md) |
 | **Figma** (coming soon) | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | [docs](docs/CONNECTORS.md#figma) |
 
 ### Third-party connectors
