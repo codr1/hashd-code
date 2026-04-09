@@ -73,15 +73,18 @@ fi
 if ! command -v pipx &>/dev/null; then
     echo ""
     echo "Installing pipx..."
-    if ! "$PYTHON" -m pip install --user pipx; then
+    # Try ensurepip first (bootstraps pip on systems that ship without it)
+    if ! "$PYTHON" -m pip --version &>/dev/null; then
+        "$PYTHON" -m ensurepip --user 2>/dev/null || true
+    fi
+    if ! "$PYTHON" -m pip install --user pipx 2>/dev/null; then
         echo ""
-        echo "ERROR: Could not install pipx."
+        echo "ERROR: Could not install pipx (pip is not available)."
         echo ""
-        echo "  Install manually:"
+        echo "  Install pipx for your platform, then re-run this script:"
         echo "    Arch:          sudo pacman -S python-pipx"
-        echo "    Debian/Ubuntu: sudo apt install pipx"
+        echo "    Debian/Ubuntu: sudo apt install python3-pip && $PYTHON -m pip install --user pipx"
         echo "    macOS:         brew install pipx"
-        echo "    Or:            $PYTHON -m pip install --user pipx"
         exit 1
     fi
     "$PYTHON" -m pipx ensurepath 2>/dev/null || true
