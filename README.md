@@ -48,7 +48,7 @@ Hashd orchestrates the entire development lifecycle:
 |-------|-------|--------------|
 | **Plan** | Claude (PM) | Analyzes REQS.md, proposes stories, generates acceptance criteria |
 | **Breakdown** | Claude (Architect) | Decomposes stories into micro-commits with implementation guidance |
-| **Implement** | Codex | Writes code in isolated worktree |
+| **Implement** | Configurable | Writes code in isolated worktree |
 | **Test** | Automated | Runs test suite, validates artifacts |
 | **Review** | Claude (Staff Engineer) | Structured review with approve/block/request-changes |
 | **QA Gate** | Validation | Confirms test + review artifacts before commit |
@@ -256,7 +256,7 @@ wf directives ai-edit project       # AI-assisted edit of project
 wf directives ai-edit workstream <ws>  # AI-assisted edit of workstream's
 ```
 
-Directives are automatically included in Codex implementation prompts.
+Directives are automatically included in implementation prompts.
 
 ## Commands
 
@@ -291,9 +291,9 @@ The `wf watch` TUI adapts keybindings to workstream status:
 | `complete` | `[P]` create PR, `[m]` merge, `[e]` edit microcommit |
 | `pr_open` / `pr_approved` | `[r]` reject (pre-fills PR feedback), `[o]` open PR, `[a]` merge |
 
-In PR states, `[r]` opens a modal pre-filled with GitHub feedback for editing.
+In PR states, `[r]` opens a modal pre-filled with forge feedback for editing.
 
-**Diff mode** (`[d]` to enter): `[s]` side-by-side, `[b]` blame/lineage, `[f]` fullscreen, `Enter` lineage detail (in blame).
+**Diff mode** (`[d]` to enter): `[s]` side-by-side, `[b]` blame/lineage, `[h]` hunk selection, `[space]` select hunk, `[f]` fullscreen, `Enter` lineage detail (in blame).
 
 ### Telegram Bot
 
@@ -436,7 +436,7 @@ This:
 
 ### After PR Created
 
-When a GitHub PR exists:
+When a PR exists:
 
 ```bash
 wf pr feedback my_feature                        # View PR comments
@@ -469,7 +469,7 @@ Prefect automatically retries transient failures:
 
 | Stage | Retries | Delay | Handles |
 |-------|---------|-------|---------|
-| implement | 2 | 10s | Codex timeouts, API errors |
+| implement | 2 | 10s | Agent timeouts, API errors |
 | test | 2 | 5s | Subprocess timeouts |
 | review | 1 | 30s | Claude rate limits |
 | qa_gate | 1 | 5s | Validation errors |
@@ -479,7 +479,8 @@ Prefect automatically retries transient failures:
 
 See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
-- Python 3.11+, Node.js 18+, Git, [GitHub CLI (gh)](https://cli.github.com/)
+- Python 3.11+, Node.js 18+, Git
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://bitbucket.org/) (Bitbucket)
 - [delta (git-delta)](https://github.com/dandavison/delta) - for syntax-highlighted diffs
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
@@ -677,12 +678,12 @@ If rebase fails due to merge conflicts, blocks for human resolution with instruc
 |------|------------|
 | Force push loses work | `--force-with-lease` prevents overwriting if branch changed |
 | Infinite rebase loop | Max 3 attempts before blocking for human |
-| GitHub API timing | 2s delay after push; worst case run `wf merge` again |
-| Review bypass | Checks for `REVIEW_REQUIRED` status from GitHub |
+| Forge API timing | 2s delay after push; worst case run `wf merge` again |
+| Review bypass | Checks for `REVIEW_REQUIRED` status from forge |
 
 ### Review Requirements
 
-The merge respects GitHub's configured review requirements:
+The merge respects the forge's configured review requirements:
 
 - **APPROVED** - Merge proceeds
 - **PENDING/None** - Merge proceeds (assumes no review required)
@@ -810,11 +811,11 @@ Connectors are hashd's plugin system for external integrations. They're auto-dis
 |---|---|---|
 | **GitHub Sync** | Sync stories with GitHub Issues -- pull, push, auto-sync via labels | [docs](docs/CONNECTORS.md#github-sync) |
 | **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](orchestrator/connectors/jira_sync/README.md) |
-| **Figma** (coming soon) | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | [docs](docs/CONNECTORS.md#figma) |
+| **Figma** | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | [docs](docs/CONNECTORS.md#figma) |
 
 ### Third-party connectors
 
-None yet. If you build a connector for Jira, Linear, Shortcut, or another tool, open a PR or publish it as a pip package with an `hashd.connectors` entry point.
+None yet. If you build a connector for Linear, Shortcut, or another tool, open a PR or publish it as a pip package with an `hashd.connectors` entry point.
 
 ## Troubleshooting
 

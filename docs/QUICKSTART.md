@@ -41,10 +41,12 @@ sudo apt install git gh git-delta nodejs npm python3
 # delta: https://github.com/dandavison/delta#installation
 ```
 
-After installing gh, authenticate:
+After installing the appropriate forge CLI, authenticate:
 
 ```bash
-gh auth login
+gh auth login      # GitHub
+glab auth login    # GitLab
+bkt auth login     # Bitbucket
 ```
 
 #### AI Coding Agents

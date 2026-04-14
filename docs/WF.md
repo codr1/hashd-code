@@ -462,7 +462,7 @@ When `merge_mode: pr` is set in config.yaml, `P` (create PR) and `m` (merge PR) 
 The `[r] reject` action in PR states:
 1. Fetches PR comments and pre-fills the input modal
 2. User edits/confirms feedback (cannot submit empty)
-3. **Closes the PR** on GitHub with comment
+3. **Closes the PR/MR** on the forge with comment
 4. Clears PR metadata from workstream
 5. Creates fix commit (COMMIT-xxx-FIX-NNN)
 6. Use `[G] Go` to run, then `[P]` creates a fresh PR
@@ -967,7 +967,7 @@ At decision points, each modality must surface the AI review findings:
 | awaiting_human_review | Per-commit review: decision, blockers, concerns, suggestions, notes |
 | final_review_with_concerns | Final branch review: full markdown with verdict and concerns |
 | ready_to_merge | Final review summary (approve verdict) |
-| pr_open / pr_approved | PR feedback from GitHub (CodeRabbit, team comments) |
+| pr_open / pr_approved | PR/MR feedback from forge (CI bots, team comments) |
 
 ### Review Scoping Rules
 
