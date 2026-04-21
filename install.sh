@@ -172,6 +172,40 @@ pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 # Ensure ~/.local/bin is on PATH
 pipx ensurepath 2>/dev/null || true
 
+# --- Install gitleaks (secrets scanner) ---
+GITLEAKS_VERSION="8.30.1"
+GITLEAKS_REPO="gitleaks/gitleaks"
+HASHD_TOOLS="$HOME/.hashd/tools/bin"
+
+# Map platform/arch to gitleaks asset naming
+case "$PLATFORM" in
+    linux)  GL_OS="linux" ;;
+    macosx) GL_OS="darwin" ;;
+esac
+case "$MACHINE" in
+    x86_64)  GL_ARCH="x64" ;;
+    aarch64) GL_ARCH="arm64" ;;
+esac
+
+GL_ASSET="gitleaks_${GITLEAKS_VERSION}_${GL_OS}_${GL_ARCH}.tar.gz"
+GL_INSTALLED="$HASHD_TOOLS/gitleaks"
+
+if [ -x "$GL_INSTALLED" ]; then
+    echo ""
+    echo "  gitleaks:  already installed at $GL_INSTALLED"
+else
+    echo ""
+    echo "Installing gitleaks $GITLEAKS_VERSION..."
+    mkdir -p "$HASHD_TOOLS"
+
+    GL_URL="https://github.com/$GITLEAKS_REPO/releases/download/v${GITLEAKS_VERSION}/${GL_ASSET}"
+    curl -fsSL "$GL_URL" -o "$WORK_DIR/$GL_ASSET"
+    tar -xzf "$WORK_DIR/$GL_ASSET" -C "$WORK_DIR" gitleaks
+    mv "$WORK_DIR/gitleaks" "$GL_INSTALLED"
+    chmod +x "$GL_INSTALLED"
+    echo "  gitleaks:  $GITLEAKS_VERSION -> $GL_INSTALLED"
+fi
+
 echo ""
 echo "Done! Installed hashd $RELEASE_TAG."
 echo ""

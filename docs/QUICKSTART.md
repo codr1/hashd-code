@@ -21,24 +21,27 @@ The installer handles Python virtual environment setup and puts `wf` on your PAT
 | [bkt (Bitbucket CLI)](https://bitbucket.org/) | for Bitbucket | PR workflow, repo operations |
 | [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations |
 | [delta](https://github.com/dandavison/delta) | yes | Syntax-highlighted diffs |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | yes | Secrets scanning at project setup |
 
 **Install by platform:**
 
 ```bash
 # --- Arch Linux ---
-sudo pacman -S git github-cli git-delta nodejs npm python
+sudo pacman -S git github-cli git-delta gitleaks nodejs npm python
 
 # --- macOS (Homebrew) ---
-brew install git gh git-delta node python@3.11
+brew install git gh git-delta gitleaks node python@3.11
 
 # --- Debian/Ubuntu 24.04+ ---
 sudo apt install git gh git-delta nodejs npm python3
+# gitleaks: go install github.com/zricethezav/gitleaks/v8@latest
 # Older Ubuntu: delta is not in apt, install from GitHub releases:
 #   https://github.com/dandavison/delta/releases
 
 # --- Others ---
 # gh: https://cli.github.com/
 # delta: https://github.com/dandavison/delta#installation
+# gitleaks: https://github.com/gitleaks/gitleaks#installing
 ```
 
 After installing the appropriate forge CLI, authenticate:

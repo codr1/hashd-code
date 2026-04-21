@@ -2,13 +2,15 @@
 
 (حشد = Arabic for "crowd")
 
-Hashd coordinates a fleet of AI coding agents working in parallel across
-the full development lifecycle - planning, implementing, testing, and
-reviewing. Code context graphs, structured quality gates, and configurable
-autonomy keep accuracy high and minimize token burn as throughput scales.
+Hashd is an orchestration system for AI coding agents. It plans the work, runs agents in isolated worktrees, grounds them in verified code structure, gates each change through review, and records the full lineage of every commit.
 
-10x token burn reduction in code exploration. 10x developer throughput.
-15%+ accuracy improvement through better context management.
+**10x developer throughput. 10x fewer tokens spent on exploration. 15%+ accuracy improvement from grounded context.**
+
+AI coding agents are powerful but unaccountable. They generate code without explaining why, re-discover the codebase on every run, and make decisions you can't trace later. Hashd adds the structure that makes AI-generated code trustworthy enough to ship -- and fast enough to change how much you ship in a day.
+
+## Install
+
+To install, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
@@ -18,65 +20,13 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 - [AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
 - [WF.md](docs/WF.md) - Full lifecycle documentation, state machines, merge behavior
 
-```mermaid
-graph TB
-    subgraph Planning
-        D[Discovery] --> S[Stories]
-        S --> B[Breakdown]
-    end
+## What hashd does
 
-    subgraph Execution
-        B --> I[Implement]
-        I --> T[Test]
-        T --> R[Review]
-        R --> G{Gate}
-    end
+**Plans the work.** Stories, suggestions, and workstreams are first-class entities with state machines. A story flows from drafting through review to acceptance; a workstream loops through breakdown, implement, test, review, and human gate for each micro-commit. You always know what stage a piece of work is in and what comes next.
 
-    G -->|approve| C[Commit]
-    G -->|reject| I
-    C --> M{More?}
-    M -->|yes| I
-    M -->|no| F[Final Review]
-    F --> Merge
-```
+**Grounds the agents.** Agents query a pre-computed Context Graph instead of re-discovering the codebase on every run. AST structure, dependency edges, and project knowledge are extracted once and made available to every agent in every workstream. Published research on systems like Aider shows tool-based exploration consumes 54-70% of the context window for orientation alone; pre-computed structural maps reduce this to 4-6%. That's a 10-15x reduction in tokens spent discovering what static analysis already knows -- and a corresponding reduction in cost, latency, hallucinated file paths, and first-pass review failures.
 
-## Overview
-
-Hashd orchestrates the entire development lifecycle:
-
-| Phase | Agent | What Happens |
-|-------|-------|--------------|
-| **Plan** | Claude (PM) | Analyzes REQS.md, proposes stories, generates acceptance criteria |
-| **Breakdown** | Claude (Architect) | Decomposes stories into micro-commits with implementation guidance |
-| **Implement** | Configurable | Writes code in isolated worktree |
-| **Test** | Automated | Runs test suite, validates artifacts |
-| **Review** | Claude (Staff Engineer) | Structured review with approve/block/request-changes |
-| **QA Gate** | Validation | Confirms test + review artifacts before commit |
-| **Human UAT** | You | Approve, reject with feedback, or reset entirely |
-| **Merge Gate** | Claude + Tests | Full suite + rebase check; AI generates fixes if needed |
-| **Final Review** | Claude | Holistic branch review before merge |
-
-Gate behavior is configurable per autonomy mode. The clarification queue can block workstreams until answered, and every run produces auditable artifacts in `runs/`.
-
-## Human-in-the-Loop
-
-- **Pair Programmer Chat** - Call in an AI architect anytime with `wf chat` or press `C` in the TUI; full story, diff, and log context with persistent conversation history. Chat can propose story edits (criteria, title, problem, non-goals) and run read-only commands -- each action requires y/n confirmation
-- **Clarification Queue** - Agents raise questions; workstream blocks until you answer (`wf clarify`)
-- **Approve/Reject/Reset** - Accept changes, iterate with feedback, or discard entirely
-- **Interactive TUI** - `wf watch` for real-time monitoring of workstreams and stories with keyboard shortcuts
-- **Telegram Bot** - Full mobile workflow management: inspect, execute, gate, plan, and search (see [Telegram Bot](#telegram-bot))
-- **Three interfaces** - CLI for power users and LLMs, TUI for terminal productivity, Telegram for mobile
-- **Desktop Notifications** - Get alerted when workstreams need attention
-- **Parallel Workstreams** - Run multiple features simultaneously in isolated worktrees
-- **Conflict Detection** - `wf conflicts` warns about overlapping file changes
-
-## Full Lineage Tracing
-
-Every piece of AI-generated code in hashd is traceable back to the requirement that motivated it. The run transcript links each agent conversation -- prompts sent, responses received, review decisions -- to the git commit it produced. Workstreams carry a machine-readable `STORY_ID` linking them to their originating story.
-
-Point at any file and reconstruct its full history: which commits shaped it, which stories drove those commits, what the AI reviewers said, what the humans decided, and what clarifications were resolved along the way. The git commit graph is the backbone; hashd's structured artifacts provide the context.
-
-Every agent -- from planning through review, breakdown, fix generation, and conflict resolution -- receives the project description as system context, so it understands *what the system is for* before reasoning about it.
+**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `wf lineage <file|sha|STORY-xxx>` reconstructs the chain. `wf lineage export --attestation-format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `wf lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
 
 ```
 file -> git log -> commit message (COMMIT-XX-NNN)
@@ -85,19 +35,33 @@ file -> git log -> commit message (COMMIT-XX-NNN)
 ```
 
 
-## Context Graph
+**Runs in parallel, safely.** Multiple workstreams execute against the same project concurrently. Each gets its own git worktree and per-workstream lock. `wf conflicts` warns when workstreams touch overlapping files. The FSM serializes per-workstream operations so concurrent runs don't corrupt shared state. With grounded agents and parallel execution working together, hashd users routinely ship 10x more debugged code per day than they would driving an agent by hand.
 
-LLM agents spend the majority of their context window *discovering* what static analysis already knows. Empirical measurements across production codebases show that agentic exploration (iterative grep/read cycles) consumes 54-70% of the available context window for orientation alone, leaving a fraction for the actual task.
+**Works with any agent.** Use Claude Code, Codex, Copilot, Gemini, OpenCode, Kimi, or Qwen -- any combination, any stage. Stages declare their required invocation shape; any agent that supports the shape can fill the slot. You're not locked to one vendor.
 
-The Context Graph eliminates this cost by pre-computing structural and relational knowledge about the codebase and project history.
+**Spans multiple repositories.** A single project can include a backend repo, a frontend repo, and an infra repo. Planning happens at the project level; execution happens in the right repo automatically.
+
+**Multiple interfaces.** A TUI (`wf watch`) for real-time monitoring with status-adaptive keybindings, a CLI for power users and scripting, and a Telegram bot for mobile workflow management.
+
+**Keeps you in the loop where it matters.** Three autonomy modes -- supervised, gatekeeper, and autonomous -- with confidence-threshold gating. A clarification queue holds work until you answer agent questions. Structured approve and reject flows.
+
+## What's coming
+
+**Team server.** A multi-user team server is in active development. It will let engineering teams coordinate humans and agent fleets on the same project -- shared workstream registry, multi-user gates, attestations exported per merge.
+
+**Web dashboard.** A browser-based interface for monitoring and controlling workstreams.
+
+**Desktop app.** A native Electron client for users who prefer a windowed UI over the terminal.
+
+## Context Graph: Three Layers
+
+The Context Graph that grounds the agents (above) is built in three layers:
 
 **Layer 1: Structural analysis.** AST parsing extracts a deterministic map of the codebase -- modules, classes, functions, and their signatures -- with zero LLM calls. Every symbol is verified to exist; every relationship is a real reference, not a retrieval approximation. This is *grounding* in the formal sense: constraining generation with verified facts.
 
 **Layer 2: Dependency edges.** Import graphs, call sites, and type references promote the structural tree into a full graph. When an agent needs to modify a function, the graph answers "what depends on this?" in constant time rather than O(n) tool-call rounds.
 
 **Layer 3: Project knowledge.** Full-text search over project artifacts -- stories, review decisions, clarifications, conversation history -- connects code nodes to the business decisions that motivated them. The graph becomes heterogeneous: code structure and project intent in a single queryable system.
-
-**The result:** Agents that receive a Context Graph summary use 4-6% of the context window for structural awareness -- a 10-15x reduction compared to agentic exploration. Fewer tool calls, shorter prompts, more grounded output, lower cost per operation.
 
 
 
@@ -482,6 +446,7 @@ See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions i
 - Python 3.11+, Node.js 18+, Git
 - A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://bitbucket.org/) (Bitbucket)
 - [delta (git-delta)](https://github.com/dandavison/delta) - for syntax-highlighted diffs
+- [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
 
@@ -522,6 +487,33 @@ autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
 
 Run `wf doctor --show-defaults` to see all available settings and their default values.
 Run `wf doctor --reset-to-defaults` to strip overrides and restore defaults.
+
+### Workspace Hooks
+
+Setup and teardown commands run automatically during workstream lifecycle:
+
+```yaml
+hooks:
+  setup: "npm install && cp ../.env .env"
+  teardown: "docker-compose -p hashd-${HASHD_WORKSTREAM_ID} down"
+  timeout_seconds: 600               # default: 300 (5 min)
+```
+
+- **setup** runs in the worktree after creation, before baseline tests. Failure transitions to `creation_failed` (retryable).
+- **teardown** runs in the worktree before removal (close, merge, workstream remove). Failure is logged but doesn't block cleanup.
+- **timeout_seconds** applies to both hooks. Hooks killed after the timeout get an actionable diagnostic pointing at the config key.
+
+Hook subprocesses inherit the full parent environment plus these HASHD_* context variables:
+
+| Variable | Description |
+|----------|-------------|
+| `HASHD_PROJECT_NAME` | Project name |
+| `HASHD_WORKSTREAM_ID` | Workstream identifier |
+| `HASHD_STORY_ID` | Story ID (e.g., STORY-0042) |
+| `HASHD_WORKTREE_PATH` | Path to git worktree |
+| `HASHD_BASE_BRANCH` | Default branch (e.g., main) |
+
+See **[docs/HOOKS.md](docs/HOOKS.md)** for the full reference -- lifecycle details, more examples, the REST call flow, and troubleshooting recipes are in **[docs/TROUBLESHOOTING.md#workspace-hook-failures](docs/TROUBLESHOOTING.md#workspace-hook-failures)**.
 
 ### Multi-Repo Projects
 

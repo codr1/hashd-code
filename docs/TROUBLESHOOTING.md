@@ -181,3 +181,95 @@ wf agents           # Show configured agents and their status
 ```
 
 See README.md for installation instructions.
+
+---
+
+## Workspace Hook Failures
+
+See `docs/HOOKS.md` for the full hooks reference. Common failure modes:
+
+### Setup hook timed out
+
+The workstream lands in `creation_failed` and the diagnostic looks like:
+
+```
+Hook exceeded timeout of 300s and was killed.
+  Command: npm ci
+  Last output:
+    ...
+  Fix: increase hooks.timeout_seconds in config.yaml, or simplify the hook.
+```
+
+**How to fix:**
+
+1. Increase the timeout in your project's `config.yaml`:
+   ```yaml
+   hooks:
+     timeout_seconds: 900
+   ```
+2. Re-run the workstream. Provisioning is idempotent and picks up from the
+   failed step:
+   ```bash
+   wf run <ws_id>
+   ```
+
+Alternatively, simplify the hook -- prefer `npm ci` over `npm install`,
+break an all-in-one setup script into smaller hooks, or move slow work out
+of the hook entirely (e.g., pre-warm caches with a connector).
+
+### Setup hook failed (non-zero exit)
+
+```
+Hook failed: exit status 1
+  Command: cp ../.env .env
+  Output:
+    cp: cannot stat '../.env': No such file or directory
+```
+
+**How to fix:** read the output tail to find the root cause. Typical issues:
+
+- **Path assumptions.** Hooks run in the worktree (`$HASHD_WORKTREE_PATH`),
+  not the project root. Use absolute paths or paths rooted at the worktree.
+- **Missing tool on PATH.** Hooks inherit the parent's environment, so the
+  tool must be on the PATH that started the hashd server. Try
+  `which <tool>` from the same shell that runs `wf`.
+- **Partial success.** If a multi-step hook fails halfway, add
+  `set -euo pipefail` at the top so later steps don't run on garbage state.
+
+After fixing the underlying issue, re-run `wf run <ws_id>`.
+
+### Teardown hook failed (but worktree was removed anyway)
+
+Teardown failures never block cleanup. You'll see a `Warning:` line in the
+CLI output and a log entry, but the worktree is already gone.
+
+If the failure left behind orphaned resources (dangling containers, leaked
+volumes, etc.), clean them up manually. Prevention: make teardown idempotent
+and defensive -- e.g., `docker-compose ... down || true`.
+
+### Testing a hook before deploying
+
+Run the command the same way the server will, with the HASHD_* vars set:
+
+```bash
+cd /path/to/your/worktree
+HASHD_PROJECT_NAME=myproject \
+HASHD_WORKSTREAM_ID=ws_test \
+HASHD_WORKTREE_PATH=$PWD \
+HASHD_BASE_BRANCH=main \
+bash -c 'YOUR HOOK COMMAND HERE'
+```
+
+Add `-x` (`bash -x -c ...`) to trace each expanded command.
+
+### "Server unavailable for setup hook -- skipping"
+
+The Prefect flow couldn't reach the Go server. The workstream provisions
+without running the hook and logs a warning. This is intentional (Prefect
+workers shouldn't be coupled to server uptime), but it means the hook's
+side effects won't happen.
+
+**How to fix:**
+- Check the server is up: `curl http://127.0.0.1:1337/health`
+- If running remotely, verify `HASHD_SERVER_URL` is set
+- Re-run the workstream once the server is reachable
