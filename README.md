@@ -480,12 +480,48 @@ Prefect automatically retries transient failures:
 See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
 - Python 3.11+, Node.js 18+, Git
-- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://bitbucket.org/) (Bitbucket)
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea) (Gitea)
 - [delta (git-delta)](https://github.com/dandavison/delta) - for syntax-highlighted diffs
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
 
 Run `wf doctor` to check your setup.
+
+### Forge Support
+
+HashD supports PR workflows on GitHub, GitLab, Bitbucket, and Gitea. `wf doctor`
+checks the CLI and authentication for the configured or auto-detected forge:
+
+| Forge | CLI | Auth command | Notes |
+| --- | --- | --- | --- |
+| GitHub | `gh` | `gh auth login` | Auto-detected from `github.com` remotes |
+| GitLab | `glab` | `glab auth login` | Auto-detected from `gitlab.com` remotes |
+| Bitbucket | `bkt` | `bkt auth login` | Auto-detected from `bitbucket.org` remotes |
+| Gitea | `tea` | `tea login add --url <gitea-url> --token <token>` | Auto-detected from `gitea.com`; self-hosted instances should set `forge: gitea` |
+
+Bitbucket setup uses the `bkt` CLI. Repository creation uses `bkt repo create`
+and relies on the active `bkt` context for Bitbucket Data Center project or
+Bitbucket Cloud workspace defaults. For Cloud, passing `workspace/repo` to
+`wf project add --create --host bitbucket --name ...` maps to `--workspace`.
+
+Gitea support uses the `tea` CLI and mirrors the same HashD PR workflow used by
+the other forges: create, find existing, inspect status, fetch feedback, close,
+and merge PRs.
+
+Gitea caveats:
+
+- Self-hosted Gitea cannot be reliably auto-detected from arbitrary remote
+  domains. Set `forge: gitea` in `config.yaml`.
+- `wf doctor` validates `tea` with `tea --version` and `tea login list
+  --output json`; configure a login first with `tea login add`.
+- CI/check status is not reported by the Tea pull detail/list output HashD uses.
+  Rely on Gitea branch protection or a future explicit status integration to
+  enforce checks before merge.
+- Review decision is inferred from Gitea pull reviews. `APPROVED`,
+  `CHANGES_REQUESTED`, and `REVIEW_REQUIRED` are normalized for HashD, but
+  exact review policy enforcement remains Gitea-side.
+- Gitea instances do not share one universal noreply email format, so HashD
+  does not synthesize one.
 
 
 ## Configuration
@@ -507,7 +543,7 @@ build_cmd: ""
 merge_gate_test_cmd: "make test"
 test_timeout: 300
 merge_mode: "local"              # "local" or "pr"
-forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab"
+forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea"
 
 # --- Autonomy ---
 autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
