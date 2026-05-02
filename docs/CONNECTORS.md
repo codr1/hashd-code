@@ -64,8 +64,7 @@ jira = "orchestrator.connectors.jira_sync"
 | `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
 | `lib/tool_dispatch.py` | Loads `TOOLS` when `@connector` detected in prompt |
 | `lib/agents_config.py` | Injects MCP config for `TOOLS` into agent commands |
-| `lib/chat_context.py` | Yields `AUTOCOMPLETE` completions for @ popup (server-side Python) |
-| `server/api/autocomplete.go` | REST endpoint for TUI autocomplete (reads connector caches) |
+| `lib/chat_context.py` | Yields `AUTOCOMPLETE` completions for @ popup |
 
 ---
 
@@ -254,7 +253,7 @@ See [orchestrator/connectors/figma/README.md](../orchestrator/connectors/figma/R
 
 ### Jira
 
-Bidirectional issue sync for Jira Cloud (REST API v3) and Server/Data Center (REST API v2). Status mapping via Jira's universal `statusCategory` (new/indeterminate/done) to work across arbitrary custom workflows. Each connector registers its own CLI commands independently.
+Bidirectional issue sync for Jira Cloud (REST API v3) and Server/Data Center (REST API v2). Status mapping via Jira's universal `statusCategory` (new/indeterminate/done) to work across arbitrary custom workflows. Shares `wf sync` commands with GitHub via backend dispatch.
 
 See [orchestrator/connectors/jira_sync/README.md](../orchestrator/connectors/jira_sync/README.md).
 
@@ -421,8 +420,6 @@ def _autocomplete(project_dir, partial):
 
 AUTOCOMPLETE = _autocomplete
 ```
-
-The `AUTOCOMPLETE` function is called server-side by Python (Prefect flows, MCP server). The TUI gets autocomplete via a separate REST endpoint (`GET /connectors/autocomplete`) that reads the connector's cache directory on the server. Your `AUTOCOMPLETE` function still works — the REST endpoint provides an equivalent for remote clients.
 
 ### Step 9: Register as entry point (out-of-tree connectors only)
 
