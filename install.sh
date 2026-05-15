@@ -1,9 +1,56 @@
 #!/bin/bash
 # hashd installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
+# Intended for packaged wheel installs/upgrades.
+# This script should be safe to re-run; install, migration, and restart work
+# are expected to be idempotent.
 set -e
 
 REPO="codr1/hashd-code"
+COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
+COMPLETION_LINE='source <(wf completion bash)'
+
+install_bash_completion() {
+    local bashrc="${HOME}/.bashrc"
+    local tmp
+
+    mkdir -p "$(dirname "$bashrc")"
+    touch "$bashrc"
+    tmp="$(mktemp)"
+
+    awk '
+        /^[[:space:]]*# hashd\/wf shell completions[[:space:]]*$/ { next }
+        /^[[:space:]]*# hashd\/wf completions \(managed by .* drop after v1\.0 once everyone has migrated\)[[:space:]]*$/ { next }
+        /^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$/ { next }
+        /^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$/ { next }
+        /^[[:space:]]*source[[:space:]]+<\(wf completion bash\)[[:space:]]*$/ { next }
+        { print }
+    ' "$bashrc" > "$tmp"
+    mv "$tmp" "$bashrc"
+
+    if [[ -s "$bashrc" ]]; then
+        printf '\n' >> "$bashrc"
+    fi
+    printf '%s\n%s\n' "$COMPLETION_MARKER" "$COMPLETION_LINE" >> "$bashrc"
+}
+
+promote_pipx_binary() {
+    local name="$1"
+    local bin_dir="${PIPX_BIN_DIR:-$HOME/.local/bin}"
+    local pipx_home="${PIPX_HOME:-$HOME/.local/pipx}"
+    local target="${bin_dir}/${name}"
+    local source="${pipx_home}/venvs/hashd/bin/${name}"
+
+    if [ -x "$target" ]; then
+        return 0
+    fi
+    if [ ! -x "$source" ]; then
+        return 1
+    fi
+
+    mkdir -p "$bin_dir"
+    ln -sf "$source" "$target"
+}
 
 extract_first_major_minor() {
     sed -nE 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/p' | head -1
@@ -171,6 +218,55 @@ pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 
 # Ensure ~/.local/bin is on PATH
 pipx ensurepath 2>/dev/null || true
+
+OPS_ROOT="${HASHD_OPS_ROOT:-$HOME/.hashd}"
+mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
+WF_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/wf"
+promote_pipx_binary wf || true
+promote_pipx_binary hashd-server || true
+if [ ! -x "$WF_BIN" ]; then
+    echo ""
+    echo "ERROR: Installed wf not found at $WF_BIN"
+    echo "  Expected bundled binary at: ${PIPX_HOME:-$HOME/.local/pipx}/venvs/hashd/bin/wf"
+    exit 1
+fi
+
+install_bash_completion
+
+# --- Install external tools (gitleaks, ...) ---
+# Delegates to scripts/install-tools.sh from main -- the same script
+# `wf` auto-invokes on source checkouts when a tool is missing. One
+# script, two entry points, no drift.
+#
+# Why main, not $RELEASE_TAG:
+#
+# 1. Backward-compat: pinning to $RELEASE_TAG 404s on any tag
+#    predating this script's introduction. install.sh itself is
+#    always fetched from main, so there's no "old installer on
+#    disk" to stay compatible with -- but fetching the tools script
+#    from an arbitrary old tag would break.
+#
+# 2. Forward-drift tradeoff (acknowledged, not yet a problem):
+#    install-tools.sh pins the gitleaks version itself, so a wheel
+#    user today always gets 8.30.1 regardless of when they install.
+#    The latent risk: if we ever ship wf code that depends on a
+#    specific tool version's output shape (say, gitleaks 9.x
+#    reshuffles the JSON fields wf parses) and later bump the
+#    script's pin, old wheels in the wild start getting the new
+#    tool. Revisit this pin at that point: either switch to
+#    $RELEASE_TAG, or freeze per-tool versions per wheel release.
+TOOLS_SCRIPT_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install-tools.sh"
+echo ""
+echo "Installing external tools..."
+curl --fail --silent --show-error --location \
+    --retry 3 --retry-delay 2 \
+    --connect-timeout 10 --max-time 60 \
+    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/install-tools.sh"
+bash "$WORK_DIR/install-tools.sh"
+
+echo ""
+echo "Refreshing services and project databases..."
+"$WF_BIN" restart
 
 echo ""
 echo "Done! Installed hashd $RELEASE_TAG."

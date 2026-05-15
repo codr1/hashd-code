@@ -15,12 +15,18 @@ The installer handles Python virtual environment setup and puts `wf` on your PAT
 | Tool | Required | Purpose |
 |------|----------|---------|
 | Python 3.11+ | yes | Runtime |
-| Node.js 18+ | yes | Required by Claude Code and Codex CLI |
+| Node.js 20+ | yes | Required by npm-installed agent CLIs |
 | git | yes | Version control, worktrees |
 | [gh (GitHub CLI)](https://cli.github.com/) | for GitHub | PR workflow, repo operations |
 | [bkt (Bitbucket CLI)](https://bitbucket.org/) | for Bitbucket | PR workflow, repo operations |
 | [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations |
 | [delta](https://github.com/dandavison/delta) | yes | Syntax-highlighted diffs |
+
+> **gitleaks** is used for secrets scanning at project setup but
+> does NOT need to be installed by hand. The curl installer above
+> (wheel users) and `setup.sh` (source checkouts) both fetch a
+> pinned gitleaks binary into `~/.hashd/tools/bin/`. If a tool
+> install fails (e.g. offline), `wf` will retry on first use.
 
 **Install by platform:**
 
@@ -32,7 +38,14 @@ sudo pacman -S git github-cli git-delta nodejs npm python
 brew install git gh git-delta node python@3.11
 
 # --- Debian/Ubuntu 24.04+ ---
-sudo apt install git gh git-delta nodejs npm python3
+sudo apt install git gh git-delta python3
+# Install Node.js 20+ explicitly. Preferred: nvm
+#   https://github.com/nvm-sh/nvm
+#   nvm install 20
+#   nvm use 20
+# Alternative: NodeSource 20.x repo
+#   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+#   sudo apt install nodejs
 # Older Ubuntu: delta is not in apt, install from GitHub releases:
 #   https://github.com/dandavison/delta/releases
 
@@ -54,10 +67,10 @@ bkt auth login     # Bitbucket
 Hashd uses AI agents for planning, implementation, and review. The default setup uses Claude for planning/review and Codex for implementation. You only need one agent to get started - Claude can handle all stages if you prefer a single-agent setup.
 
 ```bash
-# Claude Code >= 2.1 (planning, review, breakdown - and optionally implementation)
+# Claude Code >= 2.1.137 (planning, review, breakdown - and optionally implementation)
 npm i -g @anthropic-ai/claude-code
 
-# Codex CLI >= 0.98 (implementation - optional if using Claude for everything)
+# Codex CLI >= 0.130.0 (implementation - optional if using Claude for everything)
 npm i -g @openai/codex
 ```
 
@@ -79,7 +92,7 @@ To use Claude for all stages (no Codex needed):
 wf project config set coder claude
 ```
 
-Run `wf agents` to see all seven supported agents and their install status. See [AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.
+Run `wf agents` to see all seven supported agents and their install status. See [docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.
 
 #### Optional Tools
 
@@ -100,20 +113,41 @@ This checks all required tools, API connectivity, and configuration.
 ## Project Setup
 
 ```bash
-# Register an existing local repo
+# Register an existing local repo with the wizard
 wf project add /path/to/your/repo
+
+# Agent / script flow: investigate first, then execute from stored defaults
+wf project add /path/to/your/repo --no-interview --suggest
+wf project add /path/to/your/repo --no-interview
 
 # Or clone and register in one step (works with any git host)
 wf project add /path/to/repo --clone https://github.com/user/repo
 wf project add /path/to/repo --clone https://gitlab.com/user/repo
 wf project add /path/to/repo --clone https://bitbucket.org/team/repo
 
-# This will:
-# - Auto-detect forge from git remote (GitHub, Bitbucket, GitLab)
-# - Auto-detect build system (Makefile, package.json, Taskfile, etc.)
-# - Ask for project description, tech preferences
-# - Configure test/build commands
-# - Set it as the current project
+# Multi-repo/container onboarding controls
+wf project add /path/to/platform --primary backend --active frontend
+wf project add /path/to/platform --all-active --repo-skip-test docs --repo-skip-build docs
+
+# The investigate pass prints canonical settings output such as:
+#   Running project add with the following settings:
+#     --name demo
+#     --description "Demo trading platform"  # AI-inferred
+#     --primary backend
+#     --active frontend
+#     --git-name "Alice"
+#     --git-email "alice@example.com"
+#
+# It also stores those defaults in the project-add cache. The second
+# command reuses them, applies any explicit flag overrides, prints the
+# same canonical settings block again, and then executes project add.
+#
+# The wizard path still:
+# - Auto-detects forge from git remote (GitHub, Bitbucket, GitLab)
+# - Auto-detects build systems (Makefile, package.json, Taskfile, etc.)
+# - Prefills description, tech preferences, and repo settings from
+#   stored defaults or fresh AI investigation when requested
+# - Sets the new project as the current project on success
 ```
 
 ### Projects with Code Generation
@@ -147,10 +181,7 @@ wf plan
 # View suggestions
 wf plan list
 
-# Create story from suggestion #1
-wf plan new 1
-
-# Or quick mode (skip REQS.md)
+# Quick mode (skip REQS.md)
 wf plan story "add user authentication"
 
 # Review and approve story
@@ -166,8 +197,8 @@ wf log <workstream-id>
 
 # Handle gates as needed
 wf approve <workstream-id>
-wf reject <workstream-id> -f "feedback"
-wf clarify list
+wf reject <workstream-id> "feedback"
+wf answer list
 
 # Complete
 wf merge <workstream-id>
@@ -256,14 +287,14 @@ The bot also auto-starts when you run `wf run` or `wf watch`. Send `/` for the b
 ## Shell Completion
 
 ```bash
-# Bash
-wf --completion bash >> ~/.bashrc
+# Bash (managed automatically by setup.sh and dist/install.sh)
+source <(wf completion bash)
 
 # Zsh
-wf --completion zsh >> ~/.zshrc
+wf completion zsh >> ~/.zshrc
 
 # Fish
-wf --completion fish > ~/.config/fish/completions/wf.fish
+wf completion fish > ~/.config/fish/completions/wf.fish
 ```
 
 ## Multi-Project Setup
@@ -275,8 +306,10 @@ wf project add /path/to/another/repo
 # List projects (* = current)
 wf project list
 
-# Switch projects
+# Show, switch, or clear the current project
+wf project use
 wf project use <project-name>
+wf project use --clear
 
 # Or use --project flag
 wf plan list --project <project-name>
@@ -294,14 +327,14 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 | Task | CLI | TUI |
 |------|-----|-----|
 | Discover stories | `wf plan` | Plan screen (`p`), press `d` |
-| Create story | `wf plan new 1` | Plan screen (`p`), press `1-9` |
+| Create story | `wf plan story "title"` | Plan screen (`p`), press `1-9` |
 | Quick story | `wf plan story "title"` | Plan screen (`p`), press `s` |
 | Quick bug | `wf plan bug "title"` | Plan screen (`p`), press `b` |
 | Approve story | `wf approve STORY-xxx` | Story Detail, press `A` |
 | Run implementation | `wf run STORY-xxx` | Workstream Detail, press `G` |
 | View progress | `wf show <ws>` | Select workstream `1-9` |
 | Approve work | `wf approve <ws>` | Workstream Detail, press `a` |
-| Reject work | `wf reject <ws> -f "..."` | Workstream Detail, press `r` |
+| Reject work | `wf reject <ws> "..."` | Workstream Detail, press `r` |
 | Merge | `wf merge <ws>` | Workstream Detail, press `m` |
 | Chat with AI | `wf chat` | Any screen, press `C` |
 | Search | `wf search "query"` | Dashboard, press `/` |
@@ -310,7 +343,7 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 ## Further Reading
 
 - **[WF.md](WF.md)** -- Full command reference and lifecycle docs
-- **[AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md)** -- Agent switching, auth, per-project overrides
+- **[docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md)** -- Agent switching, auth, per-project overrides
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** -- Common issues and fixes
 - **[CONNECTORS.md](CONNECTORS.md)** -- External integrations (GitHub Issues, Figma)
 

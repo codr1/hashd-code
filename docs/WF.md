@@ -14,6 +14,8 @@ Hashd uses **Prefect** for workflow orchestration with these components:
 Flows run asynchronously. `wf run` submits to the worker and returns immediately.
 Monitor via `wf watch` (TUI) or Prefect UI at `http://localhost:4200`.
 
+For the canonical model of how a workstream's runtime position is described — stage, status, substage, operator verbs, and recovery from crashes — see **Workstream State Model** below.
+
 ---
 
 ## Modes
@@ -46,7 +48,7 @@ AI reviews include a confidence score (0.0-1.0) that influences auto-continue de
 
 ```mermaid
 flowchart TD
-    A[wf plan] --> B[wf plan new N]
+    A[wf plan] --> B[wf watch suggestion claim]
     A --> C["wf plan story '...'"]
     A --> D["wf plan bug '...'"]
     B -->|"REQS: WIP (mandatory)"| E[Story\nfeature or bug]
@@ -70,8 +72,8 @@ flowchart TD
         $ wf plan list                # View suggestions
 
 [Human] Pick a suggestion
-        $ wf plan new 1               # By number
-        $ wf plan new "auth"          # By name match
+        $ wf watch                    # Open the plan screen
+        # Press 1-9 to claim a suggestion into planning
 
         Creates STORY-xxxx, marks REQS as WIP
 ```
@@ -97,7 +99,7 @@ flowchart TD
         $ wf approve STORY-xxxx     # draft -> accepted
 
 [Human] Edit story if needed
-        $ wf plan edit STORY-xxxx [-f "feedback"]
+        $ wf plan edit STORY-xxxx ["feedback"]
 
 [Human] Set context (optional)
         $ wf use <workstream_id>
@@ -105,6 +107,67 @@ flowchart TD
                               |
                               v
 ```
+
+### Questions and Answers
+
+Hashd has two distinct question/answer lifecycles with different operator UX. Both share the same storage table (`clarifications`), discriminated by which entity owns the row: `story_id` set (story-planning) or `workstream_id` set (workstream-runtime).
+
+**Vocabulary:**
+- **Clarification** / **CLQ** — generic database term, any row in the `clarifications` table.
+- **Story open questions** — operator-facing term for story-scoped CLQs. Bundled emission, bundled answer.
+- **Workstream CLQs** — operator-facing term for workstream-scoped CLQs. Multi-emit, bundled answer via `wf answer <workstream-id> "..."`.
+
+**Note on shipped vs intended state.** Sections below describe the intended architecture. Items flagged `(intended; ships with PR X)` are not yet operational — see `docs/PLANNING_REDESIGN_PLAN.md` for the implementation status. Items without a flag describe current behavior.
+
+#### Story-planning questions
+
+Created by the **planning agent** during story drafting (or re-drafting via edit). When the planner identifies ambiguity in REQS that it can't resolve on its own, it emits questions as part of its output.
+
+| Aspect | Detail |
+|---|---|
+| Created by | Planning agent (during suggestion-backed planning or `wf plan edit`) |
+| Stored in | `clarifications` table, `story_id` set, `workstream_id` null |
+| Emission shape | Bundle — planner emits all open questions at once in its structured output |
+| Operator UX | Bundle answer — operator reads all pending story open questions for the story, submits one combined answer string covering all of them |
+| Operator answers via | `wf answer STORY-XXX "Q1: ..., Q2: ..."` (TUI: `a` key on story detail) |
+| Trigger on submit | All pending story open questions for the story flip to `answered` with the bundled answer text. Edit-flow auto-dispatches with the bundle as feedback. |
+| Consumed by | Edit-flow's planner invocation (re-drafts the story with the bundled answers as context) |
+| Loop | Planner may emit new questions if answers were incomplete. Old answered story open questions are preserved as historical context. Loop continues until the planner is satisfied or the operator gives up. |
+
+**Why bundle.** Operator typically reads all questions together, decides them together, submits one combined answer. The planner consumes the bundle as a single feedback string. Per-question status tracking is operationally meaningless because the planner doesn't see them individually anyway.
+
+#### Workstream-runtime questions (CLQs)
+
+Created by the **implement-stage agent** during workstream execution. When codex/claude needs operator input mid-task to proceed (e.g., "which approach should I take for X?"), it emits one or more clarification requests and the workstream blocks.
+
+| Aspect | Detail |
+|---|---|
+| Created by | Implement-stage agent (during `wf run` execution) |
+| Stored in | `clarifications` table, `workstream_id` set |
+| Emission shape *(intended; ships with PR B)* | Multi-emit — agent's protocol allows emitting one or many CLQs in a single turn (`clarifications_needed: [...]`) when it identifies several ambiguities up front |
+| Emission shape *(today)* | Single-emit — agent emits one CLQ per turn (`clarification_needed: {...}`) and the workstream blocks |
+| Operator UX | Bundle answer — operator reads every pending CLQ for the workstream, submits one combined answer string. The CLQ-NNN ids exist for storage and audit but are intentionally hidden from the operator surface. |
+| Operator answers via | `wf answer <workstream-id> "..."` (TUI: `c` key on workstream detail) |
+| Trigger on submit | Every pending CLQ on the workstream flips to `answered` with the bundled answer text and the next agent run auto-dispatches (start_impl from `active`, resume_impl from `awaiting_human_review`). |
+| Consumed by | The implement-stage prompt context on the next workstream run picks up the answered CLQs as part of the implement prompt |
+| Loop | Implement agent emits new workstream CLQs as further ambiguities surface across runs. Each CLQ persists independently in storage; operators always see them grouped by workstream. |
+
+**Why bundle (operator side).** Even though storage tracks CLQs individually, operators answer them together most of the time — partial-state ("answered some, dispatched, then more arrived") was a regular source of confusion. The single bundle answer + auto-dispatch keeps the lifecycle one operator action wide.
+
+#### Why the same storage, different operationally
+
+| | Story-planning | Workstream-runtime |
+|---|---|---|
+| Discriminator | `story_id` set, `workstream_id` null | `workstream_id` set |
+| Submit trigger | Bundle answer dispatches edit-flow | Bundle answer dispatches workstream run (start_impl or resume_impl) |
+| Re-emit on next round | Planner emits replacement bundle; old answered CLQs preserved as context | Implement emits new CLQs as needed |
+| Operator surface | TUI 'a' (story_detail) → bundle modal | TUI 'c' (workstream_detail) → bundle modal |
+| CLI surface | `wf answer STORY-X "..."` | `wf answer <workstream-id> "..."` |
+
+The single entry point `wf answer` routes by ID prefix (`STORY-`/`BUG-` →
+story path, anything else → workstream path). The two paths share an
+operator UX (bundle answer + auto-dispatch) and a failure model (dispatch
+first, flip second), differing only in which agent run they kick off.
 
 ### Story Scope Management
 
@@ -196,7 +259,7 @@ flowchart TD
     end
 
     GATE -->|"Supervised: wf approve"| LOAD
-    GATE -->|"Supervised: wf reject -f"| IMPL
+    GATE -->|"Supervised: wf reject"| IMPL
     GATE -->|"Gatekeeper: auto-approve\n(tests pass + AI approves)"| LOAD
     GATE -->|"Gatekeeper: auto-reject\n(request_changes, up to 5x)"| IMPL
     GATE -->|"5x exhausted"| HITL[Escalate to human]
@@ -218,7 +281,7 @@ flowchart TD
     AUTORETRY --> TRIGGER
     AI -->|"CONCERNS (after retries exhausted)"| HUMAN[final_review_with_concerns\nHuman reviews concerns]
     HUMAN -->|"wf merge: proceed\ndespite concerns"| READY
-    HUMAN -->|"wf reject -f: generate\nfix commit"| FIX["Fix commit generated\nwf run to implement"] --> TRIGGER
+    HUMAN -->|"wf reject: generate\nfix commit"| FIX["Fix commit generated\nwf run to implement"] --> TRIGGER
 ```
 
 ---
@@ -238,7 +301,7 @@ flowchart TD
 
     READY -->|"wf merge --pr -y\n(opt-in for external review)"| PR_CREATE["wf pr create\nCreates PR, sets pr_open"]
     PR_CREATE --> EXTERNAL[External PR review\nCI checks, team review]
-    EXTERNAL -->|"wf reject -f: close PR,\ngenerate fix commit"| FIX[Fix + wf run + new PR] --> PR_CREATE
+    EXTERNAL -->|"wf reject: close PR,\ngenerate fix commit"| FIX[Fix + wf run + new PR] --> PR_CREATE
     EXTERNAL -->|Approved| PR_MERGE["wf merge\nauto-rebase if needed"]
     PR_MERGE --> ARCHIVE
 
@@ -266,12 +329,10 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 |---------|-------------|
 | `wf plan` | Discover from REQS.md, save suggestions |
 | `wf plan list` | View current suggestions |
-| `wf plan new <id_or_name>` | Create story from suggestion |
 | `wf plan story "title" [-f ctx]` | Quick feature (skips REQS discovery) |
 | `wf plan bug "title" [-f ctx]` | Quick bug fix (conditional SPEC update) |
-| `wf plan edit STORY-xxx [-f ".."]` | Edit existing story |
+| `wf plan edit STORY-xxx [feedback]` | Edit existing story |
 | `wf plan clone STORY-xxx` | Clone a locked story |
-| `wf plan add <ws> "title" [-f ".."]` | Add micro-commit to workstream |
 | `wf plan resurrect STORY-xxx` | Resurrect abandoned story |
 | `wf plan retry STORY-xxx` | Retry failed planning run |
 | `wf plan descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
@@ -279,16 +340,15 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf plan split STORY-xxx 3,5,7 -t "title"` | Split criteria into new draft story |
 | `wf run [id] [--once\|--loop] [--gatekeeper\|--supervised\|--autonomous] [-f ".."] [-y]` | Submit workstream to Prefect (-f: guidance, -y: skip prompts) |
 | `wf list` | List stories and workstreams |
-| `wf show <id> [--stats]` | Show story or workstream details |
+| `wf show <id>` | Show story or workstream details |
 | `wf approve <id>` | Accept story or approve gate |
-| `wf reject [id] [-f ".."] [--reset]` | Reject with feedback (-f required for PR states). Use `@directive <text>` in feedback to add durable constraints (e.g. `-f "fix X @directive do not modify RBAC"`) |
-| `wf pr` | Create PR/MR on forge for current workstream |
+| `wf reject [id] [feedback] [--reset]` | Reject with feedback (positional; required unless `--reset`). Use `@directive <text>` in feedback to add durable constraints (e.g. `wf reject ws-1 "fix X @directive do not modify RBAC"`) |
 | `wf pr create [id]` | Create PR/MR for specified workstream |
 | `wf pr feedback [id]` | View PR/MR review comments |
-| `wf merge [id] [-y] [--pr] [--no-push] [--ai-resolve]` | Merge to main and archive (-y required in supervised/gatekeeper mode, --pr forces PR workflow) |
+| `wf merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main and archive (`--confirm`/`-y` required in supervised/gatekeeper mode, `--pr` forces PR workflow) |
 | `wf close [id] [--force] [--keep-branch] [--no-changes] [-r ".."]` | Abandon workstream (-r reason required with --no-changes) |
 | `wf skip [id] [commit] [-m ".."]` | Mark commit as done without changes |
-| `wf reset [id] [--force] [--hard]` | Reset workstream to start fresh |
+| `wf reset [id] [--hard]` | Reset workstream to start fresh |
 
 ### Supporting Commands
 
@@ -296,20 +356,37 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 |---------|-------------|
 | `wf use [id] [--clear]` | Set/show/clear current workstream |
 | `wf watch [id]` | Interactive TUI - monitor execution progress |
-| `wf review [id]` | Run final branch review |
-| `wf diff [id] [--stat\|--staged\|--branch]` | Show workstream diff |
-| `wf log [id] [-s since] [-n limit] [-v] [-r]` | Show workstream timeline |
+| `wf review [id]` | Show latest saved final review |
+| `wf diff [id] [--stat\|--staged\|--uncommitted] [--commit SHA] [--file path]` | Show workstream diff |
+| `wf log [id] [--since ISO] [-n limit] [-r]` | Show workstream timeline |
 | `wf docs [id]` | Update SPEC.md from workstream |
 | `wf refresh [id]` | Refresh touched files |
 | `wf conflicts [id]` | Check file conflicts |
 
-### Clarification Commands
+### Question & Answer Commands
+
+`wf answer` is the single operator surface for clarification Q&A. CLQ-NNN ids
+are internal — the operator talks to entities (stories and workstreams) and
+the server fans out the bundle answer across every pending CLQ on the entity.
+Submitting an answer always auto-dispatches the next agent run (edit-flow for
+stories, start_impl/resume_impl for workstreams) so a single operator action
+moves the entity forward.
 
 | Command | Description |
 |---------|-------------|
-| `wf clarify` | List pending clarifications |
-| `wf clarify show <id>` | Show clarification details |
-| `wf clarify answer <id> [-a ".."]` | Answer a clarification |
+| `wf answer` | Show help. |
+| `wf answer list` | List entities with pending clarifications (stories + workstreams). |
+| `wf answer show <entity>` | Show pending question text for one entity. |
+| `wf answer <entity> "<text>"` | Submit a bundle answer. Flips every pending CLQ on the entity to `answered` with this text and dispatches the next agent run. |
+
+**State requirements.** Stories must be in `draft` (no linked workstream) for
+`wf answer`. Workstreams must be in `active` or `awaiting_human_review`. Other
+states return a structured diagnostic that names the right next command.
+
+**Failure semantics.** Dispatch happens before the CLQ flip. A transient
+Prefect outage fails the call before any DB writes. A flip failure after a
+successful dispatch surfaces a 500 instructing the operator to retry the
+answer; the run itself is already in flight.
 
 ### Archive Commands
 
@@ -318,7 +395,7 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf archive work` | List archived workstreams |
 | `wf archive stories` | List archived stories |
 | `wf archive delete <id> --confirm` | Permanently delete |
-| `wf open <id> [--use] [--force]` | Resurrect archived workstream |
+| `wf open <id>` | Resurrect archived workstream |
 
 ### Directives Commands
 
@@ -339,12 +416,12 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 
 | Command | Description |
 |---------|-------------|
-| `wf project add <path> [--no-interview]` | Register a new project |
+| `wf project add <path> [--no-interview] [--primary name] [--active name ...\|--all-active] [--repo-skip-test name] [--repo-skip-build name] [--commit-root-dirs]` | Register a new project |
 | `wf project list` | List registered projects |
-| `wf project use <name>` | Set active project |
+| `wf project use [name] [--clear]` | Set, show, or clear the current project |
 | `wf project show` | Show project configuration |
 | `wf project interview` | Update project configuration interactively |
-| `wf project remove <name>` | Remove a project |
+| `wf project remove <name> [-y]` | Remove a project |
 | `wf project config list` | List config settings |
 | `wf project config get <key>` | Get config value |
 | `wf project config set <key> <value>` | Set config value |
@@ -365,17 +442,17 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf chat [id]` | Pair programmer chat with AI |
 | `wf agents` | Show installed AI agents and stage assignments |
 | `wf doctor` | Validate setup and diagnose issues |
-| `wf restart` | Restart infrastructure (Prefect, ZMQ, messengers) |
+| `wf restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
 | `wf lineage <target> [--line N] [--lines N-M] [--format table\|json\|markdown]` | Trace code lineage (auto-detects file/SHA/STORY/BUG) |
 | `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--attestation-format slsa\|in-toto]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story |
 | `wf lineage verify` | Validate hash chain integrity for project commits |
-| `wf system-log [--errors] [--since] [--limit]` | View system event log |
+| `wf system-log` | View system event log |
 | `wf prompts list` | List prompt templates |
 | `wf prompts show <name>` | Show prompt content |
 | `wf prompts edit <name>` | Edit prompt override |
 | `wf prompts reset <name>` | Reset prompt to default |
 | `wf prompts diff <name>` | Show diff from default |
-| `wf --completion bash\|zsh\|fish` | Generate shell completion |
+| `wf completion [bash\|zsh\|fish]` | Generate shell completion |
 
 ---
 
@@ -402,6 +479,7 @@ Available on any workstream detail screen:
 | Key | Action |
 |-----|--------|
 | `G` | Go - run workstream |
+| `c` | Answer pending clarifications (bundle modal -- one answer applies to all) |
 | `d` | View diff |
 | `l` | View log |
 | `p` | Open plan view |
@@ -420,7 +498,7 @@ When the diff panel is active (`d`):
 | `f` | Toggle fullscreen (hides left column) |
 | `Enter` | Show lineage detail for selected line (blame view) |
 
-### Status: awaiting_human_review
+### Stage: awaiting_human_review
 
 | Key | Action |
 |-----|--------|
@@ -428,7 +506,7 @@ When the diff panel is active (`d`):
 | `r` | Reject with feedback, iterate on current commit |
 | `R` | Reset (discard changes, start fresh) |
 
-### Status: ready_to_merge / final_review_with_concerns
+### Stage: ready_to_merge / final_review_with_concerns
 
 | Key | Action |
 |-----|--------|
@@ -444,14 +522,14 @@ When `merge_mode: pr` is set in config.yaml, `P` (create PR) and `m` (merge PR) 
 
 **Note:** `+` (add micro-commit) is also available in active and implementing states when the workstream is idle.
 
-### Status: merge_conflicts
+### Stage: merge_conflicts
 
 | Key | Action |
 |-----|--------|
 | `i` | AI-resolve conflicts |
 | `R` | Reset workstream |
 
-### Status: pr_open / pr_approved
+### Stage: pr_open / pr_approved
 
 | Key | Action |
 |-----|--------|
@@ -567,9 +645,233 @@ Directives are automatically included in Codex implementation prompts. Use `wf d
 
 ---
 
+## Workstream State Model
+
+A workstream's runtime position is described by two orthogonal fields: **stage** (where in the lifecycle) and **status** (what's happening at that stage right now). For stages with internal sequencing, a third field — **substage** — tracks position within the stage.
+
+> **Note on current implementation**: today's code conflates stage and status into a single field (named `status` in Python, `state` in the Go server's FSM JSON). The model described below is the canonical design; the rename + additive `status` field lands as a post-v0.6.0 migration. Conceptually the system already operates this way — the docs lead the data model.
+>
+> **What's shipped (Brief 99 Phase 1 + Brief 114 Phase 5)**: the derived `runtime_status` field is exposed by the Go workstream serializer (`ComputeRuntimeStatus`) with a Python lib mirror at `orchestrator/lib/workstream_status.py`. Operator displays (`wf show`, dashboard, watch detail subtitle) render the `<stage> / <runtime_status>` pair. The macro-state fold for `creation_failed` / `baseline_failed` landed in Brief 114: both states were dropped from the FSM and their incoming/outgoing transitions collapsed into `provisioning` (with `provision_error` / `baseline_failures` columns populated as the failure detail). The FSM rename (Phase 1 of the migration outline) remains future work — see the migration outline at the bottom of this section.
+
+### Stage
+
+A **stage** is an idempotent workflow position with defined inputs and outputs.
+
+Properties:
+- **Idempotent**: re-running the stage with the same inputs produces the same outputs (or at least is safe to re-execute without introducing new state changes).
+- **Defined inputs/outputs**: each stage takes a known input set and produces a known output set. Listed per-stage in the implementation.
+- **Leaving the stage mutates the flow**: the transition out is the commit point. While inside, the stage can be re-run or extended; once the FSM transitions, the output is locked in.
+- **Going back destroys the current stage's terminal output**: rewinding from B to A discards B's verdict/decision. But the additive flow state — feedback, review history, conversation context — is preserved as input to the next instance of any stage.
+
+The macro FSM enumerates the stages. See **State Diagram** below for the canonical list and transitions.
+
+#### Additive flow state
+
+When stage A → B → A happens (e.g., implementing → review → implementing on a rejection), the second visit to A starts with:
+1. Original inputs to A
+2. Plus additive state from the first visit to A (e.g., previous attempt summary)
+3. Plus additive state from B (e.g., review's feedback)
+
+The terminal output of the first A is gone (replaced by the second A's output). The feedback survives. This is the pattern `ctx.review_history` already implements — the model formalizes it.
+
+### Status
+
+A **status** is the runtime state at the workstream's current stage. Seven values:
+
+| Status | Meaning | Computed from |
+|---|---|---|
+| `running` | Process attached, work in progress at current stage | `runner_pid` alive AND `last_run` incomplete |
+| `blocked` | Waiting for external input (clarification, human review, conflict resolution, etc.) | `last_run.status == "blocked"` |
+| `failed` | Previous run errored, retryable via re-dispatch | `last_run.status == "failed"` |
+| `idle` | Stage entered, no run has executed yet | No `last_run` record for current stage |
+| `cancelled` | Operator deliberately stopped the runner | `last_run.status == "cancelled"` (future) |
+| `orphaned` | Runner exited without writing a terminal result, unintentionally | `runner_pid` dead AND `last_run` incomplete |
+| `done` | Terminal stage reached; no further work | Stage in terminal set (`merged`, `closed`, `closed_no_changes`) |
+
+#### Status is derived
+
+Status is computed on read from primitive fields (`runner_pid`, last `runs` row, current stage), not stored as a column. Hard kills self-heal: pid not alive on next read → status flips to `orphaned`.
+
+The canonical compute function lives Go-server-side (in the workstream serializer) with a Python lib mirror for local consumers. Both must agree.
+
+#### `cancelled` vs `orphaned`
+
+Same surface symptom (no live runner, no terminal result), different cause:
+- **`orphaned`**: process died unintentionally (hard kill, prompt-render exit before `write_result`, etc.). Operator should investigate.
+- **`cancelled`**: operator deliberately stopped the runner via a future `wf cancel` command. No investigation needed; just decide whether to re-dispatch.
+
+Today there's no explicit cancel mechanism; killed runs become `orphaned`. When `wf cancel` lands, it writes `last_run.status = "cancelled"` cleanly.
+
+### Substage (sub-FSM)
+
+Stages with internal sequencing have their own sub-FSM. The substage field tracks position within the stage; the macro `status` describes the workstream's runtime state at that position.
+
+Stages that have a sub-FSM today (or will when formalized):
+- **`implementing`** — runner inner loop. **Formalized (Brief 123 Phase 3).** Spec at `server/contracts/implementing_substages.json`; Go validator at `server/internal/fsm/implementing_substages.go` (loaded as `fsm.ImplementingSubstages`); Python mirror at `orchestrator/lib/implementing_substages.py`. Cross-language contract test at `tests/test_implementing_substages_contract.py`. See **Implementing sub-FSM** below for the transition table.
+- **`merge_conflicts`** — resolution attempts: `initial → resolve_running → resolve_succeeded → retry_merge` (with `resolve_failed` as a recoverable sub-state). _Future phase._
+- **`merging`** — merge gate sequence: `rebase → build → test → push → done`. _Future phase._
+- **`provisioning`** — create steps: `worktree → baseline → enrichment` (when applicable). _Future phase._
+
+#### Implementing sub-FSM
+
+States: `preflight`, `select`, `clarification_check`, `concern_triage`, `implement`, `test`, `review`, `qa_gate`, `commit`.
+
+Transitions:
+
+| Trigger | From → To |
+|---|---|
+| `preflight_pass` | `preflight` → `select` |
+| `select_pass` | `select` → `clarification_check` |
+| `clarification_clean` | `clarification_check` → `concern_triage` |
+| `triage_complete` | `concern_triage` → `implement` |
+| `implement_pass` | `implement` → `test` |
+| `test_pass` | `test` → `review` |
+| `test_fail` | `test` → `implement` |
+| `review_approve` | `review` → `qa_gate` |
+| `review_request_changes` | `review` → `implement` |
+| `qa_pass` | `qa_gate` → `commit` |
+| `commit_pass` | `commit` → `select` |
+
+Terminal triggers (exit-to-caller; control leaves the sub-FSM):
+
+| Trigger | From | Exit reason |
+|---|---|---|
+| `select_complete` | `select` | all commits done |
+| `clarification_blocked` | `clarification_check` | clarification needed |
+| `implement_blocked` | `implement` | agent surfaced clarification or blocked work |
+| `review_human_gate` | `review` | awaiting human review |
+| `qa_fail` | `qa_gate` | qa gate blocked |
+
+The validation hooks into `update_runner_stage_current` in `orchestrator/runner/locking.py`: when both the previous and the new `runner_stage` are in the spec's state set, the transition must match a registered edge. Cross-domain transitions (`preflight → breakdown`, `review → human_review`, anything involving `merge_gate` / `final_review`) are accepted unconditionally — those values are outside the implementing sub-FSM's state set.
+
+Stages without sub-FSM (light operator-decision stages):
+- `active`, `awaiting_human_review`, `ready_to_merge`, `final_review_with_concerns`, `pr_open`, `pr_approved`
+- Terminal: `merged`, `closed`, `closed_no_changes`
+
+`drafting`, `draft`, `editing`, and `accepted` are story-lifecycle stages, not workstream stages, so they are intentionally outside the workstream model here.
+
+Sub-FSM transitions are **code-driven**, not operator-driven. Macro FSM transitions are operator-driven (or auto-fire on macro-stage completion). Both layers have validated transitions.
+
+#### Display convention
+
+Operator-facing displays combine the three fields:
+
+```
+implementing / running (review)        — workstream running, currently in review substage
+implementing / blocked (clarification) — blocked, agent raised a clarification
+implementing / failed (test)           — last run failed at test substage
+merge_conflicts / running (ai-resolve) — AI resolution in progress
+ready_to_merge / idle                  — approved, waiting for operator merge
+merged / done                          — terminal
+```
+
+#### Timeouts
+
+Per-substage timeouts live in `runner_stages.<name>.timeout` in `defaults.yaml` (Go-canonical at `server/internal/config/defaults.yaml`). Each entry is one of:
+
+- A duration string: `"300s"`, `"10m"`, `"1h"` — see `orchestrator/lib/duration.parse_duration`.
+- `"NA"` — no timeout (idle / operator-paced / pure-logic substages); housekeeping skips entirely.
+- `"config"` — defers to project config (currently `ctx.profile.test_timeout`); resolved at sweep time. Today only `test` and `merge_gate` use this.
+
+**Locked values (Brief 110):**
+
+| runner_stage | timeout | rationale |
+|---|---|---|
+| `preflight` | NA | pure logic, sub-second |
+| `breakdown` | 600s | mirrors `stages.breakdown.timeout` |
+| `select` | NA | pure logic |
+| `clarification_check` | NA | pure logic |
+| `concern_triage` | 120s | mirrors `stages.concern_triage.timeout` |
+| `implement` | 1200s | mirrors `stages.implement.timeout` |
+| `test` | config | `ctx.profile.test_timeout` (project override) |
+| `review` | 900s | mirrors `stages.review.timeout` |
+| `human_review` | NA | indefinite by design |
+| `qa_gate` | NA | pure logic |
+| `commit` | 120s | new — was unbounded; zombie risk on `git push` |
+| `merge_gate` | config | `ctx.profile.test_timeout` (mirror of `test`) |
+| `final_review` | 600s | mirrors `stages.final_review.timeout` |
+| `starting` / `stopped` | NA | DB write only |
+
+**Convention.** A single function `orchestrator/workflow/timeouts.fail_substage_timeout(...)` is the source of truth for "this substage timed out." Both the in-process timeout firing path (subprocess.TimeoutExpired handlers in the runner) AND the `housekeeping` cron flow call it. The convention emits one `StageTimeout` typed event per substage entry; the housekeeping path additionally marks the latest run failed, sends the operator notification, and cancels the orphaned Prefect flow run.
+
+**Idempotency.** The convention queries the events table for an existing `stage_timeout` event since the most recent `stage_changed` event entering the current runner_stage. If found, it returns early. The `housekeeping` cron sweeper running every 5 minutes therefore cannot generate duplicate events for a workstream whose in-process timeout already fired.
+
+**Failsafe vs primary.** In-process timeouts are the PRIMARY mechanism — they fire from inside the runner the moment a `subprocess.TimeoutExpired` is caught and produce the same StageTimeout event the housekeeping flow would produce. Housekeeping is the FAILSAFE for cases where in-process timeouts didn't fire: process killed, OOM, runner crash, the Prefect worker died mid-run.
+
+**Time-in-substage** is derived from the events table — the most recent `stage_changed` event for the workstream whose `stage` matches the current `runner_stage` is the entry timestamp. No `runner_stage_entered_at` schema column; the events table is the source of truth.
+
+**Workstream `runtime_status`** reflects timeout failures naturally via `last_run.status='failed'` (set by the in-process StageError handler in the runner, or by the housekeeping convention path when the runner is dead). Brief 99 Phase 1's `runtime_status` field reads from `last_run.status`, so a timed-out workstream surfaces as `failed` to UIs without any extra plumbing.
+
+**Story FSM stays put.** Timeout failures bubble up at the workstream level via `runtime_status`. The story's macro FSM does not transition on a workstream substage timeout; the operator decides whether to retry, reset, or abandon the workstream.
+
+**Auto-cancel beyond the orphaned-flow-run cancellation is future work.** The housekeeping convention cancels the Prefect flow run, but does not auto-rewind the workstream's macro FSM, free the worktree, or close the workstream. The operator drives the recovery decision via `wf run --retry`, `wf reset`, or `wf close`.
+
+### Operator Verbs
+
+Four canonical verbs (plus a future fifth):
+
+| Verb | Effect | When valid |
+|---|---|---|
+| **accept** | Forward FSM transition with current stage's output committed | Status is `blocked` or `idle` and a forward transition is defined for this stage |
+| **reject** | Additive transition (typically backward or sideways) carrying feedback as input to the next stage instance | Status is `blocked` or `idle` and a reject transition is defined; not valid at running stages |
+| **reset** | Destructive rewind to an earlier stage; discards work in current stage. Implies cancel-of-current if running. | Always valid (it's the universal interrupt) |
+| **retry** | Re-dispatch the current stage idempotently; no feedback added, no FSM transition | Only valid at status=`failed` |
+| **cancel** _(future)_ | Stop the runner without rewinding; status flips to `cancelled`, FSM stays at current stage | Only valid at status=`running` |
+
+#### Verb rules
+
+- **Running stages are one-way streams.** Only `reset` interrupts. `accept`, `reject`, `retry` are n/a while status=`running` — wait for the stage to halt naturally.
+- **`reject` doesn't apply to drafting/editing.** Those stages exit via `accept` (forward) or `reset` (rewind), not `reject`. Operators provide refinement feedback through edit cycles, not rejection.
+- **`merge_conflicts` has no `accept`.** Until conflicts are resolved (manually or via ai-resolve), there's nothing to accept. Resolution + `retry` proceeds with the merge.
+- **`retry` is operator-clarity sugar for `wf run`** when status=`failed`. Same effect, different operator hint ("transient retry, don't add new context") vs `wf run -f "..."` ("retry with feedback").
+- **`reset` = cancel + rewind**. Today it's the only way to stop a running flow. When `cancel` lands, the two operations separate.
+
+#### Verb → CLI mapping
+
+| Verb | Command | Status |
+|---|---|---|
+| accept | `wf accept <id>` | Future rename from `wf approve` |
+| reject | `wf reject <id> [feedback]` | Existing |
+| reset | `wf reset <id>` | Existing |
+| retry | `wf retry <id>` | Future addition |
+| cancel | `wf cancel <id>` | Future addition |
+
+CLI surface changes (rename, additions) require explicit sign-off per `CLAUDE.md`.
+
+### Recovery from Crashes
+
+When a process crashes mid-stage, the workstream lands at status=`orphaned` (runner_pid dead AND last_run incomplete). This is recognized state with documented recovery:
+
+- **`wf run <id>`** — re-dispatch in place. The runner picks up where it left off. The engine tolerates leftover staged changes and injects them as context for the next implement attempt; session resume is attempted; clean fallback exists.
+- **`wf reset <id>`** — rewind to an earlier stage, discard partial work.
+
+There is no "stuck" state — `orphaned` is recognized and recoverable. The previous concern that "the FSM gets stuck in `implementing` after abnormal exit" was a misframing: the FSM correctly preserves the phase, and `wf run` is the canonical resume.
+
+### Why this model
+
+The conceptual separation makes implicit invariants explicit:
+
+- **Phase ≠ liveness**: a workstream in `implementing` may or may not have a process attached. Today operators can't tell from the status field. The two-field model surfaces this directly.
+- **Recovery is uniform**: `wf run` from `orphaned`, `failed`, or `idle` all do the right thing because the engine reads stage as phase, not as "is something running."
+- **Operator verbs map cleanly**: each verb has a defined effect at each (stage, status) pair. The operator interface is a closed set, not implicit code behavior.
+- **Sub-FSMs formalize the runner inner loop**: the runner-stage progression is no longer a field that "happens to work" — it's a validated state machine with documented transitions.
+
+### Migration outline (post-v0.6.0)
+
+1. Rename current `state`/`status` field → `stage` (Go FSM JSON, Python `Workstream` dataclass, REST shapes, all callsites). _Pending — quiet-window work; biggest blast radius._
+2. Add `status` derived field to workstream serializer (Go) + Python lib mirror. **Shipped (Brief 99 Phase 1).** `ComputeRuntimeStatus` lives in `server/internal/api/runtime_status.go`; Python mirror at `orchestrator/lib/workstream_status.py`; cross-language contract test at `tests/test_workstream_status_contract.py`.
+3. Formalize sub-FSMs for `implementing`, `merge_conflicts`, `merging`, `provisioning` (one JSON per stage). **Implementing shipped (Brief 123 Phase 3.1).** Spec at `server/contracts/implementing_substages.json`; Go validator + Python mirror enforce the runner inner loop's transitions at the boundary. `merge_conflicts`, `merging`, `provisioning` remain pending future phases.
+4. Update TUI and CLI displays to render `(stage, status)` (and substage where applicable). **Shipped (Brief 99 Phase 1).** `wf show`, dashboard rows, and watch detail subtitle now render `<stage> / <runtime_status>` per the **Display convention** above.
+5. Fold `creation_failed` and `baseline_failed` into `provisioning` sub-status. **Shipped (Brief 114).** Both macro states were dropped from `server/contracts/workstream_fsm.json`; the `provision_failed`, `provision_baseline_failed`, and `retry_provision` triggers were removed (provisioning failure is now a field-only write to `provision_error` / `baseline_failures`); `override_baseline` now goes from `provisioning → active`. Migration `000018_fold_provisioning_failures` rewrites existing `creation_failed` / `baseline_failed` rows to `provisioning` so deployed databases carry over cleanly. `ComputeRuntimeStatus` reports `provisioning / failed` for both failure shapes; operator displays render that combined string.
+6. CLI verb additions (`wf accept`, `wf retry`, eventually `wf cancel`) — each requires sign-off per `CLAUDE.md`.
+
+Each step is its own brief / PR. Migration is scoped to non-shipping windows.
+
+---
+
 ## State Diagram
 
-Legend: [STATE] = FSM state, (stage) = pipeline stage (not persisted)
+Legend: [STATE] = FSM macro stage (the `stage` field per the **Workstream State Model** above). Substages (e.g. preflight, select, implement, test, review, qa_gate, commit inside `implementing`) are tracked separately and rendered alongside the macro stage in operator displays — not shown in this diagram.
 
 ```mermaid
 stateDiagram-v2
@@ -597,7 +899,7 @@ stateDiagram-v2
     final_review_with_concerns --> pr_open : wf pr create
 
     pr_open --> pr_approved : PR approved
-    pr_open --> active : wf reject -f (closes PR, fix commit)
+    pr_open --> active : wf reject (closes PR, fix commit)
     pr_open --> merge_conflicts : rebase_conflict
     pr_approved --> active : changes_requested
     pr_approved --> merging : wf merge
@@ -624,9 +926,9 @@ stateDiagram-v2
     note right of closed : wf close --no-changes -> closed_no_changes
 ```
 
-**Legend:** [STATE] = FSM state (persisted). Pipeline stages (implement, test, review) run within the `implementing` state and are not separate FSM states.
+**Legend:** [STATE] = FSM macro stage. Substages (implement, test, review, etc.) run within `implementing` and are tracked via the substage / sub-FSM model — they're persisted (via `runner_stage`) and surfaced alongside the macro stage in operator displays. See **Workstream State Model** above.
 
-**Terminal states:** `merged` (archived), `closed` (wf close), `closed_no_changes` (wf close --no-changes). `closed` can be reopened via `wf open`.
+**Terminal stages:** `merged` (archived), `closed` (wf close), `closed_no_changes` (wf close --no-changes). `closed` can be reopened via `wf open`.
 
 ### ready_to_merge vs final_review_with_concerns
 
@@ -652,7 +954,7 @@ Both states indicate all micro-commits are complete. The difference is the final
 
 ```mermaid
 stateDiagram-v2
-    [*] --> drafting : wf plan story / wf plan new
+    [*] --> drafting : wf plan story / suggestion-backed planning
     drafting --> draft : AI generation complete
     drafting --> draft_failed : AI generation failed
     draft_failed --> drafting : wf plan retry
@@ -667,9 +969,9 @@ stateDiagram-v2
     abandoned --> drafting : wf plan resurrect
 ```
 
-**States:**
+**Stages:**
 
-| State | Description | Editable |
+| Stage | Description | Editable |
 |-------|-------------|----------|
 | `drafting` | AI generating story (in progress) | No |
 | `draft_failed` | AI generation failed | No (retry with `wf plan retry`) |
@@ -705,7 +1007,7 @@ stateDiagram-v2
     in_progress --> done
 ```
 
-| State | Description |
+| Stage | Description |
 |-------|-------------|
 | `available` | Ready to be selected |
 | `planning` | Story creation in progress (15 min timeout) |
@@ -807,7 +1109,7 @@ Hashd uses two Prefect flows:
 | Flow | Purpose | Trigger |
 |------|---------|---------|
 | `workstream-flow` | Execute micro-commit loop | `wf run` |
-| `planning-flow` | Create story from suggestion | `wf plan new` (TUI) |
+| `planning-flow` | Create story from suggestion | Plan screen suggestion claim, `wf plan story`, or `wf plan bug` |
 
 Flows are submitted to a **worker pool** and execute asynchronously.
 Human gates use `suspend_flow_run()` to pause until input arrives via API.
@@ -942,17 +1244,19 @@ The merge command respects the forge's review settings:
 ## Modality Reference
 
 Each interface exposes the same workflow but with different interaction patterns.
-This section is the source of truth for what actions are available at each state.
+This section is the source of truth for what actions are available at each stage.
 
 ### Decision Points
 
-| State | CLI | TUI | Telegram |
+| Stage | CLI | TUI | Telegram |
 |-------|-----|-----|----------|
-| awaiting_human_review | `wf approve` / `wf reject [-f ".."]` | [a] Approve / [r] Reject | [Approve] [Reject] [Review] |
+| awaiting_human_review | `wf approve` / `wf reject [".."]` | [a] Approve / [r] Reject | [Approve] [Reject] [Review] |
 | ready_to_merge | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
 | final_review_with_concerns | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
-| pr_open | `wf reject -f ".."` | [r] Reject / [o] Open PR | [Open PR]* [Reject] [Review] |
-| pr_approved | `wf merge` / `wf reject -f ".."` | [a] Merge / [o] Open PR | [Open PR]* [Merge] [Review] |
+| pr_open | `wf reject ".."` | [r] Reject / [o] Open PR | [Open PR]* [Reject] [Review] |
+| pr_approved | `wf merge` / `wf reject ".."` | [a] Merge / [o] Open PR | [Open PR]* [Merge] [Review] |
+
+> CLI commands above reflect current command names. Per the **Workstream State Model**, `wf approve` is being renamed to `wf accept`; this table will update when the rename lands.
 
 Default is direct merge to main. Use `wf merge --pr -y` (CLI) or `[P]` (TUI) to create a PR instead.
 
@@ -973,9 +1277,9 @@ At decision points, each modality must surface the AI review findings:
 
 Per-commit stage reviews are **stable facts** about the code. The final review sees all stage reviews for the workstream across all runs -- they are never filtered by `run_id`. After a rejection and re-run, the original commit reviews (commit-1, commit-2, etc.) remain visible to the next final review alongside the new fix-commit reviews.
 
-The rejection path (`wf reject`) and plan path (`wf plan add`) pull the most recent final review via `parse_final_review_feedback()` (unscoped, `limit=1 ORDER BY created_at DESC`). The latest final review is always the one the user is reacting to.
+The rejection path (`wf reject`) and micro-commit planning path (`wf workstream add-commit`) pull the most recent final review via `parse_final_review_feedback()` (unscoped, `limit=1 ORDER BY created_at DESC`). The latest final review is always the one the user is reacting to.
 
-`run_final_review()` tags `save_review()` and `record_agent_call()` with the real `run_id` when called from the engine (falls back to a synthetic timestamp for ad-hoc `wf review`). This is for bookkeeping and traceability, not for read-side filtering.
+`run_final_review()` tags `save_review()` and `record_agent_call()` with the real `run_id` when called from the engine. This is for bookkeeping and traceability, not for read-side filtering.
 
 #### Two-Phase Review Context
 

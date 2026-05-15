@@ -6,7 +6,9 @@
 
 When you create a workstream (`wf run STORY-xxxx`), hashd runs the project's
 test suite against the fresh worktree (a clean checkout of main). If tests
-fail, the workstream is created in `baseline_failed` state instead of `active`.
+fail, the workstream stays in `provisioning` with `baseline_failures`
+populated (and `runtime_status` reports `provisioning / failed`) instead of
+advancing to `active`.
 
 This prevents agents from wasting cycles trying to "fix" pre-existing test
 failures that have nothing to do with their story.
@@ -95,7 +97,8 @@ The default is `true` (enabled).
 If `wf run` fails with a connection error:
 
 ```bash
-wf restart          # Restart all services including Prefect
+wf restart            # Restart all services including Prefect
+wf restart server -y  # Restart one component without orphan-process prompt
 ```
 
 ## Stale Flows
@@ -137,7 +140,7 @@ WARNING: Post-merge tests FAILED on main!
     task: Failed to run task "test": exit status 1
 ```
 
-New workstreams branching off main will hit `baseline_failed`.
+New workstreams branching off main will sit at `provisioning / failed` (with `baseline_failures` populated).
 
 ### How to fix with wf
 
@@ -148,8 +151,8 @@ Create a targeted bug story and let the agent fix it:
 wf plan bug "Fix broken main: remove duplicate migration" \
   -f "Delete migrations/073_users_google_id.sql -- it is an exact duplicate of 072_users_google_id.sql. The column already exists from 072. Only delete 073, do not touch 072. Do not create any new migrations."
 
-# 2. The workstream will hit baseline_failed (because main is broken).
-#    Override it -- the agent's job is to fix the broken tests.
+# 2. The workstream will sit at provisioning / failed (because main is broken).
+#    Override the baseline gate -- the agent's job is to fix the broken tests.
 wf run <ws_id> --run-anyway
 
 # 3. The agent deletes the duplicate, tests pass, merge gate passes.
@@ -181,3 +184,95 @@ wf agents           # Show configured agents and their status
 ```
 
 See README.md for installation instructions.
+
+---
+
+## Workspace Hook Failures
+
+See `docs/HOOKS.md` for the full hooks reference. Common failure modes:
+
+### Setup hook timed out
+
+The workstream stays at `provisioning` with `provision_error` populated (`runtime_status: provisioning / failed`); the diagnostic looks like:
+
+```
+Hook exceeded timeout of 300s and was killed.
+  Command: npm ci
+  Last output:
+    ...
+  Fix: increase hooks.timeout_seconds in config.yaml, or simplify the hook.
+```
+
+**How to fix:**
+
+1. Increase the timeout in your project's `config.yaml`:
+   ```yaml
+   hooks:
+     timeout_seconds: 900
+   ```
+2. Re-run the workstream. Provisioning is idempotent and picks up from the
+   failed step:
+   ```bash
+   wf run <ws_id>
+   ```
+
+Alternatively, simplify the hook -- prefer `npm ci` over `npm install`,
+break an all-in-one setup script into smaller hooks, or move slow work out
+of the hook entirely (e.g., pre-warm caches with a connector).
+
+### Setup hook failed (non-zero exit)
+
+```
+Hook failed: exit status 1
+  Command: cp ../.env .env
+  Output:
+    cp: cannot stat '../.env': No such file or directory
+```
+
+**How to fix:** read the output tail to find the root cause. Typical issues:
+
+- **Path assumptions.** Hooks run in the worktree (`$HASHD_WORKTREE_PATH`),
+  not the project root. Use absolute paths or paths rooted at the worktree.
+- **Missing tool on PATH.** Hooks inherit the parent's environment, so the
+  tool must be on the PATH that started the hashd server. Try
+  `which <tool>` from the same shell that runs `wf`.
+- **Partial success.** If a multi-step hook fails halfway, add
+  `set -euo pipefail` at the top so later steps don't run on garbage state.
+
+After fixing the underlying issue, re-run `wf run <ws_id>`.
+
+### Teardown hook failed (but worktree was removed anyway)
+
+Teardown failures never block cleanup. You'll see a `Warning:` line in the
+CLI output and a log entry, but the worktree is already gone.
+
+If the failure left behind orphaned resources (dangling containers, leaked
+volumes, etc.), clean them up manually. Prevention: make teardown idempotent
+and defensive -- e.g., `docker-compose ... down || true`.
+
+### Testing a hook before deploying
+
+Run the command the same way the server will, with the HASHD_* vars set:
+
+```bash
+cd /path/to/your/worktree
+HASHD_PROJECT_NAME=myproject \
+HASHD_WORKSTREAM_ID=ws_test \
+HASHD_WORKTREE_PATH=$PWD \
+HASHD_BASE_BRANCH=main \
+bash -c 'YOUR HOOK COMMAND HERE'
+```
+
+Add `-x` (`bash -x -c ...`) to trace each expanded command.
+
+### "Server unavailable for setup hook -- skipping"
+
+The Prefect flow couldn't reach the Go server. The workstream provisions
+without running the hook and logs a warning. This is intentional (Prefect
+workers shouldn't be coupled to server uptime), but it means the hook's
+side effects won't happen.
+
+**How to fix:**
+- Check the server is up: `curl http://127.0.0.1:1337/health`
+- If running remotely, verify `HASHD_SERVER_URL` is set
+- Re-run the workstream once the server is reachable

@@ -1,5 +1,35 @@
 # Agent Management
 
+## Agent-driven Project Add
+
+For scripted onboarding, agents should treat `wf project add` as a two-step flow:
+
+```bash
+wf project add /path/to/repo --no-interview --suggest
+wf project add /path/to/repo --no-interview
+```
+
+The first command runs investigation only. It prints the canonical settings block, stores those proposed settings in the project-add cache, and exits without modifying project state.
+
+The second command reuses the stored defaults, applies any explicit flag overrides, prints the same canonical settings block again, and then executes project add.
+
+Use explicit flags on the second command when the proposal needs correction, for example:
+
+```bash
+wf project add /path/to/repo --no-interview \
+  --description "Payments API" \
+  --git-name "Alice" \
+  --git-email "alice@example.com"
+```
+
+Interactive operators can still use:
+
+```bash
+wf project add /path/to/repo --suggest
+```
+
+That runs the same investigation, stores the defaults, and then opens the wizard with AI-prefilled values.
+
 ## Switching Agents
 
 ### See what's installed
@@ -22,7 +52,9 @@ wf project config set stage.breakdown gemini
 wf project config set stage.review claude
 ```
 
-Validation prevents incompatible assignments (e.g., codex has no `print` shape, so it can't do planning stages).
+Validation prevents incompatible assignments (e.g., an agent without `review_resume` cannot serve the review resume stage).
+
+Assignments are validated against the agent registry before they are saved.
 
 Agents with `available` status (not yet verified with hashd) require `--force`:
 
@@ -40,7 +72,7 @@ wf project config set planner gemini --force
 wf project config set coder claude
 ```
 
-Stages whose shape the agent doesn't support are skipped with a warning.
+If an agent does not support the required stage shapes, the assignment is rejected.
 
 ### Stage reference
 
@@ -69,7 +101,7 @@ Which agents can serve which stage shapes (`wf agents` shows this live):
 | Agent | print | json | edit | review | review_resume | implement | implement_resume |
 |-------|-------|------|------|--------|---------------|-----------|-----------------|
 | claude | x | x | x | x | x | x | x |
-| codex | -- | -- | -- | -- | -- | x | x |
+| codex | x | x | x | x | x | x | x |
 | gemini | x | x | x | x | x | x | x |
 | opencode | x | x | -- | -- | -- | x | -- |
 | kimi | x | x | x | -- | -- | x | -- |
@@ -102,7 +134,7 @@ This preserves identity and build settings (name, repo_path, test_cmd, etc.) but
 
 ### Direct config editing
 
-All stage overrides can also be set by editing `config.yaml` directly. See `config.sample.yaml` in the repo root for all available settings with commented-out examples, including common recipes like using Claude for implementation or switching models.
+All stage overrides can also be set by editing `config.yaml` directly. See `../config.sample.yaml` in the repo root for all available settings with commented-out examples, including common recipes like using Claude for implementation or switching models.
 
 ---
 

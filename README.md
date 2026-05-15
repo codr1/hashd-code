@@ -2,81 +2,31 @@
 
 (حشد = Arabic for "crowd")
 
-Hashd coordinates a fleet of AI coding agents working in parallel across
-the full development lifecycle - planning, implementing, testing, and
-reviewing. Code context graphs, structured quality gates, and configurable
-autonomy keep accuracy high and minimize token burn as throughput scales.
+Hashd is an orchestration system for AI coding agents. It plans the work, runs agents in isolated worktrees, grounds them in verified code structure, gates each change through review, and records the full lineage of every commit.
 
-10x token burn reduction in code exploration. 10x developer throughput.
-15%+ accuracy improvement through better context management.
+**10x developer throughput. 10x fewer tokens spent on exploration. 15%+ accuracy improvement from grounded context.**
+
+AI coding agents are powerful but unaccountable. They generate code without explaining why, re-discover the codebase on every run, and make decisions you can't trace later. Hashd adds the structure that makes AI-generated code trustworthy enough to ship -- and fast enough to change how much you ship in a day.
+
+## Install
+
+To install, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
 - [QUICKSTART.md](docs/QUICKSTART.md) - Installation, first project setup, basic workflows
-- [AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
+- [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
 - [WF.md](docs/WF.md) - Full lifecycle documentation, state machines, merge behavior
 
-```mermaid
-graph TB
-    subgraph Planning
-        D[Discovery] --> S[Stories]
-        S --> B[Breakdown]
-    end
+## What hashd does
 
-    subgraph Execution
-        B --> I[Implement]
-        I --> T[Test]
-        T --> R[Review]
-        R --> G{Gate}
-    end
+**Plans the work.** Stories, suggestions, and workstreams are first-class entities with state machines. A story flows from drafting through review to acceptance; a workstream loops through breakdown, implement, test, review, and human gate for each micro-commit. You always know what stage a piece of work is in and what comes next.
 
-    G -->|approve| C[Commit]
-    G -->|reject| I
-    C --> M{More?}
-    M -->|yes| I
-    M -->|no| F[Final Review]
-    F --> Merge
-```
+**Grounds the agents.** Agents query a pre-computed Context Graph instead of re-discovering the codebase on every run. AST structure, dependency edges, and project knowledge are extracted once and made available to every agent in every workstream. Published research on systems like Aider shows tool-based exploration consumes 54-70% of the context window for orientation alone; pre-computed structural maps reduce this to 4-6%. That's a 10-15x reduction in tokens spent discovering what static analysis already knows -- and a corresponding reduction in cost, latency, hallucinated file paths, and first-pass review failures.
 
-## Overview
-
-Hashd orchestrates the entire development lifecycle:
-
-| Phase | Agent | What Happens |
-|-------|-------|--------------|
-| **Plan** | Claude (PM) | Analyzes REQS.md, proposes stories, generates acceptance criteria |
-| **Breakdown** | Claude (Architect) | Decomposes stories into micro-commits with implementation guidance |
-| **Implement** | Configurable | Writes code in isolated worktree |
-| **Test** | Automated | Runs test suite, validates artifacts |
-| **Review** | Claude (Staff Engineer) | Structured review with approve/block/request-changes |
-| **QA Gate** | Validation | Confirms test + review artifacts before commit |
-| **Human UAT** | You | Approve, reject with feedback, or reset entirely |
-| **Merge Gate** | Claude + Tests | Full suite + rebase check; AI generates fixes if needed |
-| **Final Review** | Claude | Holistic branch review before merge |
-
-Gate behavior is configurable per autonomy mode. The clarification queue can block workstreams until answered, and every run produces auditable artifacts in `runs/`.
-
-## Human-in-the-Loop
-
-- **Pair Programmer Chat** - Call in an AI architect anytime with `wf chat` or press `C` in the TUI; full story, diff, and log context with persistent conversation history. Chat can propose story edits (criteria, title, problem, non-goals) and run read-only commands -- each action requires y/n confirmation
-- **Clarification Queue** - Agents raise questions; workstream blocks until you answer (`wf clarify`)
-- **Approve/Reject/Reset** - Accept changes, iterate with feedback, or discard entirely
-- **Interactive TUI** - `wf watch` for real-time monitoring of workstreams and stories with keyboard shortcuts
-- **Telegram Bot** - Full mobile workflow management: inspect, execute, gate, plan, and search (see [Telegram Bot](#telegram-bot))
-- **Three interfaces** - CLI for power users and LLMs, TUI for terminal productivity, Telegram for mobile
-- **Desktop Notifications** - Get alerted when workstreams need attention
-- **Parallel Workstreams** - Run multiple features simultaneously in isolated worktrees
-- **Conflict Detection** - `wf conflicts` warns about overlapping file changes
-
-## Full Lineage Tracing
-
-Every piece of AI-generated code in hashd is traceable back to the requirement that motivated it. The run transcript links each agent conversation -- prompts sent, responses received, review decisions -- to the git commit it produced. Workstreams carry a machine-readable `STORY_ID` linking them to their originating story.
-
-Point at any file and reconstruct its full history: which commits shaped it, which stories drove those commits, what the AI reviewers said, what the humans decided, and what clarifications were resolved along the way. The git commit graph is the backbone; hashd's structured artifacts provide the context.
-
-Every agent -- from planning through review, breakdown, fix generation, and conflict resolution -- receives the project description as system context, so it understands *what the system is for* before reasoning about it.
+**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `wf lineage <file|sha|STORY-xxx>` reconstructs the chain. `wf lineage export --attestation-format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `wf lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
 
 ```
 file -> git log -> commit message (COMMIT-XX-NNN)
@@ -85,19 +35,33 @@ file -> git log -> commit message (COMMIT-XX-NNN)
 ```
 
 
-## Context Graph
+**Runs in parallel, safely.** Multiple workstreams execute against the same project concurrently. Each gets its own git worktree and per-workstream lock. `wf conflicts` warns when workstreams touch overlapping files. The FSM serializes per-workstream operations so concurrent runs don't corrupt shared state. With grounded agents and parallel execution working together, hashd users routinely ship 10x more debugged code per day than they would driving an agent by hand.
 
-LLM agents spend the majority of their context window *discovering* what static analysis already knows. Empirical measurements across production codebases show that agentic exploration (iterative grep/read cycles) consumes 54-70% of the available context window for orientation alone, leaving a fraction for the actual task.
+**Works with any agent.** Use Claude Code, Codex, Copilot, Gemini, OpenCode, Kimi, or Qwen -- any combination, any stage. Stages declare their required invocation shape; any agent that supports the shape can fill the slot. You're not locked to one vendor.
 
-The Context Graph eliminates this cost by pre-computing structural and relational knowledge about the codebase and project history.
+**Spans multiple repositories.** A single project can include a backend repo, a frontend repo, and an infra repo. Planning happens at the project level; execution happens in the right repo automatically.
+
+**Multiple interfaces.** A TUI (`wf watch`) for real-time monitoring with status-adaptive keybindings, a CLI for power users and scripting, and a Telegram bot for mobile workflow management.
+
+**Keeps you in the loop where it matters.** Three autonomy modes -- supervised, gatekeeper, and autonomous -- with confidence-threshold gating. A clarification queue holds work until you answer agent questions. Structured approve and reject flows.
+
+## What's coming
+
+**Team server.** A multi-user team server is in active development. It will let engineering teams coordinate humans and agent fleets on the same project -- shared workstream registry, multi-user gates, attestations exported per merge.
+
+**Web dashboard.** A browser-based interface for monitoring and controlling workstreams.
+
+**Desktop app.** A native Electron client for users who prefer a windowed UI over the terminal.
+
+## Context Graph: Three Layers
+
+The Context Graph that grounds the agents (above) is built in three layers:
 
 **Layer 1: Structural analysis.** AST parsing extracts a deterministic map of the codebase -- modules, classes, functions, and their signatures -- with zero LLM calls. Every symbol is verified to exist; every relationship is a real reference, not a retrieval approximation. This is *grounding* in the formal sense: constraining generation with verified facts.
 
 **Layer 2: Dependency edges.** Import graphs, call sites, and type references promote the structural tree into a full graph. When an agent needs to modify a function, the graph answers "what depends on this?" in constant time rather than O(n) tool-call rounds.
 
 **Layer 3: Project knowledge.** Full-text search over project artifacts -- stories, review decisions, clarifications, conversation history -- connects code nodes to the business decisions that motivated them. The graph becomes heterogeneous: code structure and project intent in a single queryable system.
-
-**The result:** Agents that receive a Context Graph summary use 4-6% of the context window for structural awareness -- a 10-15x reduction compared to agentic exploration. Fewer tool calls, shorter prompts, more grounded output, lower cost per operation.
 
 
 
@@ -106,11 +70,14 @@ The Context Graph eliminates this cost by pre-computing structural and relationa
 Install shell completion for your shell:
 
 ```bash
+# Bash (managed automatically by setup.sh and dist/install.sh)
+source <(wf completion bash)
+
 # Zsh
-wf --completion zsh >> ~/.zshrc
+wf completion zsh >> ~/.zshrc
 
 # Fish
-wf --completion fish > ~/.config/fish/completions/wf.fish
+wf completion fish > ~/.config/fish/completions/wf.fish
 ```
 
 Examples:
@@ -266,18 +233,17 @@ Directives are automatically included in implementation prompts.
 |---------|-------------|
 | `wf plan` | Plan stories from REQS.md (saves suggestions) |
 | `wf plan list` | View current suggestions |
-| `wf plan new <id_or_name>` | Create story from suggestion (by number or name match) |
 | `wf plan story "title"` | Quick feature story (skips REQS discovery) |
 | `wf plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
 | `wf plan clone STORY-xxx` | Clone a locked story to edit |
 | `wf plan edit STORY-xxx` | Edit existing story (if unlocked) |
-| `wf run <id> [name]` | Run workstream or create from story |
+| `wf run [id]` | Run workstream or create from story |
 | `wf list` | List all stories and workstreams |
 | `wf show <id>` | Show story or workstream details |
 | `wf approve <id>` | Accept story or approve workstream gate |
-| `wf pr <ws>` | Create PR/MR on forge (for external review) |
+| `wf pr create [id]` | Create PR/MR on forge (for external review) |
 | `wf pr feedback <ws>` | View PR/MR review comments |
-| `wf merge <ws> [--pr]` | Merge to main (--pr: via forge PR instead of direct merge) |
+| `wf merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge) |
 | `wf close <id>` | Close story or workstream (abandon) |
 | `wf watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx) |
 
@@ -335,11 +301,11 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf run [id] --yes` | Skip confirmation prompts |
 | `wf run [id] --verbose` | Show implement/review exchange |
 | `wf log [id]` | Show workstream timeline |
-| `wf review [id]` | Final AI review before merge |
+| `wf review [id]` | Show latest saved final review |
 | `wf lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
 | `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> --attestation-format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
 | `wf lineage verify` | Validate commit hash chain integrity |
-| `wf reject [id] -f "..."` | Reject with feedback (context-aware) |
+| `wf reject [id] "..."` | Reject with feedback (context-aware) |
 | `wf reject [id] --reset` | Discard changes, start fresh (human gate only) |
 | `wf diff [id]` | Show workstream diff |
 | `wf skip [id]` | Mark commit as done without changes |
@@ -349,7 +315,9 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf archive work` | List archived workstreams |
 | `wf archive stories` | List archived stories |
 | `wf open <id>` | Resurrect archived workstream |
-| `wf clarify` | Manage clarification requests |
+| `wf answer list` | List entities with pending clarifications |
+| `wf answer show <entity>` | Show pending questions for a story or workstream |
+| `wf answer <entity> "<text>"` | Bundle-answer pending clarifications and dispatch the next agent run |
 | `wf directives` | View/edit project directives |
 | `wf workstream add-commit <ws> "title"` | Add AI-generated micro-commit to plan |
 | `wf workstream edit-commit <ws> <id>` | Edit a micro-commit's title/description |
@@ -362,16 +330,32 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 
 | Command | Description |
 |---------|-------------|
-| `wf project add <path>` | Register a new project (runs interactive setup) |
-| `wf project add <path> --no-interview` | Quick register without interactive setup |
+| `wf project add <path>` | Register a new project (wizard by default; investigate-then-execute also supported) |
+| `wf project add <path> --no-interview` | Register a new project without prompts, using stored defaults or explicit overrides |
 | `wf project list` | List registered projects |
-| `wf project use <name>` | Set active project context |
+| `wf project use [name] [--clear]` | Set/show/clear current project context |
 | `wf project show` | Show current project configuration |
 | `wf project interview` | Reconfigure project (build/test commands, merge mode, autonomy) |
-| `wf project remove <name>` | Remove a project |
+| `wf project remove <name> -y` | Remove a project without confirmation prompt |
 | `wf project config set <key> <value>` | Set config value |
 | `wf project describe` | Show current project description |
-| `wf project describe --suggest` | AI-generate a description suggestion |
+| `wf project describe --suggest` | AI-generate and save a description suggestion |
+| `wf project tech` | Show current project tech stack |
+| `wf project tech --suggest` | AI-analyze and save a tech stack suggestion |
+| `wf project repo list [--json]` | List repos registered under the current project |
+| `wf project repo show <name> [--json]` | Show one registered repo |
+| `wf project repo add <path> --status <status>` | Add a repo to the current project |
+| `wf project repo set-status <name> <status>` | Reclassify a repo as primary, active, reference, or ignore |
+| `wf project repo set-path <name> <new-path>` | Update a repo's relative path within the project |
+| `wf project repo edit <name> ...` | Update per-repo commands and metadata |
+| `wf project repo remove <name>` | Soft-delete a repo entry (status=`ignore`) |
+| `wf project repo prune` | Hard-delete ignored repos whose paths no longer exist |
+
+`wf project describe --suggest` and `wf project tech --suggest` persist the AI result to
+`config.yaml` by default. Use `--no-save` for a dry run, or `-y` to skip the interactive
+save prompt. `wf project show`, `wf project describe`, `wf project tech`, and
+`wf project list` warn when saved AI-generated metadata may be stale relative to the
+current `reqs_path` or fallback source files.
 
 ### Observability Commands
 
@@ -383,8 +367,8 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf prompts edit <name>` | Edit prompt override |
 | `wf agents` | Show installed AI agents and stage assignments |
 | `wf doctor` | Validate setup and diagnose issues |
-| `wf restart` | Restart infrastructure (Prefect, ZMQ, messengers) |
-| `wf search <query>` | Full-text search across stories, events, reviews, chat |
+| `wf restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
+| `wf search <query> [--kind kind] [-n limit]` | Full-text search across stories, events, reviews, chat (default limit: 20) |
 
 ### Smart ID Routing
 
@@ -413,8 +397,8 @@ The `wf reject` command adapts its behavior based on workstream state:
 When status is `awaiting_human_review` (mid-micro-commit):
 
 ```bash
-wf reject my_feature -f "Fix the null check"    # Iterate with feedback
-wf reject my_feature --reset                     # Discard, start fresh
+wf reject my_feature "Fix the null check"       # Iterate with feedback
+wf reject my_feature --reset                    # Discard, start fresh
 ```
 
 This writes a rejection file and continues the run loop.
@@ -424,8 +408,8 @@ This writes a rejection file and continues the run loop.
 When all micro-commits are done (pre-merge):
 
 ```bash
-wf reject my_feature                             # Uses final review concerns
-wf reject my_feature -f "Also fix the tests"     # Add guidance
+wf reject my_feature "address review concerns"     # Any non-empty feedback; server appends review concerns automatically
+wf reject my_feature "also fix the tests"          # Add explicit guidance alongside the auto-included review concerns
 ```
 
 This:
@@ -440,11 +424,11 @@ When a PR exists:
 
 ```bash
 wf pr feedback my_feature                        # View PR comments
-wf reject my_feature -f "Fix the null check"     # Create fix commit
+wf reject my_feature "Fix the null check"        # Create fix commit
 ```
 
 For PR states (`pr_open`, `pr_approved`):
-- `-f` flag is **required** (no auto-fetch)
+- feedback text is **required** (positional, no auto-fetch)
 - Use `wf pr feedback` to view comments first
 - In `wf watch`, the `[r]` modal pre-fills with PR feedback for editing
 
@@ -479,49 +463,24 @@ Prefect automatically retries transient failures:
 
 See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
-- Python 3.11+, Node.js 18+, Git
-- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea) (Gitea)
+- Python 3.11+, Node.js 20+, Git
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://bitbucket.org/) (Bitbucket)
 - [delta (git-delta)](https://github.com/dandavison/delta) - for syntax-highlighted diffs
+- [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
 
+Minimum agent/tool versions verified for this release:
+
+| Tool | Minimum |
+|------|---------|
+| Claude Code | 2.1.137 |
+| Codex CLI | 0.130.0 |
+| uv | 0.11+ |
+| Go | 1.26+ |
+| .NET SDK | 8.0+ (only for .NET projects) |
+
 Run `wf doctor` to check your setup.
-
-### Forge Support
-
-HashD supports PR workflows on GitHub, GitLab, Bitbucket, and Gitea. `wf doctor`
-checks the CLI and authentication for the configured or auto-detected forge:
-
-| Forge | CLI | Auth command | Notes |
-| --- | --- | --- | --- |
-| GitHub | `gh` | `gh auth login` | Auto-detected from `github.com` remotes |
-| GitLab | `glab` | `glab auth login` | Auto-detected from `gitlab.com` remotes |
-| Bitbucket | `bkt` | `bkt auth login` | Auto-detected from `bitbucket.org` remotes |
-| Gitea | `tea` | `tea login add --url <gitea-url> --token <token>` | Auto-detected from `gitea.com`; self-hosted instances should set `forge: gitea` |
-
-Bitbucket setup uses the `bkt` CLI. Repository creation uses `bkt repo create`
-and relies on the active `bkt` context for Bitbucket Data Center project or
-Bitbucket Cloud workspace defaults. For Cloud, passing `workspace/repo` to
-`wf project add --create --host bitbucket --name ...` maps to `--workspace`.
-
-Gitea support uses the `tea` CLI and mirrors the same HashD PR workflow used by
-the other forges: create, find existing, inspect status, fetch feedback, close,
-and merge PRs.
-
-Gitea caveats:
-
-- Self-hosted Gitea cannot be reliably auto-detected from arbitrary remote
-  domains. Set `forge: gitea` in `config.yaml`.
-- `wf doctor` validates `tea` with `tea --version` and `tea login list
-  --output json`; configure a login first with `tea login add`.
-- CI/check status is not reported by the Tea pull detail/list output HashD uses.
-  Rely on Gitea branch protection or a future explicit status integration to
-  enforce checks before merge.
-- Review decision is inferred from Gitea pull reviews. `APPROVED`,
-  `CHANGES_REQUESTED`, and `REVIEW_REQUIRED` are normalized for HashD, but
-  exact review policy enforcement remains Gitea-side.
-- Gitea instances do not share one universal noreply email format, so HashD
-  does not synthesize one.
 
 
 ## Configuration
@@ -538,12 +497,12 @@ default_branch: "main"
 reqs_path: "REQS.md"
 
 # --- Build & Test ---
-test_cmd: "make test"
+test_cmd: "make test"            # impl-phase tests; falls through to merge_gate_test_cmd if empty
 build_cmd: ""
-merge_gate_test_cmd: "make test"
+merge_gate_test_cmd: "make test" # merge-time tests; the visible failure surface
 test_timeout: 300
 merge_mode: "local"              # "local" or "pr"
-forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea"
+forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab"
 
 # --- Autonomy ---
 autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
@@ -557,11 +516,62 @@ autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
 ```
 
 Run `wf doctor --show-defaults` to see all available settings and their default values.
-Run `wf doctor --reset-to-defaults` to strip overrides and restore defaults.
+Run `wf doctor --reset-to-defaults` to strip behavioral overrides and restore defaults while preserving identity and build settings.
+
+### Test Command Configuration
+
+Each project (or each repo, in multi-repo mode) has two test command fields:
+
+- `test_cmd` — runs during implementation, after each commit. Provides per-commit feedback so agents catch regressions early.
+- `merge_gate_test_cmd` — runs at merge time, before changes land. Final validation.
+
+For most projects, set them to the same command. The CLI defaults `test_cmd` to **fall through to `merge_gate_test_cmd`** when unset, so configuring just the merge gate is sufficient for "run the same tests at both gates" semantics. `wf project show` renders this as `Test command: (falls through to merge gate test)` so the implication is visible.
+
+Set `test_cmd` explicitly only when you want a faster subset for per-commit feedback (e.g. `test_cmd: "pytest -m fast"` and `merge_gate_test_cmd: "pytest"` for fast-vs-full split).
+
+Set `tests_skipped: true` to acknowledge that no test command is configured. This affects merge-gate enforcement (the gate proceeds with an encouragement event rather than hard-failing). Note: today this flag does **not** suppress the impl-phase test stage — that path is gated only by the effective command being empty. If you want no impl-phase tests, leave both fields empty; the impl-phase will skip silently.
+
+Configure with:
+
+```bash
+wf project repo edit <repo-name> --test-cmd "..." --merge-gate-test-cmd "..."
+```
+
+### Workspace Hooks
+
+Setup and teardown commands run automatically during workstream lifecycle:
+
+```yaml
+hooks:
+  setup: "npm install && cp ../.env .env"
+  teardown: "docker-compose -p hashd-${HASHD_WORKSTREAM_ID} down"
+  timeout_seconds: 600               # default: 300 (5 min)
+```
+
+- **setup** runs in the worktree after creation, before baseline tests. Failure records `provision_error` and keeps the workstream at `provisioning`; `runtime_status` reports `provisioning / failed`. Retry by re-dispatching with `wf run` (the next provisioning attempt clears `provision_error` on success).
+- **teardown** runs in the worktree before removal (close, merge, workstream remove). Failure is logged but doesn't block cleanup.
+- **timeout_seconds** applies to both hooks. Hooks killed after the timeout get an actionable diagnostic pointing at the config key.
+
+Hook subprocesses inherit the full parent environment plus these HASHD_* context variables:
+
+| Variable | Description |
+|----------|-------------|
+| `HASHD_PROJECT_NAME` | Project name |
+| `HASHD_WORKSTREAM_ID` | Workstream identifier |
+| `HASHD_STORY_ID` | Story ID (e.g., STORY-0042) |
+| `HASHD_WORKTREE_PATH` | Path to git worktree |
+| `HASHD_BASE_BRANCH` | Default branch (e.g., main) |
+
+See **[docs/HOOKS.md](docs/HOOKS.md)** for the full reference -- lifecycle details, more examples, the REST call flow, and troubleshooting recipes are in **[docs/TROUBLESHOOTING.md#workspace-hook-failures](docs/TROUBLESHOOTING.md#workspace-hook-failures)**.
 
 ### Multi-Repo Projects
 
 hashd supports projects that span multiple git repositories (e.g., a Go backend + React frontend in separate repos). The principle: **project-level planning, repo-level execution**.
+
+**Supported shapes:**
+- Single repo: one Git repo, including monorepos for now.
+- Multi-repo container: a non-repo directory containing child Git repos; `wf project add` can initialize a local-only control repo at the container root.
+- Superproject: a parent Git repo with submodules; treated as a multi-repo variant.
 
 **Directory layout:**
 
@@ -576,23 +586,11 @@ platform/              # project root (git repo, may be local-only)
     package.json
 ```
 
-**Setup:** `wf project add /path/to/platform` auto-detects sub-repos and prompts for multi-repo setup. Use `--no-interview` for fully automatic detection. Each sub-repo gets its own test command, build command, merge mode, and default branch.
+**Setup:** `wf project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `wf project add /path --no-interview --suggest` followed by `wf project add /path --no-interview`; see [QUICKSTART.md](docs/QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
 
-**Config:** The `repos` section in config.yaml defines sub-repos. See `config.sample.yaml` for the full format:
+**Config:** project-level settings live in `config.yaml`; per-repo state for multi-repo projects lives in SQLite `project_repos`, not in a `repos:` block in YAML.
 
-```yaml
-repos:
-  - name: backend
-    path: ./backend
-    description: "Go API server"
-    test_cmd: "go test ./..."
-    merge_mode: pr
-  - name: frontend
-    path: ./frontend
-    description: "React SPA"
-    test_cmd: "npm test"
-    merge_mode: local
-```
+**Repo management after setup:** use `wf project repo list`, `wf project repo show <name>`, `wf project repo add <path> --status <status>`, `wf project repo set-status <name> <status>`, `wf project repo edit <name> ...`, `wf project repo set-path <name> <new-path>`, `wf project repo remove <name>`, and `wf project repo prune`.
 
 **How it works:**
 - During planning, stories are automatically routed to the correct repo based on content
@@ -748,7 +746,7 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 | Agent | Binary | Status | Shapes | Install | Auth |
 |-------|--------|--------|--------|---------|------|
 | **Claude Code** | `claude` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @anthropic-ai/claude-code` | Anthropic API key |
-| **Codex** | `codex` | active | implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
+| **Codex** | `codex` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
 | **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
 | **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
 | **OpenCode** | `opencode` | available | print, json, implement | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
@@ -815,7 +813,7 @@ To fix this, either:
      ...
 ```
 
-See **[AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md)** for agent switching, prompt management, and per-project overrides.
+See **[docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md)** for agent switching, prompt management, and per-project overrides.
 
 ## Local-Only Mode
 
