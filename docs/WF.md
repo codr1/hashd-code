@@ -958,8 +958,11 @@ stateDiagram-v2
     drafting --> draft : AI generation complete
     drafting --> draft_failed : AI generation failed
     draft_failed --> drafting : wf plan retry
+    draft_failed --> editing : wf plan edit
+    draft_failed --> abandoned : wf close
     draft --> editing : wf plan edit
     editing --> draft : AI edit complete
+    editing --> draft_failed : AI edit refused
     editing --> draft : timeout 15 min
     draft --> accepted : wf approve
     accepted --> implementing : wf run (LOCKS story)
@@ -974,7 +977,7 @@ stateDiagram-v2
 | Stage | Description | Editable |
 |-------|-------------|----------|
 | `drafting` | AI generating story (in progress) | No |
-| `draft_failed` | AI generation failed | No (retry with `wf plan retry`) |
+| `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `wf plan edit`; retry with `wf plan retry`) |
 | `draft` | Generated, awaiting approval | Yes |
 | `editing` | AI edit in progress (auto-reverts after 15 min) | No |
 | `accepted` | Ready for implementation | Yes |
