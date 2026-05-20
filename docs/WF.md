@@ -362,6 +362,9 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf docs [id]` | Update SPEC.md from workstream |
 | `wf refresh [id]` | Refresh touched files |
 | `wf conflicts [id]` | Check file conflicts |
+| `wf release prepare <version>` | Tag `origin/dev` as a release staging cut point |
+| `wf release execute <version> [--resume]` | Merge a staging tag to `main`, regenerate artifacts, and run `scripts/release.sh` |
+| `wf release status` | List in-flight `release-staging-*` tags |
 
 ### Question & Answer Commands
 
@@ -453,6 +456,20 @@ answer; the run itself is already in flight.
 | `wf prompts reset <name>` | Reset prompt to default |
 | `wf prompts diff <name>` | Show diff from default |
 | `wf completion [bash\|zsh\|fish]` | Generate shell completion |
+
+---
+
+## Release Cuts
+
+Release cuts use an explicit prepare/execute boundary so `dev` can keep moving without changing the in-flight release.
+
+1. `wf release prepare <version>` runs from local `main`. It requires a clean tree, local `main` at `origin/main`, `origin/dev` as a strict superset of `origin/main`, and green CI on `origin/dev` HEAD. It then pushes `release-staging-<version>` at the selected `dev` SHA and prints the PRs included since the previous release tag.
+2. Agents should run `wf release status` before merging during a release window. If a `release-staging-*` tag exists, work merged after that tag belongs to the next release unless the operator rolls the staging tag deliberately.
+3. `wf release execute <version>` runs from local `main`. It merges `release-staging-<version>` into `main`, runs `task generate` from `server/`, amends generated artifacts into the merge commit when needed, pushes `main`, invokes `scripts/release.sh <version>`, logs to `~/.hashd/release-logs/<version>.log`, and verifies the public release artifacts.
+4. On merge conflict, the command stops and prints the conflicted files. Resolve manually, then run `wf release execute --resume <version>`. Release tooling does not auto-resolve conflicts.
+5. `wf release prepare --yes <version>` intentionally proceeds while open PRs still target `dev`. Use it only when the operator has decided those PRs are excluded from the cut.
+
+A future `wf release cut <version>` may combine prepare and execute for low-risk cuts. Until then, keep the boundary explicit.
 
 ---
 

@@ -6,7 +6,7 @@
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-The installer handles Python virtual environment setup and puts `wf` on your PATH.
+The installer handles Python virtual environment setup, puts `wf` on your PATH, and starts the local hashd services.
 
 ### Requirements
 

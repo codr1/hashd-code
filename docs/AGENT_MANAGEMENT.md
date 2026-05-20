@@ -262,7 +262,7 @@ Prompts are loaded and rendered by `orchestrator/lib/prompts.py`:
 
 ```python
 from orchestrator.lib.prompts import render_prompt
-prompt = render_prompt('review', commit_title='Add auth', diff='...')
+prompt = render_prompt('review_contextual', commit_title='Add auth', diff='...')
 ```
 
 ### Prompt-to-stage mapping
@@ -282,10 +282,10 @@ prompt = render_prompt('review', commit_title='Add auth', diff='...')
 
 | Prompt | Used by | Purpose |
 |--------|---------|---------|
-| `review.md` | review | Per-commit code review (JSON output) |
 | `review_contextual.md` | review | Context-aware review with tool access |
 | `review_retry.md` | review (resume) | Shorter prompt for re-reviews |
 | `review_history.md` | review | Previous review cycles section |
+| `review_format_retry.md` | review (resume) | JSON format correction prompt |
 | `final_review.md` | final_review | Holistic branch review before merge |
 
 #### Planning pipeline

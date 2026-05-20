@@ -24,7 +24,6 @@ CLI_COMMANDS = {
 
 DOCTOR_CHECKS = [check_fn]                         # (project_dir) -> list[DiagnosticResult]
 IS_CONFIGURED = is_configured_fn                   # (project_dir) -> bool
-AUTO_START = auto_start_fn                         # (ops_dir, project_name) -> None
 
 ARTIFACT_RESOLVER = resolver_fn                    # (project_dir, refs: list[str], fetch: bool) -> dict[str, ResolvedArtifact]
 CACHE_DIR_NAME = "my_connector"                    # .cache/<this>/
@@ -49,7 +48,7 @@ In-tree connectors that also declare entry points are deduplicated (filesystem w
 Shipped connectors are registered in `pyproject.toml`:
 ```toml
 [project.entry-points."hashd.connectors"]
-github_sync = "orchestrator.connectors.github_sync"
+github = "orchestrator.connectors.github_sync"
 figma = "orchestrator.connectors.figma"
 jira = "orchestrator.connectors.jira_sync"
 ```
@@ -60,7 +59,6 @@ jira = "orchestrator.connectors.jira_sync"
 |---|---|
 | `cli.py` | Registers CLI commands from `CLI_COMMANDS` |
 | `commands/doctor.py` | Runs `DOCTOR_CHECKS` for configured connectors |
-| `lib/prefect_server.py` | Calls `AUTO_START` for each connector |
 | `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
 | `lib/tool_dispatch.py` | Loads `TOOLS` when `@connector` detected in prompt |
 | `lib/agents_config.py` | Injects MCP config for `TOOLS` into agent commands |
@@ -240,9 +238,12 @@ File-based configs are excluded from git via `.git/info/exclude`.
 
 ## 6. Shipped Connectors
 
-### GitHub Sync
+### GitHub
 
-Bidirectional issue sync. Pull issues as suggestions, push stories as issues, auto-sync via ZMQ daemon.
+GitHub issue reference resolver. Use `@github:42` in stories, acceptance
+criteria, or chat to embed issue context. The connector reads issue details on
+demand and caches them; it does not create stories, create issues, or run a sync
+daemon.
 
 See [orchestrator/connectors/github_sync/README.md](../orchestrator/connectors/github_sync/README.md).
 
@@ -254,7 +255,11 @@ See [orchestrator/connectors/figma/README.md](../orchestrator/connectors/figma/R
 
 ### Jira
 
-Bidirectional issue sync for Jira Cloud (REST API v3) and Server/Data Center (REST API v2). Status mapping via Jira's universal `statusCategory` (new/indeterminate/done) to work across arbitrary custom workflows. Each connector registers its own CLI commands independently.
+Jira issue reference resolver for Jira Cloud (REST API v3) and Server/Data
+Center (REST API v2). Use `@jira:PROJ-123`, `@jira:123`, or
+`@jira:OTHER:456` in stories, acceptance criteria, or chat to embed issue
+context. The connector reads issue details on demand and caches them; it does
+not create stories, create issues, or run a sync daemon.
 
 See [orchestrator/connectors/jira_sync/README.md](../orchestrator/connectors/jira_sync/README.md).
 
@@ -454,7 +459,7 @@ Without writing any integration code in core:
 
 ## 10. Open Questions
 
-1. **Inbound changes.** External issue closed manually -- should hashd notice? Current: one-way push. Webhooks would require a publicly reachable endpoint; polling is simpler but adds API cost.
+1. **Inbound changes.** Resolved: no automatic inbound sync. Operators reference external artifacts on demand with `@connector:ref`.
 2. **Safety flags.** `modifies_code` / `modifies_external` for gating autonomous execution. Deferred until connectors have write tools.
 3. **TOOLS_ALWAYS_LOAD.** Provision for tools that load on every invocation regardless of `@` refs (e.g., a linter). No use case yet.
 4. **Plugin architecture.** Rename "connector" to "plugin"? Event handlers vs daemons? Lifecycle hooks? Third-party sandboxing? Revisit when community connectors emerge.

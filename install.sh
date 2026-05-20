@@ -61,6 +61,11 @@ extract_json_string_field() {
     sed -nE "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" | head -1
 }
 
+warn_external_tools() {
+    echo "WARN: external tool install skipped ($1)."
+    echo "      gitleaks can be installed manually from https://github.com/gitleaks/gitleaks/releases if needed."
+}
+
 # --- Detect platform ---
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -139,14 +144,28 @@ fi
 
 echo "  pipx:     $(pipx --version 2>/dev/null || echo 'installed')"
 
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
 # --- Find latest release ---
 echo ""
 echo "Finding latest release..."
 
-# Try gh CLI first, fall back to curl
+# Try gh CLI first, fall back to curl. A local gh install is not enough:
+# fresh machines often have gh on PATH before `gh auth login` has run.
+USE_GH_RELEASE_DOWNLOAD=0
 if command -v gh &>/dev/null; then
-    RELEASE_TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo "")
-else
+    GH_RELEASE_ERR="$WORK_DIR/gh-release-view.err"
+    if RELEASE_TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>"$GH_RELEASE_ERR") && [ -n "$RELEASE_TAG" ]; then
+        USE_GH_RELEASE_DOWNLOAD=1
+    else
+        if [ -s "$GH_RELEASE_ERR" ]; then
+            echo "  gh CLI is unauthenticated or cannot read releases; falling back to curl."
+        fi
+        RELEASE_TAG=""
+    fi
+fi
+if [ -z "$RELEASE_TAG" ]; then
     RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
         | extract_json_string_field "tag_name" || echo "")
 fi
@@ -175,11 +194,8 @@ WHEEL_PATTERN="hashd-*-${ABI_TAG}-*${WHEEL_MACHINE}*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
 
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
-
 # Download matching wheel
-if command -v gh &>/dev/null; then
+if [ "$USE_GH_RELEASE_DOWNLOAD" -eq 1 ]; then
     gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
 else
     # Fall back to curl from release assets
@@ -258,15 +274,20 @@ install_bash_completion
 TOOLS_SCRIPT_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install-tools.sh"
 echo ""
 echo "Installing external tools..."
-curl --fail --silent --show-error --location \
+if curl --fail --silent --location \
     --retry 3 --retry-delay 2 \
     --connect-timeout 10 --max-time 60 \
-    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/install-tools.sh"
-bash "$WORK_DIR/install-tools.sh"
+    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/install-tools.sh" 2>/dev/null; then
+    if ! bash "$WORK_DIR/install-tools.sh"; then
+        warn_external_tools "installer script failed"
+    fi
+else
+    warn_external_tools "could not download installer script"
+fi
 
 echo ""
 echo "Refreshing services and project databases..."
-"$WF_BIN" restart
+"$WF_BIN" restart --yes
 
 echo ""
 echo "Done! Installed hashd $RELEASE_TAG."
