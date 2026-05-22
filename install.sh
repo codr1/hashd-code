@@ -130,16 +130,21 @@ if ! command -v pipx &>/dev/null; then
         "$PYTHON" -m ensurepip --user 2>/dev/null || true
     fi
     if ! "$PYTHON" -m pip install --user pipx 2>/dev/null; then
-        echo ""
-        echo "ERROR: Could not install pipx (pip is not available)."
-        echo ""
-        echo "  Install pipx for your platform, then re-run this script:"
-        echo "    Debian/Ubuntu: sudo apt update && sudo apt install pipx"
-        echo "    Arch:          sudo pacman -S python-pipx"
-        echo "    macOS:         brew install pipx"
-        exit 1
+        if command -v uv &>/dev/null && uv tool install pipx >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+        else
+            echo ""
+            echo "ERROR: Could not install pipx (pip is not available)."
+            echo ""
+            echo "  Install pipx for your platform, then re-run this script:"
+            echo "    Debian/Ubuntu: sudo apt update && sudo apt install pipx"
+            echo "    Arch:          sudo pacman -S python-pipx"
+            echo "    macOS:         brew install pipx"
+            exit 1
+        fi
     fi
-    "$PYTHON" -m pipx ensurepath 2>/dev/null || true
+    export PATH="$HOME/.local/bin:$PATH"
+    pipx ensurepath 2>/dev/null || "$PYTHON" -m pipx ensurepath 2>/dev/null || true
 fi
 
 echo "  pipx:     $(pipx --version 2>/dev/null || echo 'installed')"
@@ -191,12 +196,16 @@ else
 fi
 
 WHEEL_PATTERN="hashd-*-${ABI_TAG}-*${WHEEL_MACHINE}*.whl"
+BOT_WHEEL_PATTERN="hashd_bot_telegram-*.whl"
+TUI_WHEEL_PATTERN="hashd_tui-*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
 
 # Download matching wheel
 if [ "$USE_GH_RELEASE_DOWNLOAD" -eq 1 ]; then
     gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$BOT_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$TUI_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
 else
     # Fall back to curl from release assets
     ASSETS_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
@@ -215,22 +224,70 @@ else
     fi
 
     curl -fsSL -o "$WORK_DIR/$(basename "$WHEEL_URL")" "$WHEEL_URL"
+
+    BOT_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
+        | grep '"browser_download_url"' \
+        | grep 'hashd_bot_telegram-' \
+        | head -1 \
+        | extract_json_string_field "browser_download_url")
+
+    if [ -z "$BOT_WHEEL_URL" ]; then
+        echo ""
+        echo "ERROR: No Telegram bot wheel found"
+        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+        exit 1
+    fi
+
+    curl -fsSL -o "$WORK_DIR/$(basename "$BOT_WHEEL_URL")" "$BOT_WHEEL_URL"
+
+    TUI_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
+        | grep '"browser_download_url"' \
+        | grep 'hashd_tui-' \
+        | head -1 \
+        | extract_json_string_field "browser_download_url")
+
+    if [ -z "$TUI_WHEEL_URL" ]; then
+        echo ""
+        echo "ERROR: No TUI wheel found"
+        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+        exit 1
+    fi
+
+    curl -fsSL -o "$WORK_DIR/$(basename "$TUI_WHEEL_URL")" "$TUI_WHEEL_URL"
 fi
 
-WHEEL=$(find "$WORK_DIR" -name '*.whl' | head -1)
+WHEEL=$(find "$WORK_DIR" -name "$WHEEL_PATTERN" | head -1)
 if [ -z "$WHEEL" ]; then
     echo ""
     echo "ERROR: No wheel found for $PLATFORM/$MACHINE"
     echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
     exit 1
 fi
+BOT_WHEEL=$(find "$WORK_DIR" -name "$BOT_WHEEL_PATTERN" | head -1)
+if [ -z "$BOT_WHEEL" ]; then
+    echo ""
+    echo "ERROR: Telegram bot wheel not found"
+    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+    exit 1
+fi
+TUI_WHEEL=$(find "$WORK_DIR" -name "$TUI_WHEEL_PATTERN" | head -1)
+if [ -z "$TUI_WHEEL" ]; then
+    echo ""
+    echo "ERROR: TUI wheel not found"
+    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+    exit 1
+fi
 
 echo "  Downloaded: $(basename "$WHEEL")"
+echo "  Downloaded: $(basename "$BOT_WHEEL")"
+echo "  Downloaded: $(basename "$TUI_WHEEL")"
 
 # --- Install ---
 echo ""
 echo "Installing hashd..."
 pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+pipx runpip hashd install --upgrade "$BOT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+pipx runpip hashd install --upgrade "$TUI_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 
 # Ensure ~/.local/bin is on PATH
 pipx ensurepath 2>/dev/null || true
