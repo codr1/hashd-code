@@ -121,8 +121,10 @@ Reset all stage assignments:
 
 ```bash
 # Reset all stage overrides at once
-wf project config reset stages
+wf project config reset --all
 ```
+
+Use `wf project config diff` before resetting to inspect which project overrides will be cleared. `wf project config show <key>` shows the effective value and Default/System/Project stack for one setting.
 
 Nuclear option -- reset all behavioral overrides (stage assignments, autonomy mode, etc.) back to defaults:
 
@@ -275,7 +277,7 @@ prompt = render_prompt('review_contextual', commit_title='Add auth', diff='...')
 | `implement_retry.md` | implement (resume) | Shorter prompt for session resume after review rejection |
 | `implement_history.md` | implement | Conversation history section inserted on retries |
 | `implement_review_context.md` | implement | Previous review output context |
-| `implement_directives.md` | implement | Project/feature directives section |
+| `directives_section.md` | agent prompts | Shared operator directives section |
 | `concern_triage.md` | concern_triage | Triage pending review concerns against next micro-commit |
 
 #### Review pipeline

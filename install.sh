@@ -197,6 +197,9 @@ fi
 
 WHEEL_PATTERN="hashd-*-${ABI_TAG}-*${WHEEL_MACHINE}*.whl"
 BOT_WHEEL_PATTERN="hashd_bot_telegram-*.whl"
+FIGMA_WHEEL_PATTERN="hashd_connector_figma-*.whl"
+GITHUB_CONNECTOR_WHEEL_PATTERN="hashd_connector_github-*.whl"
+JIRA_WHEEL_PATTERN="hashd_connector_jira-*.whl"
 TUI_WHEEL_PATTERN="hashd_tui-*.whl"
 
 echo "  Looking for: $WHEEL_PATTERN"
@@ -205,6 +208,9 @@ echo "  Looking for: $WHEEL_PATTERN"
 if [ "$USE_GH_RELEASE_DOWNLOAD" -eq 1 ]; then
     gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
     gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$BOT_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$FIGMA_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$GITHUB_CONNECTOR_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
+    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$JIRA_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
     gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$TUI_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
 else
     # Fall back to curl from release assets
@@ -240,6 +246,51 @@ else
 
     curl -fsSL -o "$WORK_DIR/$(basename "$BOT_WHEEL_URL")" "$BOT_WHEEL_URL"
 
+    FIGMA_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
+        | grep '"browser_download_url"' \
+        | grep 'hashd_connector_figma-' \
+        | head -1 \
+        | extract_json_string_field "browser_download_url")
+
+    if [ -z "$FIGMA_WHEEL_URL" ]; then
+        echo ""
+        echo "ERROR: No Figma connector wheel found"
+        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+        exit 1
+    fi
+
+    curl -fsSL -o "$WORK_DIR/$(basename "$FIGMA_WHEEL_URL")" "$FIGMA_WHEEL_URL"
+
+    GITHUB_CONNECTOR_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
+        | grep '"browser_download_url"' \
+        | grep 'hashd_connector_github-' \
+        | head -1 \
+        | extract_json_string_field "browser_download_url")
+
+    if [ -z "$GITHUB_CONNECTOR_WHEEL_URL" ]; then
+        echo ""
+        echo "ERROR: No GitHub connector wheel found"
+        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+        exit 1
+    fi
+
+    curl -fsSL -o "$WORK_DIR/$(basename "$GITHUB_CONNECTOR_WHEEL_URL")" "$GITHUB_CONNECTOR_WHEEL_URL"
+
+    JIRA_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
+        | grep '"browser_download_url"' \
+        | grep 'hashd_connector_jira-' \
+        | head -1 \
+        | extract_json_string_field "browser_download_url")
+
+    if [ -z "$JIRA_WHEEL_URL" ]; then
+        echo ""
+        echo "ERROR: No Jira connector wheel found"
+        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+        exit 1
+    fi
+
+    curl -fsSL -o "$WORK_DIR/$(basename "$JIRA_WHEEL_URL")" "$JIRA_WHEEL_URL"
+
     TUI_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
         | grep '"browser_download_url"' \
         | grep 'hashd_tui-' \
@@ -270,6 +321,27 @@ if [ -z "$BOT_WHEEL" ]; then
     echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
     exit 1
 fi
+FIGMA_WHEEL=$(find "$WORK_DIR" -name "$FIGMA_WHEEL_PATTERN" | head -1)
+if [ -z "$FIGMA_WHEEL" ]; then
+    echo ""
+    echo "ERROR: Figma connector wheel not found"
+    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+    exit 1
+fi
+GITHUB_CONNECTOR_WHEEL=$(find "$WORK_DIR" -name "$GITHUB_CONNECTOR_WHEEL_PATTERN" | head -1)
+if [ -z "$GITHUB_CONNECTOR_WHEEL" ]; then
+    echo ""
+    echo "ERROR: GitHub connector wheel not found"
+    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+    exit 1
+fi
+JIRA_WHEEL=$(find "$WORK_DIR" -name "$JIRA_WHEEL_PATTERN" | head -1)
+if [ -z "$JIRA_WHEEL" ]; then
+    echo ""
+    echo "ERROR: Jira connector wheel not found"
+    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+    exit 1
+fi
 TUI_WHEEL=$(find "$WORK_DIR" -name "$TUI_WHEEL_PATTERN" | head -1)
 if [ -z "$TUI_WHEEL" ]; then
     echo ""
@@ -280,6 +352,9 @@ fi
 
 echo "  Downloaded: $(basename "$WHEEL")"
 echo "  Downloaded: $(basename "$BOT_WHEEL")"
+echo "  Downloaded: $(basename "$FIGMA_WHEEL")"
+echo "  Downloaded: $(basename "$GITHUB_CONNECTOR_WHEEL")"
+echo "  Downloaded: $(basename "$JIRA_WHEEL")"
 echo "  Downloaded: $(basename "$TUI_WHEEL")"
 
 # --- Install ---
@@ -287,6 +362,9 @@ echo ""
 echo "Installing hashd..."
 pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 pipx runpip hashd install --upgrade "$BOT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+pipx runpip hashd install --upgrade "$FIGMA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+pipx runpip hashd install --upgrade "$GITHUB_CONNECTOR_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+pipx runpip hashd install --upgrade "$JIRA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 pipx runpip hashd install --upgrade "$TUI_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
 
 # Ensure ~/.local/bin is on PATH

@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 **Grounds the agents.** Agents query a pre-computed Context Graph instead of re-discovering the codebase on every run. AST structure, dependency edges, and project knowledge are extracted once and made available to every agent in every workstream. Published research on systems like Aider shows tool-based exploration consumes 54-70% of the context window for orientation alone; pre-computed structural maps reduce this to 4-6%. That's a 10-15x reduction in tokens spent discovering what static analysis already knows -- and a corresponding reduction in cost, latency, hallucinated file paths, and first-pass review failures.
 
-**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `wf lineage <file|sha|STORY-xxx>` reconstructs the chain. `wf lineage export --attestation-format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `wf lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
+**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `wf lineage <file|sha|STORY-xxx>` reconstructs the chain. `wf lineage export --format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `wf lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
 
 ```
 file -> git log -> commit message (COMMIT-XX-NNN)
@@ -303,7 +303,7 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf log [id]` | Show workstream timeline |
 | `wf review [id]` | Show latest saved final review |
 | `wf lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
-| `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> --attestation-format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
+| `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
 | `wf lineage verify` | Validate commit hash chain integrity |
 | `wf reject [id] "..."` | Reject with feedback (context-aware) |
 | `wf reject [id] --reset` | Discard changes, start fresh (human gate only) |
@@ -314,7 +314,7 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf conflicts [id]` | Check for file conflicts |
 | `wf archive work` | List archived workstreams |
 | `wf archive stories` | List archived stories |
-| `wf open <id>` | Resurrect archived workstream |
+| `wf open <id> [--force]` | Resurrect archived workstream |
 | `wf answer list` | List entities with pending clarifications |
 | `wf answer show <entity>` | Show pending questions for a story or workstream |
 | `wf answer <entity> "<text>"` | Bundle-answer pending clarifications and dispatch the next agent run |
@@ -337,7 +337,13 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf project show` | Show current project configuration |
 | `wf project interview` | Reconfigure project (build/test commands, merge mode, autonomy) |
 | `wf project remove <name> -y` | Remove a project without confirmation prompt |
+| `wf project config list` | List effective project config, highlighting project overrides in TTY output |
+| `wf project config diff` | Show project overrides against inherited system/default config |
+| `wf project config show <key>` | Show effective value, source, override stack, and schema description |
+| `wf project config get <key>` | Print one effective config value |
 | `wf project config set <key> <value>` | Set config value |
+| `wf project config reset <key>` | Remove one project override |
+| `wf project config reset --all` | Remove all project overrides while preserving project identity |
 | `wf project describe` | Show current project description |
 | `wf project describe --suggest` | AI-generate and save a description suggestion |
 | `wf project tech` | Show current project tech stack |
@@ -378,7 +384,7 @@ Commands automatically route based on ID prefix:
 
 Commands marked with `[id]` use the current workstream context if no ID is provided.
 
-When reopening archived workstreams, `wf open` analyzes staleness by comparing file changes on the branch vs main. It shows a severity score (LOW/MODERATE/HIGH/CRITICAL) and prompts for confirmation if conflicts are likely.
+When reopening archived workstreams, `wf open` analyzes staleness by comparing file changes on the branch against the default branch. It prints commits-behind, overlapping files, default-branch line churn, and a low/moderate/high/critical severity score. High and critical reopens require interactive confirmation, or `--force` for non-interactive use.
 
 ## Lifecycle
 
@@ -517,6 +523,8 @@ autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
 
 Run `wf doctor --show-defaults` to see all available settings and their default values.
 Run `wf doctor --reset-to-defaults` to strip behavioral overrides and restore defaults while preserving identity and build settings.
+
+Use `wf config ...` for system-wide overrides and `wf project config ...` for project overrides. `list` shows the effective config and marks overridden values on TTYs, `diff` shows only overrides with their baseline values, and `show <key>` prints the effective value plus its Default/System/Project provenance. `reset --all` clears all overrides at the invoked scope. Shell completion includes config verbs and schema-backed key names.
 
 ### Test Command Configuration
 
@@ -836,7 +844,7 @@ git remote add origin <url>
 
 ## Connectors
 
-Connectors are hashd's plugin system for external integrations. They're auto-discovered at startup -- drop a module in `orchestrator/connectors/`, it works. Remove it, everything else keeps working. Core never references a specific connector.
+Connectors are hashd's plugin system for external integrations. They're auto-discovered at startup from packages that register the `hashd.connectors` entry point group. Install or remove a connector package and core keeps working without hard references.
 
 
 ### Included connectors
@@ -844,7 +852,7 @@ Connectors are hashd's plugin system for external integrations. They're auto-dis
 | Connector | What it does | Docs |
 |---|---|---|
 | **GitHub Sync** | Sync stories with GitHub Issues -- pull, push, auto-sync via labels | [docs](docs/CONNECTORS.md#github-sync) |
-| **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](orchestrator/connectors/jira_sync/README.md) |
+| **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](packages/hashd-connector-jira/src/hashd_connector_jira/README.md) |
 | **Figma** | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | [docs](docs/CONNECTORS.md#figma) |
 
 ### Third-party connectors

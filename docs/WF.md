@@ -362,9 +362,6 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf docs [id]` | Update SPEC.md from workstream |
 | `wf refresh [id]` | Refresh touched files |
 | `wf conflicts [id]` | Check file conflicts |
-| `wf release prepare <version>` | Tag `origin/dev` as a release staging cut point |
-| `wf release execute <version> [--resume]` | Merge a staging tag to `main`, regenerate artifacts, and run `scripts/release.sh` |
-| `wf release status` | List in-flight `release-staging-*` tags |
 
 ### Question & Answer Commands
 
@@ -398,7 +395,7 @@ answer; the run itself is already in flight.
 | `wf archive work` | List archived workstreams |
 | `wf archive stories` | List archived stories |
 | `wf archive delete <id> --confirm` | Permanently delete |
-| `wf open <id>` | Resurrect archived workstream |
+| `wf open <id> [--force]` | Resurrect archived workstream |
 
 ### Directives Commands
 
@@ -425,12 +422,27 @@ answer; the run itself is already in flight.
 | `wf project show` | Show project configuration |
 | `wf project interview` | Update project configuration interactively |
 | `wf project remove <name> [-y]` | Remove a project |
-| `wf project config list` | List config settings |
+| `wf project config list` | List effective project config and mark overrides in TTY output |
+| `wf project config diff` | Show project overrides against inherited system/default config |
+| `wf project config show <key>` | Show effective value, source, override stack, and description |
 | `wf project config get <key>` | Get config value |
 | `wf project config set <key> <value>` | Set config value |
-| `wf project config reset <key>` | Reset config key to default |
+| `wf project config reset <key>` | Remove one project override |
+| `wf project config reset --all` | Remove all project overrides |
 | `wf project describe` | Show current project description |
 | `wf project describe --suggest` | AI-generate a description suggestion |
+
+### System Config Commands
+
+| Command | Description |
+|---------|-------------|
+| `wf config list` | List effective system config and mark system overrides in TTY output |
+| `wf config diff` | Show system overrides against compiled defaults |
+| `wf config show <key>` | Show effective value, source, override stack, and description |
+| `wf config get <key>` | Get system config value |
+| `wf config set <key> <value>` | Set system config value |
+| `wf config reset <key>` | Remove one system override |
+| `wf config reset --all` | Remove all system overrides |
 
 ### Workstream Commands
 
@@ -447,7 +459,7 @@ answer; the run itself is already in flight.
 | `wf doctor` | Validate setup and diagnose issues |
 | `wf restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
 | `wf lineage <target> [--line N] [--lines N-M] [--format table\|json\|markdown]` | Trace code lineage (auto-detects file/SHA/STORY/BUG) |
-| `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--attestation-format slsa\|in-toto]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story |
+| `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--format slsa\|in-toto]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story |
 | `wf lineage verify` | Validate hash chain integrity for project commits |
 | `wf system-log` | View system event log |
 | `wf prompts list` | List prompt templates |
@@ -461,15 +473,14 @@ answer; the run itself is already in flight.
 
 ## Release Cuts
 
-Release cuts use an explicit prepare/execute boundary so `dev` can keep moving without changing the in-flight release.
+Release cuts are dev-team operations and are intentionally not exposed through
+the user-facing `wf` CLI.
 
-1. `wf release prepare <version>` runs from local `main`. It requires a clean tree, local `main` at `origin/main`, `origin/dev` as a strict superset of `origin/main`, and green CI on `origin/dev` HEAD. It then pushes `release-staging-<version>` at the selected `dev` SHA and prints the PRs included since the previous release tag.
-2. Agents should run `wf release status` before merging during a release window. If a `release-staging-*` tag exists, work merged after that tag belongs to the next release unless the operator rolls the staging tag deliberately.
-3. `wf release execute <version>` runs from local `main`. It merges `release-staging-<version>` into `main`, runs `task generate` from `server/`, amends generated artifacts into the merge commit when needed, pushes `main`, invokes `scripts/release.sh <version>`, logs to `~/.hashd/release-logs/<version>.log`, and verifies the public release artifacts.
-4. On merge conflict, the command stops and prints the conflicted files. Resolve manually, then run `wf release execute --resume <version>`. Release tooling does not auto-resolve conflicts.
-5. `wf release prepare --yes <version>` intentionally proceeds while open PRs still target `dev`. Use it only when the operator has decided those PRs are excluded from the cut.
-
-A future `wf release cut <version>` may combine prepare and execute for low-risk cuts. Until then, keep the boundary explicit.
+1. `scripts/cut-release.sh <version>` runs from a clean hashd checkout. It requires local `main` at `origin/main`, `origin/dev` as a strict superset of `origin/main`, and no open PRs targeting `dev` unless the operator passes `--yes`.
+2. The script creates an isolated candidate merge from `origin/main` plus `origin/dev`, runs `task -d server generate`, amends allowed generated artifacts, pushes an immutable annotated tag at `refs/tags/release-candidate/v<version>/<attempt>`, and dispatches `.github/workflows/release.yml` in candidate mode.
+3. The workflow runs all pre-publish gates and then parks at the protected `release-publish` environment. The operator approves that environment in the GitHub UI to publish.
+4. After approval, the workflow publishes hashd-code, pushes the source tag, updates `main`, and updates `dev` so `dev` contains `main`.
+5. If the final dev back-merge conflicts after publish, the workflow fails loudly. The published release, source tag, and `main` stay authoritative; resolve `dev` manually by merging `origin/main` into `origin/dev`.
 
 ---
 
@@ -608,7 +619,7 @@ The `[r] reject` action in PR states:
 
 ## Directives
 
-Directives are curated rules that guide AI implementation. They exist at three levels:
+Directives are curated standing rules that guide AI agents. They exist at three levels:
 
 ```
 ~/.config/wf/directives.md        # Global user preferences
@@ -658,7 +669,20 @@ wf directives ai-edit workstream <ws>  # AI edit workstream's
 
 ### Usage
 
-Directives are automatically included in Codex implementation prompts. Use `wf directives all` to view all directives at once.
+Directives are automatically included in all agent-driven stages that produce or judge work:
+
+- implementation
+- merge-conflict resolution
+- per-commit review and review retry
+- final review
+- fix generation
+- add-commit planning
+- planning discovery
+- story refine/edit
+- breakdown
+- concern triage
+
+Use `wf directives all` to view all directives at once.
 
 ---
 
@@ -678,7 +702,7 @@ Properties:
 - **Idempotent**: re-running the stage with the same inputs produces the same outputs (or at least is safe to re-execute without introducing new state changes).
 - **Defined inputs/outputs**: each stage takes a known input set and produces a known output set. Listed per-stage in the implementation.
 - **Leaving the stage mutates the flow**: the transition out is the commit point. While inside, the stage can be re-run or extended; once the FSM transitions, the output is locked in.
-- **Going back destroys the current stage's terminal output**: rewinding from B to A discards B's verdict/decision. But the additive flow state — feedback, review history, conversation context — is preserved as input to the next instance of any stage.
+- **Going back destroys the current stage's terminal output**: rewinding from B to A discards B's verdict/decision. Only explicit current-cycle artifacts flow back to the next agent stage; stale review history and conversation context stay available to operator surfaces, not agent prompts.
 
 The macro FSM enumerates the stages. See **State Diagram** below for the canonical list and transitions.
 
@@ -686,10 +710,9 @@ The macro FSM enumerates the stages. See **State Diagram** below for the canonic
 
 When stage A → B → A happens (e.g., implementing → review → implementing on a rejection), the second visit to A starts with:
 1. Original inputs to A
-2. Plus additive state from the first visit to A (e.g., previous attempt summary)
-3. Plus additive state from B (e.g., review's feedback)
+2. Plus the current-cycle artifact from B (e.g., the just-completed review's actionable feedback)
 
-The terminal output of the first A is gone (replaced by the second A's output). The feedback survives. This is the pattern `ctx.review_history` already implements — the model formalizes it.
+The terminal output of the first A is gone (replaced by the second A's output). Historical feedback and summaries remain queryable for humans, but they do not accumulate into per-commit reviewer or implementer prompts.
 
 ### Status
 
@@ -784,29 +807,29 @@ merged / done                          — terminal
 
 #### Timeouts
 
-Per-substage timeouts live in `runner_stages.<name>.timeout` in `defaults.yaml` (Go-canonical at `server/internal/config/defaults.yaml`). Each entry is one of:
+Substage timeouts have one effective settings source. Stages with an in-process primary timeout use `stages.<name>.timeout`, resolved by `defaults.yaml < system config < project config`; housekeeping derives their failsafe threshold as the effective `stages.<name>.timeout + 300s` (one housekeeping sweep interval). Runner-only substages live in `runner_stages.<name>.timeout`. Each runner-only entry is one of:
 
 - A duration string: `"300s"`, `"10m"`, `"1h"` — see `orchestrator/lib/duration.parse_duration`.
 - `"NA"` — no timeout (idle / operator-paced / pure-logic substages); housekeeping skips entirely.
-- `"config"` — defers to project config (currently `ctx.profile.test_timeout`); resolved at sweep time. Today only `test` and `merge_gate` use this.
+- `"config"` — defers to project config (currently `ctx.profile.test_timeout`); resolved at sweep time.
 
 **Locked values (Brief 110):**
 
 | runner_stage | timeout | rationale |
 |---|---|---|
 | `preflight` | NA | pure logic, sub-second |
-| `breakdown` | 600s | mirrors `stages.breakdown.timeout` |
+| `breakdown` | `stages.breakdown.timeout + 300s` | derived failsafe; default value is 600s |
 | `select` | NA | pure logic |
 | `clarification_check` | NA | pure logic |
-| `concern_triage` | 120s | mirrors `stages.concern_triage.timeout` |
-| `implement` | 1200s | mirrors `stages.implement.timeout` |
-| `test` | config | `ctx.profile.test_timeout` (project override) |
-| `review` | 900s | mirrors `stages.review.timeout` |
+| `concern_triage` | `stages.concern_triage.timeout + 300s` | derived failsafe; default value is 120s |
+| `implement` | `stages.implement.timeout + 300s` | derived failsafe; default value is 1200s |
+| `test` | config + 300s | `ctx.profile.test_timeout` plus failsafe margin |
+| `review` | `stages.review.timeout + 300s` | derived failsafe; default value is 900s |
 | `human_review` | NA | indefinite by design |
 | `qa_gate` | NA | pure logic |
 | `commit` | 120s | new — was unbounded; zombie risk on `git push` |
-| `merge_gate` | config | `ctx.profile.test_timeout` (mirror of `test`) |
-| `final_review` | 600s | mirrors `stages.final_review.timeout` |
+| `merge_gate` | config + 300s | `ctx.profile.test_timeout` plus failsafe margin |
+| `final_review` | `stages.final_review.timeout + 300s` | derived failsafe; default value is 600s |
 | `starting` / `stopped` | NA | DB write only |
 
 **Convention.** A single function `orchestrator/workflow/timeouts.fail_substage_timeout(...)` is the source of truth for "this substage timed out." Both the in-process timeout firing path (subprocess.TimeoutExpired handlers in the runner) AND the `housekeeping` cron flow call it. The convention emits one `StageTimeout` typed event per substage entry; the housekeeping path additionally marks the latest run failed, sends the operator notification, and cancels the orphaned Prefect flow run.
@@ -945,7 +968,7 @@ stateDiagram-v2
 
 **Legend:** [STATE] = FSM macro stage. Substages (implement, test, review, etc.) run within `implementing` and are tracked via the substage / sub-FSM model — they're persisted (via `runner_stage`) and surfaced alongside the macro stage in operator displays. See **Workstream State Model** above.
 
-**Terminal stages:** `merged` (archived), `closed` (wf close), `closed_no_changes` (wf close --no-changes). `closed` can be reopened via `wf open`.
+**Terminal stages:** `merged` (archived), `closed` (wf close), `closed_no_changes` (wf close --no-changes). `closed` and `closed_no_changes` can be reopened via `wf open`; `merged` cannot.
 
 ### ready_to_merge vs final_review_with_concerns
 
@@ -1295,7 +1318,9 @@ At decision points, each modality must surface the AI review findings:
 
 ### Review Scoping Rules
 
-Per-commit stage reviews are **stable facts** about the code. The final review sees all stage reviews for the workstream across all runs -- they are never filtered by `run_id`. After a rejection and re-run, the original commit reviews (commit-1, commit-2, etc.) remain visible to the next final review alongside the new fix-commit reviews.
+Per-commit stage reviews are **stable records** about the code at the moment they ran. They are never filtered by `run_id`, but their `concerns` do not carry forward into later implementer prompts. Instead, per-commit concerns form a single-shot pool for the first final review only.
+
+The first `run_final_review()` invocation dumps active per-commit concerns into the prompt with commit provenance. After that run completes, `concerns_pool_consumed_at` is set on the workstream. Subsequent final-review iterations see an empty per-commit concern pool; previous final-review findings are the only carry-forward review context.
 
 The rejection path (`wf reject`) and micro-commit planning path (`wf workstream add-commit`) pull the most recent final review via `parse_final_review_feedback()` (unscoped, `limit=1 ORDER BY created_at DESC`). The latest final review is always the one the user is reacting to.
 
@@ -1305,13 +1330,25 @@ The rejection path (`wf reject`) and micro-commit planning path (`wf workstream 
 
 `run_final_review()` uses different context depending on whether a prior final review exists:
 
-1. **First final review** (no prior `final_review` record): Per-commit stage review notes and human decisions (current behavior). This gives the reviewer cross-commit pattern awareness.
+1. **First final review** (no prior `final_review` record): Human decisions plus the single-shot per-commit concerns pool. This gives the reviewer cross-commit concern awareness once, without leaking stale concerns into later cycles.
 
 2. **Subsequent final reviews** (prior v2 `final_review` exists **and** FIX commits in plan): The previous final review's findings formatted as a verification checklist, plus human rejection feedback extracted from the most recent FIX commit. Per-commit stage notes are omitted -- they cause echo/doom-loop problems where the LLM re-raises concerns that FIX commits already addressed.
 
-Falls back to per-commit notes when: no prior final review, prior is v1 (no structured fields), no FIX commits in the plan (e.g. manual `wf review` re-run), or the checklist would be empty.
+Falls back to human decisions when: no prior final review, prior is v1 (no structured fields), no FIX commits in the plan (e.g. manual `wf review` re-run), or the checklist would be empty. The per-commit concerns pool does not refill after `concerns_pool_consumed_at` is set.
 
 The verification checklist (loaded from `prompts/review_verification_section.md`) instructs the LLM to verify each item against the diff, mark resolved items, and only re-raise what is demonstrably unfixed.
+
+### Per-stage artifact passing
+
+Different surfaces have different audiences and different needs:
+
+- **Agent surfaces** (reviewer/implementer prompts in the per-commit loop): ephemeral, fresh per cycle. The reviewer sees only the current diff plus story/AC context. The implementer sees only the just-completed review's feedback. Prior cycles are not carried in the prompt -- each cycle is an independent evaluation.
+- **Operator surfaces** (TUI detail, `wf show`, CLI summaries, review history inspection): cumulative across attempts. Humans need to see the workstream's history; agents don't.
+- **Concern lifecycle**: concerns flagged in per-commit reviews persist at workstream level until the first final review, then drop. Concerns do not flow to next per-commit implementers.
+- **Operator guidance** (`wf reject <id> "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section. Per-cycle, not persistent across the workstream.
+- **FIX-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-cycle historical context. It detects "going in circles" on FIX commits by comparing current rejection feedback against prior FIX feedback in the workstream's history. Special-purpose; not the default flow.
+
+Principle: artifacts visible to agents are ephemeral and current; artifacts visible to humans are cumulative.
 
 ### Reject Behavior
 

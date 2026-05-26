@@ -2,7 +2,7 @@
 
 ## Overview
 
-Connectors extend hashd with external integrations (Figma, GitHub, Bitbucket, Jira). They're auto-discovered at startup -- drop a module in `orchestrator/connectors/`, it works. Remove it, everything else keeps working. Core never references a specific connector.
+Connectors extend hashd with external integrations (Figma, GitHub, Bitbucket, Jira). They're auto-discovered at startup through the `hashd.connectors` entry point group. Core never references a specific connector.
 
 See [Building Connectors](../orchestrator/connectors/README.md) for the developer guide.
 
@@ -13,7 +13,7 @@ See [Building Connectors](../orchestrator/connectors/README.md) for the develope
 Every connector declares its capabilities via module-level attributes in `__init__.py`. All are optional.
 
 ```python
-# orchestrator/connectors/my_connector/__init__.py
+# packages/hashd-connector-my/src/hashd_connector_my/__init__.py
 
 CONNECTOR_NAME = "my_connector"                    # unique, used as @ namespace
 CONFIG_SECTION = "my_config"                       # config.yaml section
@@ -38,19 +38,18 @@ AUTOCOMPLETE = autocomplete_fn                     # (project_dir, partial) -> l
 
 ### Discovery
 
-`discover_connectors()` finds connectors from two sources:
+`discover_connectors()` finds connectors from one source:
 
-1. **Filesystem**: sub-packages under `orchestrator/connectors/` via `pkgutil.iter_modules()`
-2. **Entry points**: pip-installed packages declaring the `hashd.connectors` group
+1. **Entry points**: pip-installed packages declaring the `hashd.connectors` group
 
-In-tree connectors that also declare entry points are deduplicated (filesystem wins). Import errors are logged and skipped. Namespace collisions (two connectors with the same `CONNECTOR_NAME`) are fatal -- hashd refuses to proceed.
+Import errors are logged and skipped. Namespace collisions (two connectors with the same `CONNECTOR_NAME`) are fatal -- hashd refuses to proceed.
 
 Shipped connectors are registered in `pyproject.toml`:
 ```toml
 [project.entry-points."hashd.connectors"]
-github = "orchestrator.connectors.github_sync"
-figma = "orchestrator.connectors.figma"
-jira = "orchestrator.connectors.jira_sync"
+github = "hashd_connector_github"
+figma = "hashd_connector_figma"
+jira = "hashd_connector_jira"
 ```
 
 ### Integration points
@@ -245,13 +244,13 @@ criteria, or chat to embed issue context. The connector reads issue details on
 demand and caches them; it does not create stories, create issues, or run a sync
 daemon.
 
-See [orchestrator/connectors/github_sync/README.md](../orchestrator/connectors/github_sync/README.md).
+See [packages/hashd-connector-github/src/hashd_connector_github/README.md](../packages/hashd-connector-github/src/hashd_connector_github/README.md).
 
 ### Figma
 
 Design context integration. Import frames, reference in stories/ACs/chat, browse via tools.
 
-See [orchestrator/connectors/figma/README.md](../orchestrator/connectors/figma/README.md).
+See [packages/hashd-connector-figma/src/hashd_connector_figma/README.md](../packages/hashd-connector-figma/src/hashd_connector_figma/README.md).
 
 ### Jira
 
@@ -261,7 +260,7 @@ Center (REST API v2). Use `@jira:PROJ-123`, `@jira:123`, or
 context. The connector reads issue details on demand and caches them; it does
 not create stories, create issues, or run a sync daemon.
 
-See [orchestrator/connectors/jira_sync/README.md](../orchestrator/connectors/jira_sync/README.md).
+See [packages/hashd-connector-jira/src/hashd_connector_jira/README.md](../packages/hashd-connector-jira/src/hashd_connector_jira/README.md).
 
 ---
 
@@ -285,14 +284,14 @@ Step-by-step guide to building a new connector. Uses a hypothetical "Linear" con
 ### Step 1: Create the directory
 
 ```
-orchestrator/connectors/linear/
+packages/hashd-connector-linear/src/hashd_connector_linear/
     __init__.py
 ```
 
 ### Step 2: Declare the contract
 
 ```python
-# orchestrator/connectors/linear/__init__.py
+# packages/hashd-connector-linear/src/hashd_connector_linear/__init__.py
 
 CONNECTOR_NAME = "linear"          # unique -- becomes @linear:ref namespace
 CONFIG_SECTION = "linear"          # config.yaml section
@@ -304,7 +303,7 @@ That's the minimum. hashd discovers it, `wf doctor` shows it, `@linear` is reser
 ### Step 3: Add configuration
 
 ```python
-# orchestrator/connectors/linear/config.py
+# packages/hashd-connector-linear/src/hashd_connector_linear/config.py
 
 import msgspec
 from orchestrator.lib.project_loader import load_project_yaml
@@ -329,7 +328,7 @@ def is_configured(project_dir):
 Wire it up:
 ```python
 # __init__.py (add)
-from orchestrator.connectors.linear.config import is_configured
+from hashd_connector_linear.config import is_configured
 IS_CONFIGURED = is_configured
 ```
 
@@ -339,7 +338,7 @@ IS_CONFIGURED = is_configured
 # __init__.py (add)
 def _check_health(project_dir):
     from orchestrator.connectors._base import DiagnosticResult
-    from orchestrator.connectors.linear.config import load_linear_config
+    from hashd_connector_linear.config import load_linear_config
 
     config = load_linear_config(project_dir)
     results = []
@@ -383,7 +382,7 @@ Now `@linear:LIN-42` resolves in prompts, chat, stories, ACs.
 ### Step 6: Add CLI commands (optional)
 
 ```python
-# orchestrator/connectors/linear/commands.py
+# packages/hashd-connector-linear/src/hashd_connector_linear/commands.py
 
 def register_linear_subcommands(subparsers):
     p = subparsers.add_parser("linear", help="Linear integration")
@@ -397,7 +396,7 @@ def cmd_linear_dispatch(args, ops_dir, project_config):
 
 ```python
 # __init__.py (add)
-from orchestrator.connectors.linear.commands import register_linear_subcommands, cmd_linear_dispatch
+from hashd_connector_linear.commands import register_linear_subcommands, cmd_linear_dispatch
 CLI_COMMANDS = {"linear": (register_linear_subcommands, cmd_linear_dispatch)}
 ```
 
@@ -429,9 +428,9 @@ AUTOCOMPLETE = _autocomplete
 
 The `AUTOCOMPLETE` function is called server-side by Python (Prefect flows, MCP server). The TUI gets autocomplete via a separate REST endpoint (`GET /connectors/autocomplete`) that reads the connector's cache directory on the server. Your `AUTOCOMPLETE` function still works — the REST endpoint provides an equivalent for remote clients.
 
-### Step 9: Register as entry point (out-of-tree connectors only)
+### Step 9: Register as entry point
 
-In-tree connectors (under `orchestrator/connectors/`) are discovered automatically via filesystem scan. This step is only needed if your connector is a separate pip-installable package:
+All connectors are discovered via the `hashd.connectors` entry point group. Register an entry point for your connector package, including workspace-local packages:
 
 ```toml
 # your-package/pyproject.toml

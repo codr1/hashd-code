@@ -262,6 +262,8 @@ Set during project setup or change anytime:
 
 ```bash
 wf project config set autonomy gatekeeper
+wf project config show autonomy
+wf project config diff
 ```
 
 Override per-run: `wf run --supervised`, `wf run --gatekeeper`, or `wf run --autonomous`
