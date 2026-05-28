@@ -86,10 +86,16 @@ export ANTHROPIC_API_KEY="sk-ant-..."    # for Claude Code
 export OPENAI_API_KEY="sk-..."           # for Codex CLI
 ```
 
-To use Claude for all stages (no Codex needed):
+To use one agent for every stage:
 
 ```bash
+# Single agent for everything (Claude is the planner default; this also handles
+# the implement role):
 wf project config set coder claude
+
+# Or use Codex for everything:
+wf project config set planner codex
+wf project config set coder codex
 ```
 
 Run `wf agents` to see all seven supported agents and their install status. See [docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.

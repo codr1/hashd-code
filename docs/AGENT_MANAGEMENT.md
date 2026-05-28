@@ -42,7 +42,7 @@ Shows all 7 registered agents (Claude, Codex, Gemini, OpenCode, Kimi, Qwen, Copi
 
 ### Per-stage assignment
 
-Each of the 14 workflow stages has a "shape" describing the kind of invocation it needs. Any agent can be assigned to any stage whose shape it supports.
+Each of the 18 workflow stages has a "shape" describing the kind of invocation it needs. Any agent can be assigned to any stage whose shape it supports.
 
 ```bash
 # Assign gemini to the breakdown stage
@@ -65,7 +65,7 @@ wf project config set stage.breakdown gemini --force
 ### Bulk assignment by role
 
 ```bash
-# Set all non-implement stages (12 stages) to gemini
+# Set all non-implement stages (16 stages) to gemini
 wf project config set planner gemini --force
 
 # Set implement + implement_resume (2 stages) to claude
@@ -78,19 +78,22 @@ If an agent does not support the required stage shapes, the assignment is reject
 
 | Phase | Stage | Default Agent | Shape |
 |-------|-------|---------------|-------|
+| Planning | detect | claude | json |
 | Planning | pm_discovery | claude | print |
 | Planning | pm_refine | claude | print |
 | Planning | pm_edit | claude | print |
+| Planning | pm_route | claude | print |
 | Planning | pm_annotate | claude | edit |
 | Planning | pm_describe | claude | print |
-| Implementation | breakdown | claude | json |
+| Implementation | breakdown | claude | review |
 | Implementation | implement | codex | implement |
 | Implementation | implement_resume | codex | implement_resume |
+| Review | concern_triage | claude | print |
 | Review | review | claude | review |
 | Review | review_resume | claude | review_resume |
 | Review | fix_generation | claude | json |
 | Review | plan_add | claude | json |
-| Completion | final_review | claude | json |
+| Completion | final_review | claude | review |
 | Completion | pm_spec | claude | json |
 | Completion | pm_docs | claude | edit |
 
@@ -103,8 +106,8 @@ Which agents can serve which stage shapes (`wf agents` shows this live):
 | claude | x | x | x | x | x | x | x |
 | codex | x | x | x | x | x | x | x |
 | gemini | x | x | x | x | x | x | x |
-| opencode | x | x | -- | -- | -- | x | -- |
-| kimi | x | x | x | -- | -- | x | -- |
+| opencode | x | x | -- | x | -- | x | -- |
+| kimi | x | x | x | x | -- | x | -- |
 | qwen | x | x | x | x | -- | x | -- |
 | copilot | x | x | x | x | x | x | x |
 
@@ -243,6 +246,8 @@ This opens the browser login flow and refreshes the token.
 ### Environment variables
 
 Hashd always strips `CLAUDECODE` from the subprocess environment for all agents. This prevents nested Claude Code session interference when spawning agents from within a Claude Code terminal.
+
+Hashd sets `IS_SANDBOX=1` in every agent subprocess environment. The variable is scoped to the spawned agent process; it is not exported into operator shells or written to global toolchain configuration. Agents should treat their current working directory as ephemeral, avoid reaching outside the assigned worktree unless the operator supplied an explicit path, and avoid mutating global toolchain state.
 
 The following API key env vars are stripped based on auth mode and OAuth detection:
 

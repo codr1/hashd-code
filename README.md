@@ -259,7 +259,7 @@ The `wf watch` TUI adapts keybindings to workstream status:
 
 In PR states, `[r]` opens a modal pre-filled with forge feedback for editing.
 
-**Diff mode** (`[d]` to enter): `[s]` side-by-side, `[b]` blame/lineage, `[h]` hunk selection, `[space]` select hunk, `[f]` fullscreen, `Enter` lineage detail (in blame).
+**Diff mode** (`[d]` to enter): `[s]` side-by-side, `[I]` lineage, `[h]` hunk selection, `[space]` select hunk, `[f]` fullscreen, `Enter` lineage detail (in lineage).
 
 ### Telegram Bot
 
@@ -757,8 +757,8 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 | **Codex** | `codex` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
 | **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
 | **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
-| **OpenCode** | `opencode` | available | print, json, implement | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
-| **Kimi Code** | `kimi` | available | print, json, edit, implement | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
+| **OpenCode** | `opencode` | available | print, json, review, implement | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
+| **Kimi Code** | `kimi` | available | print, json, edit, review, implement | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
 | **Qwen Code** | `qwen` | available | print, json, edit, review, implement | `npm i -g @qwen-code/qwen-code` | Qwen OAuth (free) |
 
 **Status:** `active` = tested and verified. `available` = config defined, not yet verified (assign with `--force`).
@@ -769,7 +769,9 @@ By default, **Claude** handles planning/review and **Codex** handles implementat
 
 ```bash
 wf agents                                # See installed agents and stage assignments
-wf project config set coder claude       # Use Claude for everything
+wf project config set coder claude       # Use Claude for implementation too
+wf project config set planner codex      # Use Codex for planning/review
+wf project config set coder codex        # Use Codex for implementation too
 wf project config set planner gemini     # All non-implement stages
 wf project config set stage.review gemini  # Single stage override
 ```
@@ -778,19 +780,22 @@ wf project config set stage.review gemini  # Single stage override
 
 | Phase | Stage | Default Agent | Shape |
 |-------|-------|---------------|-------|
+| Planning | `detect` | claude | json |
 | Planning | `pm_discovery` | claude | print |
 | Planning | `pm_refine` | claude | print |
 | Planning | `pm_edit` | claude | print |
+| Planning | `pm_route` | claude | print |
 | Planning | `pm_annotate` | claude | edit |
 | Planning | `pm_describe` | claude | print |
-| Implementation | `breakdown` | claude | json |
+| Implementation | `breakdown` | claude | review |
 | Implementation | `implement` | codex | implement |
 | Implementation | `implement_resume` | codex | implement_resume |
+| Review | `concern_triage` | claude | print |
 | Review | `review` | claude | review |
 | Review | `review_resume` | claude | review_resume |
 | Review | `fix_generation` | claude | json |
 | Review | `plan_add` | claude | json |
-| Completion | `final_review` | claude | json |
+| Completion | `final_review` | claude | review |
 | Completion | `pm_spec` | claude | json |
 | Completion | `pm_docs` | claude | edit |
 

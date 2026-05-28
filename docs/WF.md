@@ -522,9 +522,9 @@ When the diff panel is active (`d`):
 | Key | Action |
 |-----|--------|
 | `s` | Toggle side-by-side / unified view |
-| `b` | Toggle blame view (git blame with lineage annotations) |
+| `I` | Toggle lineage view |
 | `f` | Toggle fullscreen (hides left column) |
-| `Enter` | Show lineage detail for selected line (blame view) |
+| `Enter` | Show lineage detail for selected line (lineage view) |
 
 ### Stage: awaiting_human_review
 
@@ -684,6 +684,36 @@ Directives are automatically included in all agent-driven stages that produce or
 
 Use `wf directives all` to view all directives at once.
 
+### Stage-Scoped Directive Blocks
+
+Directives can include optional stage markers when a rule should only reach a subset of agents. Unwrapped content still renders in every stage.
+
+```markdown
+<!--
+This file is hashd's directives.md -- operator-authored standing guidance.
+
+Sections wrapped in `<!-- STAGE: name1, name2 -->` / `<!-- END STAGE -->`
+only render in those agent stages. Unwrapped sections render in every stage.
+
+Valid stage names: planning, implement, fix_generation, review, final_review,
+edit_flow.
+-->
+
+# Standing directives
+
+Use msgspec for new data types.
+
+<!-- STAGE: review, final_review -->
+Be strict on test coverage for new public code paths.
+<!-- END STAGE -->
+
+<!-- STAGE: planning -->
+Prefer one-commit-per-AC granularity.
+<!-- END STAGE -->
+```
+
+Valid stage names are `planning`, `implement`, `fix_generation`, `review`, `final_review`, and `edit_flow`. The merge-conflict resolver uses `implement`; breakdown uses `planning`; concern triage uses `review`. Matching blocks render without the marker comments. Non-matching blocks are stripped. Malformed blocks fail open with a warning, so the content renders to every stage rather than silently disappearing. Nested stage blocks are not supported.
+
 ---
 
 ## Workstream State Model
@@ -747,7 +777,7 @@ Today there's no explicit cancel mechanism; killed runs become `orphaned`. When 
 Stages with internal sequencing have their own sub-FSM. The substage field tracks position within the stage; the macro `status` describes the workstream's runtime state at that position.
 
 Stages that have a sub-FSM today (or will when formalized):
-- **`implementing`** — runner inner loop. **Formalized (Brief 123 Phase 3).** Spec at `server/contracts/implementing_substages.json`; Go validator at `server/internal/fsm/implementing_substages.go` (loaded as `fsm.ImplementingSubstages`); Python mirror at `orchestrator/lib/implementing_substages.py`. Cross-language contract test at `tests/test_implementing_substages_contract.py`. See **Implementing sub-FSM** below for the transition table.
+- **`implementing`** — runner inner loop. **Formalized (Brief 123 Phase 3).** Spec at `server/internal/fsm/implementing_substages.json`; Go validator at `server/internal/fsm/implementing_substages.go` (loaded as `fsm.ImplementingSubstages`); Python mirror at `orchestrator/lib/implementing_substages.py`. Cross-language contract test at `tests/test_implementing_substages_contract.py`. See **Implementing sub-FSM** below for the transition table.
 - **`merge_conflicts`** — resolution attempts: `initial → resolve_running → resolve_succeeded → retry_merge` (with `resolve_failed` as a recoverable sub-state). _Future phase._
 - **`merging`** — merge gate sequence: `rebase → build → test → push → done`. _Future phase._
 - **`provisioning`** — create steps: `worktree → baseline → enrichment` (when applicable). _Future phase._
@@ -899,10 +929,10 @@ The conceptual separation makes implicit invariants explicit:
 ### Migration outline (post-v0.6.0)
 
 1. Rename current `state`/`status` field → `stage` (Go FSM JSON, Python `Workstream` dataclass, REST shapes, all callsites). _Pending — quiet-window work; biggest blast radius._
-2. Add `status` derived field to workstream serializer (Go) + Python lib mirror. **Shipped (Brief 99 Phase 1).** `ComputeRuntimeStatus` lives in `server/internal/api/runtime_status.go`; Python mirror at `orchestrator/lib/workstream_status.py`; cross-language contract test at `tests/test_workstream_status_contract.py`.
-3. Formalize sub-FSMs for `implementing`, `merge_conflicts`, `merging`, `provisioning` (one JSON per stage). **Implementing shipped (Brief 123 Phase 3.1).** Spec at `server/contracts/implementing_substages.json`; Go validator + Python mirror enforce the runner inner loop's transitions at the boundary. `merge_conflicts`, `merging`, `provisioning` remain pending future phases.
+2. Add `status` derived field to workstream serializer (Go) + Python lib mirror. **Shipped (Brief 99 Phase 1).** `ComputeRuntimeStatus` lives in `server/internal/fsm/runtime_status.go`; Python mirror at `orchestrator/lib/workstream_status.py`; cross-language contract test at `tests/test_workstream_status_contract.py`.
+3. Formalize sub-FSMs for `implementing`, `merge_conflicts`, `merging`, `provisioning` (one JSON per stage). **Implementing shipped (Brief 123 Phase 3.1).** Spec at `server/internal/fsm/implementing_substages.json`; Go validator + Python mirror enforce the runner inner loop's transitions at the boundary. `merge_conflicts`, `merging`, `provisioning` remain pending future phases.
 4. Update TUI and CLI displays to render `(stage, status)` (and substage where applicable). **Shipped (Brief 99 Phase 1).** `wf show`, dashboard rows, and watch detail subtitle now render `<stage> / <runtime_status>` per the **Display convention** above.
-5. Fold `creation_failed` and `baseline_failed` into `provisioning` sub-status. **Shipped (Brief 114).** Both macro states were dropped from `server/contracts/workstream_fsm.json`; the `provision_failed`, `provision_baseline_failed`, and `retry_provision` triggers were removed (provisioning failure is now a field-only write to `provision_error` / `baseline_failures`); `override_baseline` now goes from `provisioning → active`. Migration `000018_fold_provisioning_failures` rewrites existing `creation_failed` / `baseline_failed` rows to `provisioning` so deployed databases carry over cleanly. `ComputeRuntimeStatus` reports `provisioning / failed` for both failure shapes; operator displays render that combined string.
+5. Fold `creation_failed` and `baseline_failed` into `provisioning` sub-status. **Shipped (Brief 114).** Both macro states were dropped from `server/internal/fsm/workstream_fsm.json`; the `provision_failed`, `provision_baseline_failed`, and `retry_provision` triggers were removed (provisioning failure is now a field-only write to `provision_error` / `baseline_failures`); `override_baseline` now goes from `provisioning → active`. Migration `000018_fold_provisioning_failures` rewrites existing `creation_failed` / `baseline_failed` rows to `provisioning` so deployed databases carry over cleanly. `ComputeRuntimeStatus` reports `provisioning / failed` for both failure shapes; operator displays render that combined string.
 6. CLI verb additions (`wf accept`, `wf retry`, eventually `wf cancel`) — each requires sign-off per `CLAUDE.md`.
 
 Each step is its own brief / PR. Migration is scoped to non-shipping windows.
