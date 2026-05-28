@@ -68,7 +68,7 @@ flowchart TD
         - Or have existing feature requests
 
 [Human/AI] Discover stories
-        $ wf plan                     # Analyze REQS.md, save suggestions
+        $ wf plan                     # Two-phase: discovery + tech tree
         $ wf plan list                # View suggestions
 
 [Human] Pick a suggestion
@@ -77,6 +77,53 @@ flowchart TD
 
         Creates STORY-xxxx, marks REQS as WIP
 ```
+
+### Tech Tree (auto-chained after discovery)
+
+`wf plan` runs two phases. Phase 1 (discovery) produces actionable suggestions safe to start against current `main` — the same numbered list operators already know. Phase 2 (tech tree planner) auto-chains immediately after, projecting the near-future structure: tech tree suggestions that depend on in-flight stories or actionable suggestions.
+
+**Two distinct planning surfaces, one operator command:**
+
+| Surface | What it produces | Operator can act? | Crosses agent boundary? |
+|---|---|---|---|
+| Main planner (phase 1) | Actionable Suggestions, numbered `[1]`, `[2]` | Yes — `accept` creates a Story | Yes — Suggestions become Stories that agents consume |
+| Tech tree planner (phase 2) | Tech tree suggestions, displayed by title only | No — view-only inspection | No — never reaches any implementer/reviewer/breakdown agent |
+
+The main planner stays conservative: never surfaces work that depends on in-flight stories (their code isn't on `main`; an implementer would build against a foundation that doesn't yet exist). The tech tree planner is where that projected visibility lives.
+
+**Lifecycle:**
+
+```text
+[Human] $ wf plan
+         |
+         v
+  Clear all suggestion content (main + tech tree)
+         |
+         v
+  Phase 1: discovery
+         |  status: "Discovering..."
+         v
+  Actionable suggestions populate at top of panel
+         |
+         v
+  Phase 2: tech tree (auto-chained)
+         |  status: "Computing tech tree..."
+         v
+  Projected dependents fill in under suggestions and in-flight stories
+         |
+         v
+  Done
+```
+
+**Cancellation:** new `wf plan` while phase 2 in flight cancels phase 2 cleanly, clears the panel, and restarts at phase 1. Phase 2 cannot be cancelled in isolation — it's an extension of the same planning command.
+
+**Storage:** Suggestions persist in the `suggestions` table (cleared on next `wf plan`). Tech tree suggestions live in server-side in-memory storage (also cleared on next `wf plan`). Neither survives across planning cycles; both are regenerated fresh each cycle.
+
+**Session reuse:** the tech tree agent reuses the discovery agent's session via the existing session-resume primitive (same mechanism used by `review_resume`). Avoids reloading project context twice.
+
+**Visualization:** see `DAS_PLAN.md > Story Dependencies, Thin Slicing, and the Tech Tree` for the full TUI rendering spec — unified tree panel, gradient dimming by level, multi-parent `*` marker, `t` toggle, level cap with `... (N more)` collapse.
+
+**Agent boundary invariant:** tech tree output never reaches any agent. Implementer, reviewer, breakdown, planning-edit, refinement — none receive tech tree content in prompts, context, or any other input. The boundary is enforced by a test fixture; adding tech tree data to any agent input is a test failure.
 
 ### Quick Flow (skip REQS discovery)
 
@@ -1070,7 +1117,7 @@ stateDiagram-v2
 
 ## Suggestion Lifecycle
 
-Suggestions are created by `wf plan` (REQS discovery) and stored in SQLite (`suggestions` table):
+Suggestions are created by `wf plan` phase 1 (REQS discovery) and stored in SQLite (`suggestions` table):
 
 ```mermaid
 stateDiagram-v2
@@ -1092,6 +1139,8 @@ In the TUI, suggestions show status indicators:
 - `(planning timed out)` - red, can be retried
 - `(in progress)` - yellow, story exists
 - `(done)` - green, completed
+
+**Note on tech tree suggestions:** the tech tree planner (`wf plan` phase 2) produces a separate, ephemeral artifact class — "tech tree suggestions" — that does NOT enter the `suggestions` table and has no lifecycle states. They live only in server-side in-memory storage, render in the TUI tree visualization, and disappear on the next `wf plan`. They never cross the agent boundary. See `DAS_PLAN.md > Story Dependencies, Thin Slicing, and the Tech Tree` for details.
 
 ---
 
