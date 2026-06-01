@@ -178,6 +178,12 @@ wf chat --history          # View past conversation as markdown
 | `@STORY-xxxx` | Cross-reference another story |
 | `@BUG-xxxx` | Cross-reference a bug |
 
+`@file:path` is project-scoped. The path must resolve inside the project
+directory. Planning treats file references as metadata only and never loads file
+contents into prompts; agents read reachable project files on demand. A
+planning-time warning is emitted when REQS or a story description references an
+outside-project path so the operator can move the file into the project tree.
+
 In TUI mode, press `C` from any screen to open chat. Type `@` to see autocomplete.
 
 **Actionable chat:** When chatting in a story context, the AI can propose edits to story artifacts (acceptance criteria, title, problem statement, non-goals) and run safe read-only `wf` commands. Each proposed action appears in a confirmation bar -- press `y` to apply or `n` to skip. Actions are logged to the story transcript.

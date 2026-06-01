@@ -820,9 +820,9 @@ A **status** is the runtime state at the workstream's current stage. Seven value
 |---|---|---|
 | `running` | Process attached, work in progress at current stage | `runner_pid` alive AND `last_run` incomplete |
 | `blocked` | Waiting for external input (clarification, human review, conflict resolution, etc.) | `last_run.status == "blocked"` |
+| `changes_required` | Reviewer requested changes; approve/reject/reset can decide the current diff | Latest review verdict is request changes |
 | `failed` | Previous run errored, retryable via re-dispatch | `last_run.status == "failed"` |
 | `idle` | Stage entered, no run has executed yet | No `last_run` record for current stage |
-| `cancelled` | Operator deliberately stopped the runner | `last_run.status == "cancelled"` (future) |
 | `orphaned` | Runner exited without writing a terminal result, unintentionally | `runner_pid` dead AND `last_run` incomplete |
 | `done` | Terminal stage reached; no further work | Stage in terminal set (`merged`, `closed`, `closed_no_changes`) |
 
@@ -1028,8 +1028,10 @@ stateDiagram-v2
     active --> merge_conflicts : rebase_conflict
 
     ready_to_merge --> final_review_with_concerns : final_review_concerns
+    ready_to_merge --> merge_conflicts : rebase_conflict
     final_review_with_concerns --> ready_to_merge : final_review_approve
     final_review_with_concerns --> active : address_concerns (fix commit)
+    final_review_with_concerns --> merge_conflicts : rebase_conflict
 
     ready_to_merge --> merging : wf merge (local)
     ready_to_merge --> pr_open : wf pr create (pr mode)
