@@ -74,7 +74,7 @@ npm i -g @anthropic-ai/claude-code
 npm i -g @openai/codex
 ```
 
-Each agent needs either **OAuth login** or an **API key**. If both are configured, hashd prefers OAuth:
+Each agent needs either **OAuth login** or an **API key**. If both are configured, the agent CLI's own precedence rules apply. Hashd verifies authentication by asking the CLI for its status and preserves API-key env vars unless you explicitly force OAuth mode:
 
 ```bash
 # Option A: OAuth (interactive login, no API key needed)

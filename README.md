@@ -757,9 +757,9 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 | **Codex** | `codex` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
 | **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
 | **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
-| **OpenCode** | `opencode` | available | print, json, review, implement | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
-| **Kimi Code** | `kimi` | available | print, json, edit, review, implement | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
-| **Qwen Code** | `qwen` | available | print, json, edit, review, implement | `npm i -g @qwen-code/qwen-code` | Qwen OAuth (free) |
+| **OpenCode** | `opencode` | available | print, json, review, review_resume, implement, implement_resume | `go install github.com/opencode-ai/opencode@latest` | Depends on model |
+| **Kimi Code** | `kimi` | available | print, json, edit, review, review_resume, implement, implement_resume | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
+| **Qwen Code** | `qwen` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @qwen-code/qwen-code` | Qwen OAuth (free) |
 
 **Status:** `active` = tested and verified. `available` = config defined, not yet verified (assign with `--force`).
 
@@ -807,7 +807,7 @@ Command templates support these variables:
 |----------|-------------|---------|
 | `{prompt}` | The prompt text | All stages |
 | `{worktree}` | Path to git worktree | `implement`, `implement_resume` |
-| `{session_id}` | Session UUID for resuming | `implement_resume` |
+| `{session_id}` | Session UUID for resuming | `review_resume`, `implement_resume` |
 
 If `{prompt}` is in the command template, it's passed as a CLI argument. Otherwise, the prompt is passed via stdin (useful for multi-line prompts).
 

@@ -232,13 +232,28 @@ $ wf plan rescope-ac STORY-0054 1         # Bring descoped #1 back to AC
 $ wf show STORY-0054                      # Shows both lists
 ```
 
-**Split** -- "I want this, just not in this story." Extracts selected criteria into a
-new `draft` story. For breaking large stories into smaller implementable pieces.
+**Split** -- "this story is too large." There are two modes:
 
-```
+- Agent proposal mode asks the `plan_split` stage to propose a narrowed parent
+  story plus dependent sub-stories. The proposal lands as a `breakdown_proposal`
+  clarification; approve it with `wf answer STORY-xxxx "yes"` or ask for a
+  revision with `wf answer STORY-xxxx "yes, but ..."` before anything is applied.
+- Deterministic indices mode preserves the existing surgical workflow: selected
+  acceptance criteria are extracted into one new `draft` sibling story and
+  applied directly.
+
+```bash
+$ wf plan split STORY-0054
+$ wf plan split STORY-0054 --feedback "split out recurring events"
 $ wf plan split STORY-0054 3,5,7 -t "Referral Reward Configuration"
+$ wf plan split STORY-0054 3,5,7 -t "Referral Reward Configuration" -y
 # Creates STORY-0055 with criteria 3, 5, 7 removed from STORY-0054
 ```
+
+Agent-created split sub-stories start in `pending` when they depend on the
+parent or another sibling. When every dependency reaches `implemented`, the
+server transitions each pending sub-story to `drafting` and dispatches planning
+so it redrafts against the current codebase.
 
 **Chat** -- all scope operations are also available via pair programmer chat:
 
@@ -384,7 +399,8 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf plan retry STORY-xxx` | Retry failed planning run |
 | `wf plan descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
 | `wf plan rescope-ac STORY-xxx N` | Move descoped criterion N back to acceptance criteria |
-| `wf plan split STORY-xxx 3,5,7 -t "title"` | Split criteria into new draft story |
+| `wf plan split STORY-xxx [--feedback ".."]` | Request an agent breakdown proposal for a large story |
+| `wf plan split STORY-xxx 3,5,7 -t "title" [-y]` | Split criteria into one new draft sibling story |
 | `wf run [id] [--once\|--loop] [--gatekeeper\|--supervised\|--autonomous] [-f ".."] [-y]` | Submit workstream to Prefect (-f: guidance, -y: skip prompts) |
 | `wf list` | List stories and workstreams |
 | `wf show <id>` | Show story or workstream details |
@@ -418,6 +434,11 @@ the server fans out the bundle answer across every pending CLQ on the entity.
 Submitting an answer always auto-dispatches the next agent run (edit-flow for
 stories, start_impl/resume_impl for workstreams) so a single operator action
 moves the entity forward.
+
+Story clarifications can also carry `breakdown_proposal` payloads from
+`wf plan split STORY-xxx`. Answer `yes` to apply the parent revision and create
+sub-stories transactionally, `no` to reject without changes, or any non-yes/no
+feedback to request a revised proposal.
 
 | Command | Description |
 |---------|-------------|
@@ -1074,6 +1095,8 @@ stateDiagram-v2
     [*] --> drafting : wf plan story / suggestion-backed planning
     drafting --> draft : AI generation complete
     drafting --> draft_failed : AI generation failed
+    pending --> drafting : dependencies implemented
+    pending --> abandoned : wf close
     draft_failed --> drafting : wf plan retry
     draft_failed --> editing : wf plan edit
     draft_failed --> abandoned : wf close
@@ -1094,6 +1117,7 @@ stateDiagram-v2
 | Stage | Description | Editable |
 |-------|-------------|----------|
 | `drafting` | AI generating story (in progress) | No |
+| `pending` | Split sub-story waiting for parent/sibling dependencies before redraft | No |
 | `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `wf plan edit`; retry with `wf plan retry`) |
 | `draft` | Generated, awaiting approval | Yes |
 | `editing` | AI edit in progress (auto-reverts after 15 min) | No |
@@ -1105,6 +1129,8 @@ stateDiagram-v2
 **Transitions:**
 
 - `wf approve STORY-xxx` moves draft -> accepted
+- `wf plan split STORY-xxx` can create dependent sub-stories in pending
+- dependency completion moves pending -> drafting for a fresh plan against current code
 - `wf plan edit STORY-xxx` moves draft -> editing -> draft
 - `wf run STORY-xxx` moves accepted -> implementing (LOCKS story)
 - `wf merge <ws>` moves implementing -> implemented

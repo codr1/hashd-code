@@ -106,9 +106,9 @@ Which agents can serve which stage shapes (`wf agents` shows this live):
 | claude | x | x | x | x | x | x | x |
 | codex | x | x | x | x | x | x | x |
 | gemini | x | x | x | x | x | x | x |
-| opencode | x | x | -- | x | -- | x | -- |
-| kimi | x | x | x | x | -- | x | -- |
-| qwen | x | x | x | x | -- | x | -- |
+| opencode | x | x | -- | x | x | x | x |
+| kimi | x | x | x | x | x | x | x |
+| qwen | x | x | x | x | x | x | x |
 | copilot | x | x | x | x | x | x | x |
 
 ### Restoring defaults
@@ -145,7 +145,7 @@ All stage overrides can also be set by editing `config.yaml` directly. See `../c
 
 ## Authentication
 
-Most CLI coding agents support both OAuth (interactive login) and API key authentication. When both are configured, agents differ on which takes precedence -- leading to silent auth failures or unexpected billing. Hashd detects the auth state per agent and builds a clean subprocess environment.
+Most CLI coding agents support both OAuth (interactive login) and API key authentication. When both are configured, agents differ on which takes precedence -- leading to silent auth failures or unexpected billing. Hashd verifies auth by delegating to each agent CLI's own status command and only strips API-key env vars when the project explicitly forces OAuth mode.
 
 ### Auth mode
 
@@ -153,25 +153,25 @@ Set with `wf project config set auth-mode <mode>`:
 
 | Mode | Behavior |
 |------|----------|
-| **auto** (default) | Detect OAuth per-agent; prefer it when available |
-| **oauth** | Always strip API keys for agents where key overrides OAuth |
-| **api-key** | Never strip; always use API keys |
+| **auto** (default) | Preserve API keys; verify auth through the agent CLI's status command |
+| **oauth** | Strip API keys for agents where key overrides OAuth |
+| **api-key** | Preserve API keys |
 
-Most users should leave this at `auto`. It does the right thing: if you have a valid OAuth session, it uses OAuth. If you only have an API key, it uses the key.
+Most users should leave this at `auto`. It avoids guessing from private credential files and lets the agent CLI choose the active auth mode. Use `oauth` only when you deliberately want hashd to remove API-key env vars before invoking agents where keys override OAuth.
 
 ### Per-agent auth behavior
 
 Each agent handles the OAuth/API-key conflict differently:
 
-| Agent | Key overrides OAuth? | What hashd does | OAuth credential file |
-|-------|---------------------|-----------------|----------------------|
-| **Claude** | Yes (`ANTHROPIC_API_KEY` wins) | Strips key when OAuth is valid | `~/.claude/.credentials.json` |
-| **Gemini** | Yes (`GEMINI_API_KEY` wins) | Strips key when OAuth is valid | `~/.gemini/oauth_creds.json` or OS keychain |
-| **Codex** | No (OAuth wins) | Nothing to strip | `~/.codex/auth.json` |
-| **Kimi** | No (OAuth wins) | Nothing to strip | `~/.kimi/credentials/kimi-code.json` |
-| **Qwen** | Mutually exclusive | Nothing to strip | `~/.qwen/oauth_creds.json` |
-| **OpenCode** | N/A (API keys only) | Nothing to strip | N/A |
-| **Copilot** | N/A (token hierarchy) | Nothing to strip | `gh` CLI fallback |
+| Agent | Key overrides OAuth? | What hashd does | verify_auth command |
+|-------|---------------------|-----------------|---------------------|
+| **Claude** | Yes (`ANTHROPIC_API_KEY` wins) | Keeps key in `auto`; strips key in `oauth` | `claude auth status` |
+| **Gemini** | Yes (`GEMINI_API_KEY` wins) | Keeps key in `auto`; strips key in `oauth` | Not declared; no verified non-interactive status command |
+| **Codex** | No (OAuth wins) | Nothing to strip | `codex login status` |
+| **Kimi** | No (OAuth wins) | Nothing to strip | Not declared; no verified non-interactive status command |
+| **Qwen** | Mutually exclusive | Nothing to strip | `qwen auth status` |
+| **OpenCode** | Provider-specific | Nothing to strip | Not declared; no single status command covers every provider |
+| **Copilot** | N/A (token hierarchy) | Nothing to strip | `gh auth status` |
 
 ### Login and logout commands
 
@@ -187,31 +187,21 @@ Each agent handles the OAuth/API-key conflict differently:
 
 ### Diagnostics
 
-Run `wf doctor` to see the auth state for each installed agent:
-
-```
-Agent Authentication (mode: auto):
-
-  claude:
-    [OK] OAuth: valid (expires 2026-04-29)
-    [INFO] API key: ANTHROPIC_API_KEY is set -- will be ignored (OAuth preferred in auto mode)
-    [INFO] To use API key instead: wf project config set auth-mode api-key
-
-  codex:
-    [OK] OAuth: ChatGPT session active
-    [WARN] API key: CODEX_API_KEY is set -- Codex ignores it when OAuth is active
-    [INFO] To use API key instead: codex logout
-```
+Preflight verifies assigned agents before a workstream runs. Agents with `verify_auth` use the CLI-owned status command, so new provider auth modes are recognized without hashd parsing credential files. If the command exits non-zero, hashd surfaces a Diagnostic naming the agent, command, and stderr/stdout excerpt.
 
 ### Common scenarios
 
 **"I only have an API key (no OAuth)"**
 
-It just works. `auto` mode detects no OAuth session and keeps the API key in the environment.
+It just works. `auto` mode keeps the API key in the environment.
 
 **"I use OAuth but also have an API key in my shell"**
 
-`auto` mode detects the valid OAuth session and strips the API key for agents where the key would override OAuth (Claude, Gemini). For agents where OAuth already wins (Codex, Kimi), no action is needed.
+`auto` mode keeps the API key and lets the CLI decide. If you want OAuth to win for agents where keys override OAuth (Claude, Gemini), set:
+
+```bash
+wf project config set auth-mode oauth
+```
 
 **"I want to switch from OAuth to API key"**
 
@@ -219,7 +209,7 @@ It just works. `auto` mode detects no OAuth session and keeps the API key in the
 wf project config set auth-mode api-key
 ```
 
-This tells hashd to never strip API keys, regardless of OAuth state.
+This is equivalent to `auto` for current env handling, but documents the operator intent that API keys should stay in the agent environment.
 
 **"Codex/Kimi ignores my API key"**
 
@@ -235,7 +225,7 @@ kimi logout
 
 **"Claude auth fails after I changed nothing"**
 
-Your OAuth token may have expired. Check with `wf doctor` -- it shows the expiry date. Re-authenticate:
+Your OAuth token may have expired. If preflight reports the agent is not authenticated, run the agent's status command directly; for agents with `verify_auth`, hashd uses that same command. Re-authenticate:
 
 ```bash
 claude
@@ -249,13 +239,13 @@ Hashd always strips `CLAUDECODE` from the subprocess environment for all agents.
 
 Hashd sets `IS_SANDBOX=1` in every agent subprocess environment. The variable is scoped to the spawned agent process; it is not exported into operator shells or written to global toolchain configuration. Agents should treat their current working directory as ephemeral, avoid reaching outside the assigned worktree unless the operator supplied an explicit path, and avoid mutating global toolchain state.
 
-The following API key env vars are stripped based on auth mode and OAuth detection:
+The following API key env vars are stripped only when `auth_mode` is `oauth`:
 
 | Env var | Stripped when | Agent |
 |---------|-------------|-------|
-| `ANTHROPIC_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Claude |
-| `GEMINI_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Gemini |
-| `GOOGLE_API_KEY` | OAuth valid + mode is `auto` or `oauth` | Gemini |
+| `ANTHROPIC_API_KEY` | mode is `oauth` | Claude |
+| `GEMINI_API_KEY` | mode is `oauth` | Gemini |
+| `GOOGLE_API_KEY` | mode is `oauth` | Gemini |
 
 ---
 
