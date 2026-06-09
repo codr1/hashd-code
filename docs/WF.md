@@ -819,7 +819,7 @@ A **status** is the runtime state at the workstream's current stage. Seven value
 | Status | Meaning | Computed from |
 |---|---|---|
 | `running` | Process attached, work in progress at current stage | `runner_pid` alive AND `last_run` incomplete |
-| `blocked` | Waiting for external input (clarification, human review, conflict resolution, etc.) | `last_run.status == "blocked"` |
+| `blocked` | Waiting for external input (clarification, human review, conflict resolution, post-rebase merge-test recovery, etc.) | `last_run.status == "blocked"`; `merge_test_failed` with latest run failed |
 | `changes_required` | Reviewer requested changes; approve/reject/reset can decide the current diff | Latest review verdict is request changes |
 | `failed` | Previous run errored, retryable via re-dispatch | `last_run.status == "failed"` |
 | `idle` | Stage entered, no run has executed yet | No `last_run` record for current stage |
@@ -847,7 +847,7 @@ Stages with internal sequencing have their own sub-FSM. The substage field track
 Stages that have a sub-FSM today (or will when formalized):
 - **`implementing`** — runner inner loop. **Formalized (Brief 123 Phase 3).** Spec at `server/internal/fsm/implementing_substages.json`; Go validator at `server/internal/fsm/implementing_substages.go` (loaded as `fsm.ImplementingSubstages`); Python mirror at `orchestrator/lib/implementing_substages.py`. Cross-language contract test at `tests/test_implementing_substages_contract.py`. See **Implementing sub-FSM** below for the transition table.
 - **`merge_conflicts`** — resolution attempts: `initial → resolve_running → resolve_succeeded → retry_merge` (with `resolve_failed` as a recoverable sub-state). _Future phase._
-- **`merging`** — merge gate sequence: `rebase → build → test → push → done`. _Future phase._
+- **`merging`** — merge sequence. **Formalized.** Local merge records `acquire_lock → pre_merge_tests → post_rebase_test → checkout → merge_attempt → finalize`; PR merge records `acquire_lock → pre_merge_tests → post_rebase_test → pr_merge → finalize`. The `post_rebase_test` substage runs the merge-gate command in the worktree after rebasing onto fresh main and before any merge lands.
 - **`provisioning`** — create steps: `worktree → baseline → enrichment` (when applicable). _Future phase._
 
 #### Implementing sub-FSM
@@ -883,7 +883,7 @@ Terminal triggers (exit-to-caller; control leaves the sub-FSM):
 The validation hooks into `update_runner_stage_current` in `orchestrator/runner/locking.py`: when both the previous and the new `runner_stage` are in the spec's state set, the transition must match a registered edge. Cross-domain transitions (`preflight → breakdown`, `review → human_review`, anything involving `merge_gate` / `final_review`) are accepted unconditionally — those values are outside the implementing sub-FSM's state set.
 
 Stages without sub-FSM (light operator-decision stages):
-- `active`, `awaiting_human_review`, `ready_to_merge`, `final_review_with_concerns`, `pr_open`, `pr_approved`
+- `active`, `awaiting_human_review`, `ready_to_merge`, `final_review_with_concerns`, `merge_test_failed`, `pr_open`, `pr_approved`
 - Terminal: `merged`, `closed`, `closed_no_changes`
 
 `drafting`, `draft`, `editing`, and `accepted` are story-lifecycle stages, not workstream stages, so they are intentionally outside the workstream model here.
@@ -899,6 +899,7 @@ implementing / running (review)        — workstream running, currently in revi
 implementing / blocked (clarification) — blocked, agent raised a clarification
 implementing / failed (test)           — last run failed at test substage
 merge_conflicts / running (ai-resolve) — AI resolution in progress
+merge_test_failed / blocked            — post-rebase merge test failed; add a FIX commit, retry merge, or close
 ready_to_merge / idle                  — approved, waiting for operator merge
 merged / done                          — terminal
 ```
@@ -1047,8 +1048,13 @@ stateDiagram-v2
 
     merging --> merged : success
     merging --> merge_conflicts : conflicts
+    merging --> merge_test_failed : post_rebase_test_failed
     merging --> ready_to_merge : merge_aborted
     merging --> pr_open : push_for_pr
+
+    merge_test_failed --> active : add_fix_commit
+    merge_test_failed --> merging : wf merge
+    merge_test_failed --> closed : wf close
 
     merge_conflicts --> active : resolve_conflicts
     merge_conflicts --> merging : retry_merge

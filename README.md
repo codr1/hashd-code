@@ -18,6 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 - [QUICKSTART.md](docs/QUICKSTART.md) - Installation, first project setup, basic workflows
 - [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
+- [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - Code intelligence operator commands and troubleshooting
 - [WF.md](docs/WF.md) - Full lifecycle documentation, state machines, merge behavior
 
 ## What hashd does
@@ -73,8 +74,9 @@ Install shell completion for your shell:
 # Bash (managed automatically by setup.sh and dist/install.sh)
 source <(wf completion bash)
 
-# Zsh
-wf completion zsh >> ~/.zshrc
+# Zsh (managed automatically by setup.sh for source installs)
+autoload -Uz compinit && compinit
+source <(wf completion zsh)
 
 # Fish
 wf completion fish > ~/.config/fish/completions/wf.fish
@@ -476,9 +478,10 @@ Prefect automatically retries transient failures:
 See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
 - Python 3.11+, Node.js 20+, Git
-- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://bitbucket.org/) (Bitbucket)
-- [delta (git-delta)](https://github.com/dandavison/delta) - for syntax-highlighted diffs
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
+- [delta (git-delta)](https://github.com/dandavison/delta) - optional, for TUI side-by-side, syntax-highlighted, word-level diffs
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
+- [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) - bundled code intelligence backend (auto-fetched by the installer / `setup.sh`; setup fails if the pinned binary cannot be fetched or executed)
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
 
@@ -486,11 +489,10 @@ Minimum agent/tool versions verified for this release:
 
 | Tool | Minimum |
 |------|---------|
-| Claude Code | 2.1.137 |
+| Claude Code | 2.1.154 |
 | Codex CLI | 0.130.0 |
 | uv | 0.11+ |
 | Go | 1.26+ |
-| .NET SDK | 8.0+ (only for .NET projects) |
 
 Run `wf doctor` to check your setup.
 

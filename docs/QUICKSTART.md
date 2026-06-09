@@ -17,9 +17,9 @@ The installer handles Python virtual environment setup, puts `wf` on your PATH, 
 | Python 3.11+ | yes | Runtime |
 | Node.js 20+ | yes | Required by npm-installed agent CLIs |
 | git | yes | Version control, worktrees |
-| [gh (GitHub CLI)](https://cli.github.com/) | for GitHub | PR workflow, repo operations |
-| [bkt (Bitbucket CLI)](https://bitbucket.org/) | for Bitbucket | PR workflow, repo operations |
-| [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations |
+| [gh (GitHub CLI)](https://cli.github.com/) | for GitHub | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
+| [bkt (Bitbucket CLI)](https://github.com/avivsinai/bitbucket-cli) | for Bitbucket | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
+| [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
 | [delta](https://github.com/dandavison/delta) | yes | Syntax-highlighted diffs |
 
 > **gitleaks** is used for secrets scanning at project setup but
@@ -54,12 +54,15 @@ sudo apt install git gh git-delta python3
 # delta: https://github.com/dandavison/delta#installation
 ```
 
-After installing the appropriate forge CLI, authenticate:
+The installer fetches pinned prebuilt forge CLIs for GitHub, GitLab, and
+Bitbucket. After install, authenticate the forge(s) you use:
 
 ```bash
-gh auth login      # GitHub
-glab auth login    # GitLab
-bkt auth login     # Bitbucket
+gh auth login                         # GitHub
+glab auth login                       # GitLab
+bkt auth login --kind cloud --web     # Bitbucket OAuth
+# Bitbucket API-token alternative:
+bkt auth login --kind cloud --web-token
 ```
 
 #### AI Coding Agents
@@ -99,6 +102,11 @@ wf project config set coder codex
 ```
 
 Run `wf agents` to see all seven supported agents and their install status. See [docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.
+
+Hashd bundles cbm for symbol-aware code inspection. See [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) for the `wf code` command reference and troubleshooting.
+For source checkouts, `setup.sh` fetches the pinned `codebase-memory-mcp`
+binary and smoke-checks it with `codebase-memory-mcp --version`; setup
+fails immediately if the binary cannot be fetched or executed.
 
 #### Optional Tools
 
@@ -298,8 +306,9 @@ The bot also auto-starts when you run `wf run` or `wf watch`. Send `/` for the b
 # Bash (managed automatically by setup.sh and dist/install.sh)
 source <(wf completion bash)
 
-# Zsh
-wf completion zsh >> ~/.zshrc
+# Zsh (managed automatically by setup.sh for source installs)
+autoload -Uz compinit && compinit
+source <(wf completion zsh)
 
 # Fish
 wf completion fish > ~/.config/fish/completions/wf.fish

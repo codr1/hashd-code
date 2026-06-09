@@ -10,6 +10,11 @@ REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
 COMPLETION_LINE='source <(wf completion bash)'
 
+# Forge CLI pinned versions. Bump in lockstep with hashd release cuts.
+GH_VERSION="2.93.0"
+GLAB_VERSION="1.101.0"
+BKT_VERSION="0.28.1"
+
 install_bash_completion() {
     local bashrc="${HOME}/.bashrc"
     local tmp
@@ -61,6 +66,203 @@ extract_json_string_field() {
     sed -nE "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" | head -1
 }
 
+extract_semver() {
+    sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1
+}
+
+sha256_file() {
+    local path="$1"
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$path" | awk '{print $1}'
+        return 0
+    fi
+    if command -v shasum &>/dev/null; then
+        shasum -a 256 "$path" | awk '{print $1}'
+        return 0
+    fi
+    echo "ERROR: sha256sum or shasum is required to verify downloaded forge CLI archives."
+    exit 1
+}
+
+forge_binary_version() {
+    local binary="$1"
+    "$binary" --version 2>/dev/null | extract_semver || true
+}
+
+forge_asset_name() {
+    local name="$1"
+    local version="$2"
+    local os="$3"
+    local machine="$4"
+    local arch
+
+    case "$name" in
+        gh)
+            case "$machine" in
+                x86_64) arch="amd64" ;;
+                aarch64) arch="arm64" ;;
+                *) return 1 ;;
+            esac
+            if [ "$os" = "macosx" ]; then
+                echo "gh_${version}_macOS_${arch}.zip"
+            else
+                echo "gh_${version}_linux_${arch}.tar.gz"
+            fi
+            ;;
+        glab)
+            case "$machine" in
+                x86_64) arch="amd64" ;;
+                aarch64) arch="arm64" ;;
+                *) return 1 ;;
+            esac
+            if [ "$os" = "macosx" ]; then
+                echo "glab_${version}_darwin_${arch}.tar.gz"
+            else
+                echo "glab_${version}_linux_${arch}.tar.gz"
+            fi
+            ;;
+        bkt)
+            case "$machine" in
+                x86_64) arch="x86_64" ;;
+                aarch64) arch="arm64" ;;
+                *) return 1 ;;
+            esac
+            if [ "$os" = "macosx" ]; then
+                echo "bkt_${version}_darwin_${arch}.tar.gz"
+            else
+                echo "bkt_${version}_linux_${arch}.tar.gz"
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+forge_download_base_url() {
+    local name="$1"
+    local version="$2"
+    case "$name" in
+        gh) echo "https://github.com/cli/cli/releases/download/v${version}" ;;
+        glab) echo "https://gitlab.com/gitlab-org/cli/-/releases/v${version}/downloads" ;;
+        bkt) echo "https://github.com/avivsinai/bitbucket-cli/releases/download/v${version}" ;;
+        *) return 1 ;;
+    esac
+}
+
+forge_checksums_name() {
+    local name="$1"
+    local version="$2"
+    case "$name" in
+        gh) echo "gh_${version}_checksums.txt" ;;
+        glab|bkt) echo "checksums.txt" ;;
+        *) return 1 ;;
+    esac
+}
+
+verify_forge_checksum() {
+    local asset="$1"
+    local checksums="$2"
+    local asset_name
+    local expected
+    local actual
+
+    asset_name="$(basename "$asset")"
+    expected="$(awk -v name="$asset_name" '$NF == name { print $1; exit }' "$checksums")"
+    if [ -z "$expected" ]; then
+        echo "ERROR: No checksum entry found for $asset_name"
+        exit 1
+    fi
+
+    actual="$(sha256_file "$asset")"
+    if [ "$actual" != "$expected" ]; then
+        echo "ERROR: SHA256 mismatch for $asset_name"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        exit 1
+    fi
+}
+
+install_forge_cli() {
+    local name="$1"
+    local display="$2"
+    local version="$3"
+    local bin_dir="${PIPX_BIN_DIR:-$HOME/.local/bin}"
+    local existing_path
+    local existing_version
+    local asset_name
+    local base_url
+    local checksums_name
+    local forge_dir
+    local asset_path
+    local checksums_path
+    local extract_dir
+    local found_binary
+    local installed_version
+
+    existing_path="$(command -v "$name" 2>/dev/null || true)"
+    if [ -n "$existing_path" ]; then
+        existing_version="$(forge_binary_version "$existing_path")"
+        if [ "$existing_version" = "$version" ]; then
+            echo "  $name $version already installed"
+            return 0
+        fi
+        if [ -n "$existing_version" ]; then
+            echo "  $name present at $existing_version, replacing with $version"
+        else
+            echo "  $name present at $existing_path, replacing with $version"
+        fi
+    else
+        echo "  Installing $display CLI ($name) $version..."
+    fi
+
+    asset_name="$(forge_asset_name "$name" "$version" "$PLATFORM" "$MACHINE")"
+    base_url="$(forge_download_base_url "$name" "$version")"
+    checksums_name="$(forge_checksums_name "$name" "$version")"
+    forge_dir="$WORK_DIR/forge-$name"
+    asset_path="$forge_dir/$asset_name"
+    checksums_path="$forge_dir/$checksums_name"
+    extract_dir="$forge_dir/extract"
+
+    mkdir -p "$extract_dir"
+    curl -fsSL -o "$asset_path" "$base_url/$asset_name"
+    curl -fsSL -o "$checksums_path" "$base_url/$checksums_name"
+    verify_forge_checksum "$asset_path" "$checksums_path"
+
+    case "$asset_name" in
+        *.tar.gz)
+            tar -xzf "$asset_path" -C "$extract_dir"
+            ;;
+        *.zip)
+            if ! command -v unzip &>/dev/null; then
+                echo "ERROR: unzip is required to extract $asset_name"
+                exit 1
+            fi
+            unzip -q "$asset_path" -d "$extract_dir"
+            ;;
+        *)
+            echo "ERROR: Unsupported forge CLI archive: $asset_name"
+            exit 1
+            ;;
+    esac
+
+    found_binary="$(find "$extract_dir" -name "$name" -type f -perm -u+x | head -1)"
+    if [ -z "$found_binary" ]; then
+        found_binary="$(find "$extract_dir" -name "$name" -type f | head -1)"
+    fi
+    if [ -z "$found_binary" ]; then
+        echo "ERROR: Could not find $name inside $asset_name"
+        exit 1
+    fi
+
+    mkdir -p "$bin_dir"
+    install -m 755 "$found_binary" "$bin_dir/$name"
+    installed_version="$("$bin_dir/$name" --version 2>/dev/null | extract_semver || true)"
+    if [ "$installed_version" != "$version" ]; then
+        echo "ERROR: Installed $name but version check returned '${installed_version:-unknown}', expected $version"
+        exit 1
+    fi
+    echo "  Installed $name $version at $bin_dir/$name"
+}
+
 warn_external_tools() {
     echo "WARN: external tool install skipped ($1)."
     echo "      gitleaks can be installed manually from https://github.com/gitleaks/gitleaks/releases if needed."
@@ -91,6 +293,16 @@ esac
 echo "hashd installer"
 echo ""
 echo "  Platform: $PLATFORM ($MACHINE)"
+echo ""
+echo "This installer will install:"
+echo "  - pipx (if missing)"
+echo "  - hashd Python wheels (CLI + server + bot/figma/jira/github connectors + TUI)"
+echo "  - Forge CLIs: gh (GitHub), glab (GitLab), bkt (Bitbucket) -- pinned versions, prebuilt binaries"
+echo "You may also need (NOT installed automatically):"
+echo "  - delta (diff viewer)"
+echo "  - gitleaks (secrets scanning)"
+echo "  - At least one AI agent CLI (claude / codex / cursor-agent)"
+echo "After install, run \`wf doctor\` to verify everything is wired up."
 
 # --- Check Python ---
 PYTHON=""
@@ -357,6 +569,13 @@ echo "  Downloaded: $(basename "$GITHUB_CONNECTOR_WHEEL")"
 echo "  Downloaded: $(basename "$JIRA_WHEEL")"
 echo "  Downloaded: $(basename "$TUI_WHEEL")"
 
+# --- Install forge CLIs ---
+echo ""
+echo "Installing forge CLIs..."
+install_forge_cli gh "GitHub" "$GH_VERSION"
+install_forge_cli glab "GitLab" "$GLAB_VERSION"
+install_forge_cli bkt "Bitbucket" "$BKT_VERSION"
+
 # --- Install ---
 echo ""
 echo "Installing hashd..."
@@ -426,6 +645,11 @@ echo "Refreshing services and project databases..."
 
 echo ""
 echo "Done! Installed hashd $RELEASE_TAG."
+echo ""
+echo "Forge auth not yet configured. Authenticate for the forge(s) you use:"
+echo "  gh:   gh auth login"
+echo "  glab: glab auth login"
+echo "  bkt:  bkt auth login --kind cloud --web"
 echo ""
 if ! command -v wf &>/dev/null; then
     echo "NOTE: wf is not yet on your PATH. Run:"
