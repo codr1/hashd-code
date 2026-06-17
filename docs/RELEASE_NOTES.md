@@ -4,6 +4,50 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.8.4 - 2026-06-17
+
+### What's Changed
+
+- Closed the commit gate's biggest hole: a red micro-commit can no longer land.
+  Exhausted test/build failures terminate instead of falling through to commit,
+  the qa and human-review gates verify the test outcome and fail closed, and a
+  failure caused by an earlier commit self-heals with reframed guidance instead
+  of grinding.
+- Reworked test-conflict escalation onto a single breakdown engine: the Tier-2
+  architect/replanner became a partial breakdown, the oscillation guard now
+  fires correctly and detects the same concern recurring across runs (not just
+  within one run), and red-test conflicts are adjudicated against the
+  requirement.
+- `wf reject` now folds the review gate's own findings into the next attempt by
+  default -- with provenance and recurring-concern framing -- so iterating no
+  longer means re-typing what the reviewer already said. Reset/replan/reject were
+  unified onto one engine and their feedback moved to a consistent `-f` flag.
+- Lifted model and reasoning-effort out of agent command strings into
+  declarative `model`/`effort` config, added per-stage agent retries with honest
+  timeout reporting, attributed the harness-reported model, and gave the
+  implementer the story's business goal as orientation.
+- Added planning observability and recovery: see what is blocking planning,
+  auto-heal orphaned planning state, and a `/plan/reconcile` endpoint with
+  `wf plan reset`.
+- Fixed cloned stories failing to load by declaring clone metadata fields and
+  making the story loader tolerant of unknown server-written `data` keys, so
+  future server-side fields can't crash it. Story `depends_on` is now validated
+  at accept time.
+- Reworked onboarding around the system rather than the command list, made
+  Claude the universal default with `wf agents --suggest` and gatekeeper
+  autonomy, and improved `wf project add`/describe with docs-first prompts and
+  multi-repo role framing.
+- Hardened fresh installs across platforms: pinned the Prefect/FastAPI/Starlette
+  trio to a tested set (a fresh resolve was landing on a broken Starlette 1.x),
+  dropped the installer's `awk` dependency for minimal Fedora, and moved the
+  bundled codebase-memory-mcp binary onto a hashd-controlled fork.
+- Smaller fixes: derive Prefect task timeouts from config, find the venv Python
+  on dev-rig installs, a Telegram retry command for draft-failed stories,
+  flow-status discovery by tag, and an in-place elapsed/cap timer for long AI
+  steps.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.8.3...v0.8.4
+
 ## v0.8.3 - 2026-06-10
 
 ### What's Changed
