@@ -20,25 +20,25 @@ The installer handles Python virtual environment setup, puts `wf` on your PATH, 
 | [gh (GitHub CLI)](https://cli.github.com/) | for GitHub | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
 | [bkt (Bitbucket CLI)](https://github.com/avivsinai/bitbucket-cli) | for Bitbucket | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
 | [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
-| [delta](https://github.com/dandavison/delta) | yes | Syntax-highlighted diffs |
+| [delta](https://github.com/dandavison/delta) | optional | TUI side-by-side, syntax-highlighted, word-level diffs; auto-installed by `install.sh` |
 
-> **gitleaks** is used for secrets scanning at project setup but
-> does NOT need to be installed by hand. The curl installer above
-> (wheel users) and `setup.sh` (source checkouts) both fetch a
-> pinned gitleaks binary into `~/.hashd/tools/bin/`. If a tool
-> install fails (e.g. offline), `wf` will retry on first use.
+> **git-delta** and **gitleaks** do NOT need to be installed by
+> hand. The curl installer above (wheel users) and `setup.sh`
+> (source checkouts) both fetch pinned binaries into
+> `~/.hashd/tools/bin/`. If a tool install fails (e.g. offline),
+> `wf` will retry on first use.
 
 **Install by platform:**
 
 ```bash
 # --- Arch Linux ---
-sudo pacman -S git github-cli git-delta nodejs npm python
+sudo pacman -S git github-cli nodejs npm python
 
 # --- macOS (Homebrew) ---
-brew install git gh git-delta node python@3.11
+brew install git gh node python@3.11
 
 # --- Debian/Ubuntu 24.04+ ---
-sudo apt install git gh git-delta python3
+sudo apt install git gh python3
 # Install Node.js 20+ explicitly. Preferred: nvm
 #   https://github.com/nvm-sh/nvm
 #   nvm install 20
@@ -46,12 +46,9 @@ sudo apt install git gh git-delta python3
 # Alternative: NodeSource 20.x repo
 #   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 #   sudo apt install nodejs
-# Older Ubuntu: delta is not in apt, install from GitHub releases:
-#   https://github.com/dandavison/delta/releases
-
 # --- Others ---
 # gh: https://cli.github.com/
-# delta: https://github.com/dandavison/delta#installation
+# delta manual fallback: https://github.com/dandavison/delta/releases
 ```
 
 The installer fetches pinned prebuilt forge CLIs for GitHub, GitLab, and

@@ -4,6 +4,30 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.8.5 - 2026-06-17
+
+### What's Changed
+
+- Fixed an install/startup crash for returning users. hashd shares the global
+  `~/.prefect` database, so a machine whose `~/.prefect` was stamped by a newer
+  Prefect (including hashd's own earlier install) crash-looped under the pinned
+  older Prefect -- surfaced only as an opaque "health check timed out". Bumped the
+  Prefect pin to 3.6.29, the newest pre-3.7 release, whose schema reads and
+  forward-upgrades those databases; the FastAPI/Starlette web stack stays frozen
+  at the proven-booting versions.
+- `wf restart` and Prefect auto-start now surface the real server-start failure
+  (tailed from the Prefect log) instead of a bare timeout, and point at the
+  `PREFECT_HOME` workaround when the database was written by a newer Prefect.
+- The TUI diff view now works out of the box: `git-delta` (pinned 0.19.2,
+  SHA-verified) is auto-installed by both source setup and packaged installs and
+  resolved from `~/.hashd/tools/bin`, so it is no longer a manual package-manager
+  prerequisite.
+- Release/vendor tooling: the bundled codebase-memory-mcp bump is now manual-only
+  (dropped the weekly auto-bump) and mirror-aware (DeusData canonical, codr1
+  mirror), with a release-time staleness nudge in the cut script.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.8.4...v0.8.5
+
 ## v0.8.4 - 2026-06-17
 
 ### What's Changed

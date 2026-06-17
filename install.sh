@@ -278,6 +278,7 @@ install_forge_cli() {
 warn_external_tools() {
     echo "WARN: external tool install skipped ($1)."
     echo "      gitleaks can be installed manually from https://github.com/gitleaks/gitleaks/releases if needed."
+    echo "      git-delta can be installed manually from https://github.com/dandavison/delta/releases if needed."
 }
 
 # --- Detect platform ---
@@ -310,9 +311,8 @@ echo "This installer will install:"
 echo "  - pipx (if missing)"
 echo "  - hashd Python wheels (CLI + server + bot/figma/jira/github connectors + TUI)"
 echo "  - Forge CLIs: gh (GitHub), glab (GitLab), bkt (Bitbucket) -- pinned versions, prebuilt binaries"
-echo "You may also need (NOT installed automatically):"
-echo "  - delta (diff viewer)"
-echo "  - gitleaks (secrets scanning)"
+echo "  - External runtime tools: gitleaks, git-delta -- pinned versions, prebuilt binaries"
+echo "You still need (not installed automatically):"
 echo "  - At least one AI agent CLI (claude / codex / cursor-agent)"
 echo "After install, run \`wf doctor\` to verify everything is wired up."
 
@@ -615,7 +615,7 @@ fi
 
 install_bash_completion
 
-# --- Install external tools (gitleaks, ...) ---
+# --- Install external tools (gitleaks, git-delta, ...) ---
 # Delegates to scripts/install-tools.sh from main -- the same script
 # `wf` auto-invokes on source checkouts when a tool is missing. One
 # script, two entry points, no drift.
@@ -629,8 +629,9 @@ install_bash_completion
 #    from an arbitrary old tag would break.
 #
 # 2. Forward-drift tradeoff (acknowledged, not yet a problem):
-#    install-tools.sh pins the gitleaks version itself, so a wheel
-#    user today always gets 8.30.1 regardless of when they install.
+#    install-tools.sh pins the tool versions itself, so a wheel
+#    user today always gets the script's current pins regardless of
+#    when they install.
 #    The latent risk: if we ever ship wf code that depends on a
 #    specific tool version's output shape (say, gitleaks 9.x
 #    reshuffles the JSON fields wf parses) and later bump the
@@ -638,13 +639,22 @@ install_bash_completion
 #    tool. Revisit this pin at that point: either switch to
 #    $RELEASE_TAG, or freeze per-tool versions per wheel release.
 TOOLS_SCRIPT_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install-tools.sh"
+TOOLS_OS="$PLATFORM"
+if [ "$TOOLS_OS" = "macosx" ]; then
+    TOOLS_OS="darwin"
+fi
+TOOLS_ARCH="$MACHINE"
+case "$TOOLS_ARCH" in
+    x86_64) TOOLS_ARCH="amd64" ;;
+    aarch64) TOOLS_ARCH="arm64" ;;
+esac
 echo ""
 echo "Installing external tools..."
 if curl --fail --silent --location \
     --retry 3 --retry-delay 2 \
     --connect-timeout 10 --max-time 60 \
     "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/install-tools.sh" 2>/dev/null; then
-    if ! bash "$WORK_DIR/install-tools.sh"; then
+    if ! HASHD_TOOLS_OS="$TOOLS_OS" HASHD_TOOLS_ARCH="$TOOLS_ARCH" bash "$WORK_DIR/install-tools.sh"; then
         warn_external_tools "installer script failed"
     fi
 else

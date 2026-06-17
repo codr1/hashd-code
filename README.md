@@ -515,7 +515,7 @@ See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions i
 
 - Python 3.11+, Node.js 20+, Git
 - A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
-- [delta (git-delta)](https://github.com/dandavison/delta) - optional, for TUI side-by-side, syntax-highlighted, word-level diffs
+- [delta (git-delta)](https://github.com/dandavison/delta) - optional TUI side-by-side, syntax-highlighted, word-level diffs (auto-installed by the installer / `setup.sh`)
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
 - [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) - bundled code intelligence backend (auto-fetched by the installer / `setup.sh`; setup fails if the pinned binary cannot be fetched or executed)
 - At least one AI coding agent (see [Agent Configuration](#agent-configuration))
