@@ -86,8 +86,8 @@ If an agent does not support the required stage shapes, the assignment is reject
 | Planning | pm_annotate | claude | edit |
 | Planning | pm_describe | claude | print |
 | Implementation | breakdown | claude | review |
-| Implementation | implement | codex | implement |
-| Implementation | implement_resume | codex | implement_resume |
+| Implementation | implement | claude | implement |
+| Implementation | implement_resume | claude | implement_resume |
 | Review | concern_triage | claude | print |
 | Review | review | claude | review |
 | Review | review_resume | claude | review_resume |

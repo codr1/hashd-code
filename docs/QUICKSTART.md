@@ -67,13 +67,13 @@ bkt auth login --kind cloud --web-token
 
 #### AI Coding Agents
 
-Hashd uses AI agents for planning, implementation, and review. The default setup uses Claude for planning/review and Codex for implementation. You only need one agent to get started - Claude can handle all stages if you prefer a single-agent setup.
+Hashd uses AI agents for planning, implementation, and review. Claude is the default agent for every stage; any other supported agent can be swapped in per stage. You only need Claude to get started.
 
 ```bash
-# Claude Code >= 2.1.137 (planning, review, breakdown - and optionally implementation)
+# Claude Code >= 2.1.137 (required - the default agent for every stage)
 npm i -g @anthropic-ai/claude-code
 
-# Codex CLI >= 0.130.0 (implementation - optional if using Claude for everything)
+# Codex CLI >= 0.130.0 (optional - swap in per stage if you want it)
 npm i -g @openai/codex
 ```
 
@@ -89,21 +89,23 @@ export ANTHROPIC_API_KEY="sk-ant-..."    # for Claude Code
 export OPENAI_API_KEY="sk-..."           # for Codex CLI
 ```
 
-To use one agent for every stage:
+Claude already handles every stage out of the box. To use a different agent:
 
 ```bash
-# Single agent for everything (Claude is the planner default; this also handles
-# the implement role):
-wf project config set coder claude
+# Scan installed agents and apply a default for all stages:
+wf agents --suggest
 
 # Or use Codex for everything:
-wf project config set planner codex
+wf config stages-use codex
+
+# Or split roles per project:
+wf project config set planner claude
 wf project config set coder codex
 ```
 
 Run `wf agents` to see all seven supported agents and their install status. See [docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md) for agent switching, auth configuration, and per-project overrides.
 
-Hashd bundles cbm for symbol-aware code inspection. See [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) for the `wf code` command reference and troubleshooting.
+Hashd bundles cbm for symbol-aware code inspection. See [docs/CODE_TOOLS.md](CODE_TOOLS.md) for the `wf code` command reference and troubleshooting.
 For source checkouts, `setup.sh` fetches the pinned `codebase-memory-mcp`
 binary and smoke-checks it with `codebase-memory-mcp --version`; setup
 fails immediately if the binary cannot be fetched or executed.
@@ -211,7 +213,7 @@ wf log <workstream-id>
 
 # Handle gates as needed
 wf approve <workstream-id>
-wf reject <workstream-id> "feedback"
+wf reject <workstream-id> -f "feedback"
 wf answer list
 
 # Complete
@@ -351,7 +353,7 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 | Run implementation | `wf run STORY-xxx` | Workstream Detail, press `G` |
 | View progress | `wf show <ws>` | Select workstream `1-9` |
 | Approve work | `wf approve <ws>` | Workstream Detail, press `a` |
-| Reject work | `wf reject <ws> "..."` | Workstream Detail, press `r` |
+| Reject work | `wf reject <ws> -f "..."` | Workstream Detail, press `r` |
 | Merge | `wf merge <ws>` | Workstream Detail, press `m` |
 | Chat with AI | `wf chat` | Any screen, press `C` |
 | Search | `wf search "query"` | Dashboard, press `/` |
@@ -359,7 +361,18 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 ## Further Reading
 
+Learn the system:
+
+- **[docs/how-hashd-works.md](docs/how-hashd-works.md)** -- the mental model: entities, gates, the event log, and provenance
+- **[docs/walkthrough.md](docs/walkthrough.md)** -- one feature start-to-finish, spec to merged commit
+- **[docs/glossary.md](docs/glossary.md)** -- canonical term definitions
+- **[docs/navigation.md](docs/navigation.md)** -- the `wf watch` TUI navigation journey
+- **[docs/provenance.md](docs/provenance.md)** -- the audit/lineage story (`wf lineage`, SLSA/in-toto export, hash-chain verify)
+
+Reference:
+
 - **[WF.md](WF.md)** -- Full command reference and lifecycle docs
+- **[RELEASE_NOTES.md](RELEASE_NOTES.md)** -- Version-by-version release notes
 - **[docs/AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md)** -- Agent switching, auth, per-project overrides
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** -- Common issues and fixes
 - **[CONNECTORS.md](CONNECTORS.md)** -- External integrations (GitHub Issues, Figma)

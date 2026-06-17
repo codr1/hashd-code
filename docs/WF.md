@@ -146,7 +146,7 @@ The main planner stays conservative: never surfaces work that depends on in-flig
         $ wf approve STORY-xxxx     # draft -> accepted
 
 [Human] Edit story if needed
-        $ wf plan edit STORY-xxxx ["feedback"]
+        $ wf plan edit STORY-xxxx [-f "feedback"]
 
 [Human] Set context (optional)
         $ wf use <workstream_id>
@@ -393,10 +393,11 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf plan list` | View current suggestions |
 | `wf plan story "title" [-f ctx]` | Quick feature (skips REQS discovery) |
 | `wf plan bug "title" [-f ctx]` | Quick bug fix (conditional SPEC update) |
-| `wf plan edit STORY-xxx [feedback]` | Edit existing story |
+| `wf plan edit STORY-xxx [-f "feedback"]` | Edit existing story |
 | `wf plan clone STORY-xxx` | Clone a locked story |
 | `wf plan resurrect STORY-xxx` | Resurrect abandoned story |
 | `wf plan retry STORY-xxx` | Retry failed planning run |
+| `wf plan reset` | Reclaim claimed suggestions whose story is gone (dead flow / out-of-band delete) so discovery is unblocked |
 | `wf plan descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
 | `wf plan rescope-ac STORY-xxx N` | Move descoped criterion N back to acceptance criteria |
 | `wf plan split STORY-xxx [--feedback ".."]` | Request an agent breakdown proposal for a large story |
@@ -405,13 +406,14 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf list` | List stories and workstreams |
 | `wf show <id>` | Show story or workstream details |
 | `wf approve <id>` | Accept story or approve gate |
-| `wf reject [id] [feedback] [--reset]` | Reject with feedback (positional; required unless `--reset`). Use `@directive <text>` in feedback to add durable constraints (e.g. `wf reject ws-1 "fix X @directive do not modify RBAC"`) |
+| `wf reject [id] [-f "feedback"] [--reset]` | Reject a gate and fold review findings into the next FIX commit. `-f` is optional additive operator guidance and takes precedence over folded findings. Use `@directive <text>` in feedback to add durable constraints (e.g. `wf reject ws-1 -f "fix X @directive do not modify RBAC"`) |
 | `wf pr create [id]` | Create PR/MR for specified workstream |
 | `wf pr feedback [id]` | View PR/MR review comments |
 | `wf merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main and archive (`--confirm`/`-y` required in supervised/gatekeeper mode, `--pr` forces PR workflow) |
 | `wf close [id] [--force] [--keep-branch] [--no-changes] [-r ".."]` | Abandon workstream (-r reason required with --no-changes) |
 | `wf skip [id] [commit] [-m ".."]` | Mark commit as done without changes |
-| `wf reset [id] [--hard]` | Reset workstream to start fresh |
+| `wf reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
+| `wf replan [id] [-f ".."]` | Regenerate the plan from a clean base (resets the worktree to baseline, clears the plan; `-f`: why the plan is wrong) |
 
 ### Supporting Commands
 
@@ -425,6 +427,45 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `wf docs [id]` | Update SPEC.md from workstream |
 | `wf refresh [id]` | Refresh touched files |
 | `wf conflicts [id]` | Check file conflicts |
+
+### Plan regeneration: reset / replan / reject
+
+Three operator verbs touch a workstream's plan + worktree, all backed by the one
+`breakdown` engine (the same generator as the initial plan -- see "Test-Conflict
+Escalation"). They differ only in scope and whether the plan is kept:
+
+| Verb | Plan | Worktree | Feedback | What it's for |
+|------|------|----------|----------|---------------|
+| **reset** | kept (commits unmarked) | reset to **baseline** (drops committed + uncommitted work) | -- | The plan is right, the implementation went bad: redo it from clean. |
+| **replan** | **regenerated** (breakdown re-runs) | reset to **baseline** | optional (`-f`) | The plan is wrong: re-derive it from the requirement. |
+| **reject** (gate) | kept | current attempt only (`--reset` discards it; otherwise refine in place) | folded gate findings plus optional `-f` | At a review gate: iterate on the current micro-commit or branch feedback. |
+
+reset and replan are the same operation modulo "keep vs regenerate the plan";
+both reset the worktree to the recorded baseline via the shared
+`resetWorktreeToBase` (`server/internal/api/mutations_reset.go`), then return the
+workstream to active. (The former `wf reset --hard` -- clear the plan and
+regenerate -- folded into `wf replan`.)
+
+`resetWorktreeToBase` fails closed: it refuses (409) if a rebase or merge is in
+progress, or if the recorded baseline is no longer the branch's live fork point
+with its base branch (`merge-base HEAD origin/<base>`). The latter happens once
+the branch has been rebased during merge prep -- the recorded `base_sha` is not
+advanced by those paths, and stays a *transitive* ancestor of HEAD, so a plain
+ancestry check would miss it. So reset/replan are practically available before
+merge prep -- in implementing / awaiting_human_review -- and refuse afterward
+rather than silently rewinding past the rebase to a stale base.
+
+**Surface map** (every operation reachable in the surfaces that had it):
+
+| Operation | CLI | TUI | Telegram |
+|-----------|-----|-----|----------|
+| Regenerate plan | `wf replan [id] [-f ".."]` | `N` | — *(not exposed; the bot has no reset/replan)* |
+| Redo implementation | `wf reset [id]` | `R` | — *(not exposed)* |
+| Gate reject / approve | `wf reject [id] [--reset]` / `wf approve [id]` | `r` / `a` | `/reject` / `/approve` |
+
+The Telegram bot intentionally exposes only the human-gate verbs (`/approve`,
+`/reject`); it has never had reset or replan. Adding bot parity is a separate
+follow-up, not part of this surface.
 
 ### Question & Answer Commands
 
@@ -600,7 +641,8 @@ When the diff panel is active (`d`):
 |-----|--------|
 | `a` | Approve changes, continue to next micro-commit |
 | `r` | Reject with feedback, iterate on current commit |
-| `R` | Reset (discard changes, start fresh) |
+| `R` | Reset -- keep the plan, redo the implementation from the baseline |
+| `N` | Re-plan -- regenerate the plan from a clean base (prompts for guidance) |
 
 ### Stage: ready_to_merge / final_review_with_concerns
 
@@ -852,7 +894,7 @@ Stages that have a sub-FSM today (or will when formalized):
 
 #### Implementing sub-FSM
 
-States: `preflight`, `select`, `clarification_check`, `concern_triage`, `implement`, `test`, `review`, `qa_gate`, `commit`.
+States: `preflight`, `select`, `clarification_check`, `concern_triage`, `implement`, `test`, `adjudicate`, `review`, `qa_gate`, `commit`. (`breakdown` runs before `select` but is not a tracked sub-FSM state — like the initial breakdown, the escalation partial breakdown sets `runner_stage="breakdown"` without an FSM transition.)
 
 Transitions:
 
@@ -864,7 +906,9 @@ Transitions:
 | `triage_complete` | `concern_triage` → `implement` |
 | `implement_pass` | `implement` → `test` |
 | `test_pass` | `test` → `review` |
-| `test_fail` | `test` → `implement` |
+| `test_fail` | `test` → `implement` (build failure: straight back to implement) |
+| `test_conflict` | `test` → `adjudicate` (test failure: judge the conflict) |
+| `adjudicate_resolve` | `adjudicate` → `implement` (REGRESSION/OBSOLETE verdict) |
 | `review_approve` | `review` → `qa_gate` |
 | `review_request_changes` | `review` → `implement` |
 | `qa_pass` | `qa_gate` → `commit` |
@@ -879,6 +923,114 @@ Terminal triggers (exit-to-caller; control leaves the sub-FSM):
 | `implement_blocked` | `implement` | agent surfaced clarification or blocked work |
 | `review_human_gate` | `review` | awaiting human review |
 | `qa_fail` | `qa_gate` | qa gate blocked |
+| `adjudicate_blocked` | `adjudicate` | test conflict needs a human decision (Supervised CANT_TELL) |
+
+#### Test-Conflict Escalation (adjudicate → partial breakdown → human)
+
+When a previously-passing test goes red after an implement attempt, the loop does
+**not** blindly re-run implement with "fix the code." It runs a bounded, tiered
+escalation: a judge (Tier 1), then a **partial breakdown** that re-derives the
+uncommitted plan tail (Tier 2), then a human (Tier 3). Budget: **judge×1 →
+partial-breakdown×1 (per failing-test signature) → human** — no unbounded looping.
+
+```text
+test red ─► adjudicate (judge, Tier 1)
+              │
+   verdict ──┼─ REGRESSION / OBSOLETE ─► implementer fix, 1 try ─► test ─► green ─► review
+              │
+              ├─ CANT_TELL, Supervised ────► blocking clarification (adjudicate_blocked, human)
+              │
+              └─ CANT_TELL, unattended ────► PARTIAL BREAKDOWN (Tier 2)
+
+  same failing-test-identity signature twice (after a REGRESSION/OBSOLETE retry)?
+     ├ not escalated yet ─► PARTIAL BREAKDOWN (Tier 2)
+     └ already escalated this signature ─► Tier 3: human gate (blocked)
+
+PARTIAL BREAKDOWN  (= the `breakdown` engine re-invoked, scope=partial, 1 try/sig)
+  re-derive the UNCOMMITTED tail; committed prefix frozen; worktree left intact
+     ├ Gatekeeper/Autonomous: apply ─► re-implement against the re-derived tail
+     ├ Supervised: apply + block for plan review (wf show / wf run)
+     └ can't resolve ─► raise a blocking clarification (human)
+```
+
+A red test first routes to a read-only judge substage (`adjudicate`) that
+classifies the conflict **against the story's true requirement** (problem +
+acceptance criteria) — deliberately distinct from the micro-commit task, which
+may have over-specified something the requirement never asked for. Build failures
+skip adjudication (the code simply doesn't compile) and go straight back to
+implement via `test_fail`.
+
+Verdicts (`server/internal/fsm/implementing_substages.json`; judge prompt in
+`prompts/adjudicate.md`):
+
+| Verdict | Meaning | Route |
+|---|---|---|
+| `REGRESSION` | the requirement never asked for this side effect; the change is wrong | back to implement: fix code, **keep the test** |
+| `OBSOLETE` | the requirement supersedes the test; it encodes old behavior | back to implement: reconcile the test, recording it in `touched_tests` |
+| `CANT_TELL` | requirement is silent, or it's a scope/product call | Supervised: blocking clarification (`adjudicate_blocked`); unattended: hand to the partial breakdown |
+
+Separation of authority: the implementer may **fix its own code** freely, but
+**only an OBSOLETE verdict authorizes a test change**. The judge is read-only
+(no `Edit`/`Write`); it returns a verdict, the implementer acts on it, and any
+test edit/deletion is declared in the implement result's `touched_tests` so the
+terminal reviewer (which holds the acceptance criteria) re-checks it. An
+unparseable or failed adjudication defaults to `CANT_TELL`.
+
+**CANT_TELL routing by autonomy:** Supervised opens a blocking clarification
+directly — a human is already in the loop. Gatekeeper/Autonomous hand the
+ambiguous conflict to the partial breakdown instead: it can re-derive the tail or
+raise its own clarification, a better first responder than a bare CLQ for
+unattended modes.
+
+**Oscillation trigger (Tier 1 → 2):** when the *same set of failing tests*
+repeats across consecutive adjudications, Tier 1 isn't converging, so the loop
+escalates to the **partial breakdown** (Tier 2) — and if it already escalated for
+this conflict, to the **human** (Tier 3). The signature is the set of
+failing-test **identities** (test name + file), parsed from `test.log` and stored
+on the `review_history` entry — deliberately *not* the raw output, which carries
+per-run durations that would make an unchanged failure look different every run
+(the bug that made the original guard a silent no-op). It mirrors the review
+loop's `_review_blocker_set` identity comparison.
+
+Two known limitations, both bounded: (1) the signature depends on the parser
+extracting structured failures — output it can't structure yields an empty
+signature and no *early* escalation, but `max_review_attempts` still caps the
+loop and routes to the human gate; (2) the identity excludes the failure
+*message*, so "same test, different assertion" counts as oscillation (the
+observed livelock was the identical failure every iteration).
+
+**Partial breakdown (Tier 2):** the "architect" *is* the `breakdown` engine
+re-invoked in **partial** scope — `stage_partial_breakdown`
+(`orchestrator/runner/impl/stages/planning.py`), backed by
+`generate_breakdown(scope="partial")` with the conflict context: the failing
+test, the judge's verdict + reason, and the existing plan with committed commits
+**frozen** (the plan also carries the acceptance criteria, the fixed
+requirement). It re-derives **only the uncommitted tail**:
+
+- **Committed (`Done: [x]`) micro-commits are frozen** and preserved verbatim.
+  The agent regenerates only the uncommitted tail; `ReplaceUncommittedTail`
+  (`server/internal/plan`, the Go-canonical plan mutation) splices the new tail
+  onto the committed prefix and **fails closed** (→ human) if a committed commit
+  would land in the regenerated region.
+- **The worktree is NOT reset.** The implementer's in-flight work stays; it gets
+  the re-derived task on the next attempt and refines its work against it.
+- After re-derivation the engine **re-selects** the in-flight micro-commit from
+  the new tail (the previous selection may have changed).
+
+| Mode | After re-deriving the tail |
+|---|---|
+| Gatekeeper / Autonomous | apply and re-implement against the revised tail |
+| Supervised | apply, then block for plan review (`wf show` / `wf run` to continue) |
+| can't resolve | raise a blocking clarification — a human decides |
+
+**Safety boundary:** the partial breakdown rewrites micro-commit **tasks** only —
+**never** the story's acceptance criteria/requirement ("task ≤ requirement"), and
+**never** committed work. It is autonomous-eligible precisely *because* it is
+breakdown, which structurally produces tasks from a fixed requirement and cannot
+reach it. The budget is one partial breakdown per failing-test signature: if the
+re-derived tail still oscillates, Tier 3 (human) takes it. This is the same
+`breakdown` generation engine as the initial plan — differing only in scope
+(uncommitted tail vs whole plan) and in leaving the worktree intact.
 
 The validation hooks into `update_runner_stage_current` in `orchestrator/runner/locking.py`: when both the previous and the new `runner_stage` are in the spec's state set, the transition must match a registered edge. Cross-domain transitions (`preflight → breakdown`, `review → human_review`, anything involving `merge_gate` / `final_review`) are accepted unconditionally — those values are outside the implementing sub-FSM's state set.
 
@@ -923,6 +1075,7 @@ Substage timeouts have one effective settings source. Stages with an in-process 
 | `concern_triage` | `stages.concern_triage.timeout + 300s` | derived failsafe; default value is 120s |
 | `implement` | `stages.implement.timeout + 300s` | derived failsafe; default value is 1200s |
 | `test` | config + 300s | `ctx.profile.test_timeout` plus failsafe margin |
+| `adjudicate` | `stages.adjudicate.timeout + 300s` | derived failsafe; default value is 300s |
 | `review` | `stages.review.timeout + 300s` | derived failsafe; default value is 900s |
 | `human_review` | NA | indefinite by design |
 | `qa_gate` | NA | pure logic |
@@ -970,12 +1123,14 @@ Four canonical verbs (plus a future fifth):
 | Verb | Command | Status |
 |---|---|---|
 | accept | `wf accept <id>` | Future rename from `wf approve` |
-| reject | `wf reject <id> [feedback]` | Existing |
+| reject | `wf reject <id> [-f "feedback"]` | Existing |
 | reset | `wf reset <id>` | Existing |
 | retry | `wf retry <id>` | Future addition |
 | cancel | `wf cancel <id>` | Future addition |
 
-CLI surface changes (rename, additions) require explicit sign-off per `CLAUDE.md`.
+CLI surface changes (renames, additions, flags, and REST patterns) require
+explicit maintainer sign-off before implementation. See
+`docs/ARCHITECTURE.md` for the public-interface rule.
 
 ### Recovery from Crashes
 
@@ -1002,7 +1157,7 @@ The conceptual separation makes implicit invariants explicit:
 3. Formalize sub-FSMs for `implementing`, `merge_conflicts`, `merging`, `provisioning` (one JSON per stage). **Implementing shipped (Brief 123 Phase 3.1).** Spec at `server/internal/fsm/implementing_substages.json`; Go validator + Python mirror enforce the runner inner loop's transitions at the boundary. `merge_conflicts`, `merging`, `provisioning` remain pending future phases.
 4. Update TUI and CLI displays to render `(stage, status)` (and substage where applicable). **Shipped (Brief 99 Phase 1).** `wf show`, dashboard rows, and watch detail subtitle now render `<stage> / <runtime_status>` per the **Display convention** above.
 5. Fold `creation_failed` and `baseline_failed` into `provisioning` sub-status. **Shipped (Brief 114).** Both macro states were dropped from `server/internal/fsm/workstream_fsm.json`; the `provision_failed`, `provision_baseline_failed`, and `retry_provision` triggers were removed (provisioning failure is now a field-only write to `provision_error` / `baseline_failures`); `override_baseline` now goes from `provisioning → active`. Migration `000018_fold_provisioning_failures` rewrites existing `creation_failed` / `baseline_failed` rows to `provisioning` so deployed databases carry over cleanly. `ComputeRuntimeStatus` reports `provisioning / failed` for both failure shapes; operator displays render that combined string.
-6. CLI verb additions (`wf accept`, `wf retry`, eventually `wf cancel`) — each requires sign-off per `CLAUDE.md`.
+6. CLI verb additions (`wf accept`, `wf retry`, eventually `wf cancel`) — each requires explicit maintainer sign-off before implementation.
 
 Each step is its own brief / PR. Migration is scoped to non-shipping windows.
 
@@ -1406,11 +1561,11 @@ This section is the source of truth for what actions are available at each stage
 
 | Stage | CLI | TUI | Telegram |
 |-------|-----|-----|----------|
-| awaiting_human_review | `wf approve` / `wf reject [".."]` | [a] Approve / [r] Reject | [Approve] [Reject] [Review] |
+| awaiting_human_review | `wf approve` / `wf reject [-f ".."]` | [a] Approve / [r] Reject | [Approve] [Reject] [Review] |
 | ready_to_merge | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
 | final_review_with_concerns | `wf merge -y` | [m] Merge / [P] Create PR | [Merge] [Reject] [Review] |
-| pr_open | `wf reject ".."` | [r] Reject / [o] Open PR | [Open PR]* [Reject] [Review] |
-| pr_approved | `wf merge` / `wf reject ".."` | [a] Merge / [o] Open PR | [Open PR]* [Merge] [Review] |
+| pr_open | `wf reject` | [r] Reject / [o] Open PR | [Open PR]* [Reject] [Review] |
+| pr_approved | `wf merge` / `wf reject` | [a] Merge / [o] Open PR | [Open PR]* [Merge] [Review] |
 
 > CLI commands above reflect current command names. Per the **Workstream State Model**, `wf approve` is being renamed to `wf accept`; this table will update when the rename lands.
 
@@ -1458,8 +1613,8 @@ Different surfaces have different audiences and different needs:
 - **Agent surfaces** (reviewer/implementer prompts in the per-commit loop): ephemeral, fresh per cycle. The reviewer sees only the current diff plus story/AC context. The implementer sees only the just-completed review's feedback. Prior cycles are not carried in the prompt -- each cycle is an independent evaluation.
 - **Operator surfaces** (TUI detail, `wf show`, CLI summaries, review history inspection): cumulative across attempts. Humans need to see the workstream's history; agents don't.
 - **Concern lifecycle**: concerns flagged in per-commit reviews persist at workstream level until the first final review, then drop. Concerns do not flow to next per-commit implementers.
-- **Operator guidance** (`wf reject <id> "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section. Per-cycle, not persistent across the workstream.
-- **FIX-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-cycle historical context. It detects "going in circles" on FIX commits by comparing current rejection feedback against prior FIX feedback in the workstream's history. Special-purpose; not the default flow.
+- **Operator guidance** (`wf reject <id> -f "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section. Per-cycle, not persistent across the workstream. At review gates, `-f` is optional and additive: hashd folds the gate findings into the FIX commit by default, while human guidance appears first and takes precedence.
+- **Per-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-run historical context. It runs once a selected micro-commit has at least two prior stage reviews, whether the commit is a regular `COMMIT-...-001` or a `COMMIT-...-FIX-001`. It detects "going in circles" on the same finding, including A -> B -> A and persistent identical reviews. It does not treat partial progress as oscillation: if `(A, B)` becomes `A`, the workstream is still converging. Pure `A -> A` needs three consecutive identical reviews before escalation. FIX commits continue to use their structured fix history and oscillation-resolution records.
 
 Principle: artifacts visible to agents are ephemeral and current; artifacts visible to humans are cumulative.
 
@@ -1468,10 +1623,27 @@ Principle: artifacts visible to agents are ephemeral and current; artifacts visi
 | State | Feedback | Effect |
 |-------|----------|--------|
 | awaiting_human_review | Typed feedback (optional) | Iterate on current commit |
-| final_review_with_concerns | Typed feedback (required) | Generate fix commit |
-| ready_to_merge | Typed feedback (required) | Generate fix commit |
-| pr_open | Pre-filled from PR comments | Close PR, generate fix commit |
-| pr_approved | Pre-filled from PR comments | Close PR, generate fix commit |
+| final_review_with_concerns | Final-review findings folded by default; optional `-f` guidance | Generate FIX commit |
+| ready_to_merge | Final-review findings folded when present; otherwise `-f` required | Generate FIX commit |
+| pr_open | PR review comments folded by default; optional `-f` guidance | Close PR, generate FIX commit |
+| pr_approved | PR review comments folded by default; optional `-f` guidance | Close PR, generate FIX commit |
+
+#### Reject Fold Loop
+
+```mermaid
+flowchart TD
+    G[Review gate: final_review_with_concerns / pr_open] -->|wf reject| F{Findings at this gate?}
+    F -->|internal concerns| FC["fold (automated review)"]
+    F -->|forge PR comments| FP["fold (PR review)"]
+    F -->|none| REQ["require -f or --reset"]
+    FC --> M["merge with optional -f<br/>(HUMAN INPUT overrides AI)"]
+    FP --> M
+    M --> IMPL[FIX-N implement pass] --> REV[review]
+    REV -->|approved| DONE[proceed]
+    REV -->|same concerns recur| OSC{recurrence?}
+    OSC -->|2nd, below threshold| INF["informed retry:<br/>fold + recurring history"] --> IMPL
+    OSC -->|persists a -> a -> a / a -> b -> a| ESC["escalate -> resolve-oscillation (human)"]
+```
 
 ### Adding a New Modality
 

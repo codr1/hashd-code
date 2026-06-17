@@ -2,11 +2,34 @@
 
 (حشد = Arabic for "crowd")
 
+**The disciplined, auditable software factory for spec-driven development.** Every change goes spec -> story -> implement -> review -> merge through governed gates, with a full audit trail of why every line of merged code exists.
+
 Hashd is an orchestration system for AI coding agents. It plans the work, runs agents in isolated worktrees, grounds them in verified code structure, gates each change through review, and records the full lineage of every commit.
 
 **10x developer throughput. 10x fewer tokens spent on exploration. 15%+ accuracy improvement from grounded context.**
 
 AI coding agents are powerful but unaccountable. They generate code without explaining why, re-discover the codebase on every run, and make decisions you can't trace later. Hashd adds the structure that makes AI-generated code trustworthy enough to ship -- and fast enough to change how much you ship in a day.
+
+Spec-driven development is an established category. Generation-only spec tools stop at *producing* code from a spec; hashd governs the whole path to a **merged, attested commit** -- the implement/test/review loop, the human-approval gates between steps, and a verifiable provenance chain that records every one of them.
+
+## How it works
+
+Work flows through four entities, each backed by a validated state machine:
+
+```text
+Requirement -> Suggestion -> Story (+ acceptance criteria) -> Workstream -> micro-commits -> merged commit
+```
+
+- A **Suggestion** is a candidate piece of work discovered from your requirements (`REQS.md`).
+- Claiming it creates a **Story**: a feature or bug with acceptance criteria -- the source of truth for *what* the change should do.
+- Running an accepted Story creates a **Workstream**: one git branch in one isolated worktree, holding a plan of **micro-commits** (the smallest planned units of work).
+- Each micro-commit runs the **governed loop** -- `implement -> test -> review -> human approval -> commit` -- where every arrow is a **gate**. When all micro-commits land, the branch gets a holistic final review and a merge gate (tests, conflict check, secrets scan), then merges.
+- Whether a gate stops for a human is set by the project's **autonomy mode** (supervised / gatekeeper / autonomous). All modes still block to a human on failures.
+- Every state change is **dual-written**: pushed live over ZMQ and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `wf lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
+
+## Philosophy
+
+The bottleneck in shipping AI-written code is not typing speed -- it is **trust**: knowing a change does what was asked, that it was reviewed, that a human signed off where it mattered, and that you can reconstruct the decision chain later. Hashd is a *process and provenance* layer over raw agents. It does not make the agent faster; it makes the agent's output **accountable** -- governed by gates, recorded as it happens, and auditable after the fact. That is the half generation-only tools lack.
 
 ## Install
 
@@ -16,10 +39,21 @@ To install, run:
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-- [QUICKSTART.md](docs/QUICKSTART.md) - Installation, first project setup, basic workflows
-- [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - Agent switching, auth configuration, prompt overrides
-- [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - Code intelligence operator commands and troubleshooting
-- [WF.md](docs/WF.md) - Full lifecycle documentation, state machines, merge behavior
+## Documentation
+
+Start here to learn the system, then dive into the reference docs:
+
+- **[docs/how-hashd-works.md](docs/how-hashd-works.md)** - the mental model: entities, the governed gates, the event log, and the provenance chain, as concepts.
+- **[docs/walkthrough.md](docs/walkthrough.md)** - one feature start-to-finish, from spec to a merged commit with a full audit trail.
+- **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage, gates, lineage.
+- **[docs/navigation.md](docs/navigation.md)** - the `wf watch` TUI: Dashboard, Story Detail, Workstream Detail, and when to use each.
+- **[docs/provenance.md](docs/provenance.md)** - the audit/lineage story: `wf lineage`, SLSA/in-toto export, hash-chain verify, the durable event log.
+- [QUICKSTART.md](docs/QUICKSTART.md) - installation, first project setup, basic workflows.
+- [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - agent switching, auth configuration, prompt overrides.
+- [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - code intelligence operator commands and troubleshooting.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - client/server boundaries, state, events, and diagnostics.
+- [WF.md](docs/WF.md) - the canonical lifecycle documentation, state machines, and command reference.
+- [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) - version-by-version release notes.
 
 ## What hashd does
 
@@ -245,6 +279,7 @@ Directives are automatically included in implementation prompts.
 | `wf plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
 | `wf plan clone STORY-xxx` | Clone a locked story to edit |
 | `wf plan edit STORY-xxx` | Edit existing story (if unlocked) |
+| `wf plan reset` | Reclaim suggestions stranded by a dead flow or deleted story (unblocks discovery) |
 | `wf run [id]` | Run workstream or create from story |
 | `wf list` | List all stories and workstreams |
 | `wf show <id>` | Show story or workstream details |
@@ -313,11 +348,12 @@ The bot also auto-starts when you run `wf run` or `wf watch`.
 | `wf lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
 | `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
 | `wf lineage verify` | Validate commit hash chain integrity |
-| `wf reject [id] "..."` | Reject with feedback (context-aware) |
+| `wf reject [id] -f "..."` | Reject with feedback (context-aware) |
 | `wf reject [id] --reset` | Discard changes, start fresh (human gate only) |
 | `wf diff [id]` | Show workstream diff |
 | `wf skip [id]` | Mark commit as done without changes |
-| `wf reset [id]` | Reset workstream to start fresh |
+| `wf reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
+| `wf replan [id] [-f "..."]` | Regenerate the plan from a clean base |
 | `wf refresh [id]` | Refresh touched files |
 | `wf conflicts [id]` | Check for file conflicts |
 | `wf archive work` | List archived workstreams |
@@ -411,7 +447,7 @@ The `wf reject` command adapts its behavior based on workstream state:
 When status is `awaiting_human_review` (mid-micro-commit):
 
 ```bash
-wf reject my_feature "Fix the null check"       # Iterate with feedback
+wf reject my_feature -f "Fix the null check"    # Iterate with feedback
 wf reject my_feature --reset                    # Discard, start fresh
 ```
 
@@ -422,8 +458,8 @@ This writes a rejection file and continues the run loop.
 When all micro-commits are done (pre-merge):
 
 ```bash
-wf reject my_feature "address review concerns"     # Any non-empty feedback; server appends review concerns automatically
-wf reject my_feature "also fix the tests"          # Add explicit guidance alongside the auto-included review concerns
+wf reject my_feature -f "address review concerns"  # Any non-empty feedback; server appends review concerns automatically
+wf reject my_feature -f "also fix the tests"       # Add explicit guidance alongside the auto-included review concerns
 ```
 
 This:
@@ -438,11 +474,11 @@ When a PR exists:
 
 ```bash
 wf pr feedback my_feature                        # View PR comments
-wf reject my_feature "Fix the null check"        # Create fix commit
+wf reject my_feature -f "Fix the null check"     # Create fix commit
 ```
 
 For PR states (`pr_open`, `pr_approved`):
-- feedback text is **required** (positional, no auto-fetch)
+- feedback text is **required** (via `-f`/`--feedback`, no auto-fetch)
 - Use `wf pr feedback` to view comments first
 - In `wf watch`, the `[r]` modal pre-fills with PR feedback for editing
 
@@ -487,12 +523,12 @@ See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions i
 
 Minimum agent/tool versions verified for this release:
 
-| Tool | Minimum |
-|------|---------|
-| Claude Code | 2.1.154 |
-| Codex CLI | 0.130.0 |
-| uv | 0.11+ |
-| Go | 1.26+ |
+| Tool | Minimum | Notes |
+|------|---------|-------|
+| Claude Code | 2.1.154 | required - the default agent for every stage |
+| Codex CLI | 0.130.0 | optional - swap in per stage if you want it |
+| uv | 0.11+ | |
+| Go | 1.26+ | |
 
 Run `wf doctor` to check your setup.
 
@@ -773,13 +809,13 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 
 ### Quick Setup
 
-By default, **Claude** handles planning/review and **Codex** handles implementation.
+By default, **Claude** handles every stage -- planning, implementation, and review. Any supported agent can be swapped in per stage.
 
 ```bash
 wf agents                                # See installed agents and stage assignments
-wf project config set coder claude       # Use Claude for implementation too
-wf project config set planner codex      # Use Codex for planning/review
-wf project config set coder codex        # Use Codex for implementation too
+wf agents --suggest                      # Scan agents and apply a default for all stages
+wf config stages-use codex               # Use one agent for every stage system-wide
+wf project config set coder codex        # Use Codex for implementation (this project)
 wf project config set planner gemini     # All non-implement stages
 wf project config set stage.review gemini  # Single stage override
 ```
@@ -796,8 +832,8 @@ wf project config set stage.review gemini  # Single stage override
 | Planning | `pm_annotate` | claude | edit |
 | Planning | `pm_describe` | claude | print |
 | Implementation | `breakdown` | claude | review |
-| Implementation | `implement` | codex | implement |
-| Implementation | `implement_resume` | codex | implement_resume |
+| Implementation | `implement` | claude | implement |
+| Implementation | `implement_resume` | claude | implement_resume |
 | Review | `concern_triage` | claude | print |
 | Review | `review` | claude | review |
 | Review | `review_resume` | claude | review_resume |

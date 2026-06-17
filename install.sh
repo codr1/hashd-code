@@ -23,14 +23,17 @@ install_bash_completion() {
     touch "$bashrc"
     tmp="$(mktemp)"
 
-    awk '
-        /^[[:space:]]*# hashd\/wf shell completions[[:space:]]*$/ { next }
-        /^[[:space:]]*# hashd\/wf completions \(managed by .* drop after v1\.0 once everyone has migrated\)[[:space:]]*$/ { next }
-        /^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$/ { next }
-        /^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$/ { next }
-        /^[[:space:]]*source[[:space:]]+<\(wf completion bash\)[[:space:]]*$/ { next }
-        { print }
-    ' "$bashrc" > "$tmp"
+    # Strip any legacy hashd/wf completion lines. Use grep, not awk: minimal
+    # distro/container images ship coreutils (grep) but not always gawk. grep -v
+    # exits 1 when every line is filtered out (e.g. an all-completions bashrc),
+    # which is not an error here, so guard with `|| true`.
+    grep -vE \
+        -e '^[[:space:]]*# hashd/wf shell completions[[:space:]]*$' \
+        -e '^[[:space:]]*# hashd/wf completions \(managed by .* drop after v1\.0 once everyone has migrated\)[[:space:]]*$' \
+        -e '^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
+        -e '^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
+        -e '^[[:space:]]*source[[:space:]]+<\(wf completion bash\)[[:space:]]*$' \
+        "$bashrc" > "$tmp" || true
     mv "$tmp" "$bashrc"
 
     if [[ -s "$bashrc" ]]; then
@@ -73,11 +76,11 @@ extract_semver() {
 sha256_file() {
     local path="$1"
     if command -v sha256sum &>/dev/null; then
-        sha256sum "$path" | awk '{print $1}'
+        sha256sum "$path" | cut -d' ' -f1
         return 0
     fi
     if command -v shasum &>/dev/null; then
-        shasum -a 256 "$path" | awk '{print $1}'
+        shasum -a 256 "$path" | cut -d' ' -f1
         return 0
     fi
     echo "ERROR: sha256sum or shasum is required to verify downloaded forge CLI archives."
@@ -164,9 +167,18 @@ verify_forge_checksum() {
     local asset_name
     local expected
     local actual
+    local line_sum line_file
 
     asset_name="$(basename "$asset")"
-    expected="$(awk -v name="$asset_name" '$NF == name { print $1; exit }' "$checksums")"
+    # Look up the expected hash without awk (minimal images may lack gawk). The
+    # checksums file is `<sha>  <filename>` per line; match the filename exactly.
+    expected=""
+    while read -r line_sum line_file; do
+        if [ "$line_file" = "$asset_name" ]; then
+            expected="$line_sum"
+            break
+        fi
+    done < "$checksums"
     if [ -z "$expected" ]; then
         echo "ERROR: No checksum entry found for $asset_name"
         exit 1

@@ -4,7 +4,7 @@
 
 Connectors extend hashd with external integrations (Figma, GitHub, Bitbucket, Jira). They're auto-discovered at startup through the `hashd.connectors` entry point group. Core never references a specific connector.
 
-See [Building Connectors](../orchestrator/connectors/README.md) for the developer guide.
+See [Building Connectors](orchestrator/connectors/README.md) for the developer guide.
 
 ---
 
@@ -244,13 +244,13 @@ criteria, or chat to embed issue context. The connector reads issue details on
 demand and caches them; it does not create stories, create issues, or run a sync
 daemon.
 
-See [packages/hashd-connector-github/src/hashd_connector_github/README.md](../packages/hashd-connector-github/src/hashd_connector_github/README.md).
+See [packages/hashd-connector-github/src/hashd_connector_github/README.md](packages/hashd-connector-github/src/hashd_connector_github/README.md).
 
 ### Figma
 
 Design context integration. Import frames, reference in stories/ACs/chat, browse via tools.
 
-See [packages/hashd-connector-figma/src/hashd_connector_figma/README.md](../packages/hashd-connector-figma/src/hashd_connector_figma/README.md).
+See [packages/hashd-connector-figma/src/hashd_connector_figma/README.md](packages/hashd-connector-figma/src/hashd_connector_figma/README.md).
 
 ### Jira
 
@@ -260,7 +260,7 @@ Center (REST API v2). Use `@jira:PROJ-123`, `@jira:123`, or
 context. The connector reads issue details on demand and caches them; it does
 not create stories, create issues, or run a sync daemon.
 
-See [packages/hashd-connector-jira/src/hashd_connector_jira/README.md](../packages/hashd-connector-jira/src/hashd_connector_jira/README.md).
+See [packages/hashd-connector-jira/src/hashd_connector_jira/README.md](packages/hashd-connector-jira/src/hashd_connector_jira/README.md).
 
 ---
 
