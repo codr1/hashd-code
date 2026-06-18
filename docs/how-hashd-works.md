@@ -167,4 +167,4 @@ trustworthy enough to ship.
 - [provenance.md](provenance.md) — the audit/lineage story in depth.
 - [glossary.md](glossary.md) — every term defined.
 - **[WF.md](../WF.md)** — the canonical state machines, transitions, and command reference.
-- **[PRD.md](../PRD.md)** — the full living product specification.
+- **PRD.md** — the full living product specification.

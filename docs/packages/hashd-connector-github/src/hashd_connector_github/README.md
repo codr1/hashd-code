@@ -57,6 +57,6 @@ The backend uses the GitHub CLI for issue reads and setup checks:
 
 ## Architecture
 
-See [Building Connectors](../README.md) for the connector contract and
-[docs/CONNECTORS.md](../../../docs/CONNECTORS.md) for the full system
+See Building Connectors for the connector contract and
+docs/CONNECTORS.md for the full system
 specification.

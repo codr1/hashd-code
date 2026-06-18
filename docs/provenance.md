@@ -143,7 +143,7 @@ dual-write contract and [glossary.md](glossary.md) for the entity definitions.
 
 ## What's not (yet) here
 
-Per **[PRD.md](../PRD.md)** "Deferred or not shipped": cryptographic *signing* of
+Per **PRD.md** "Deferred or not shipped": cryptographic *signing* of
 attestation exports (Sigstore/Cosign) and a Rekor-style transparency log are not
 shipped. The hash chain provides tamper *evidence*; keyless signing is a future
 option. The export formats (SLSA, in-toto) and the verifiable hash chain are

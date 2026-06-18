@@ -185,4 +185,4 @@ Auth is via `X-Figma-Token` header with a personal access token. OAuth is not su
 
 ## Architecture
 
-See [Building Connectors](../README.md) for the connector contract and [docs/CONNECTORS.md](../../../docs/CONNECTORS.md) for the full system specification.
+See Building Connectors for the connector contract and docs/CONNECTORS.md for the full system specification.

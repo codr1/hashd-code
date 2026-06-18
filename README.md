@@ -4,6 +4,20 @@
 
 **The disciplined, auditable software factory for spec-driven development.** Every change goes spec -> story -> implement -> review -> merge through governed gates, with a full audit trail of why every line of merged code exists.
 
+## Install
+
+One paste on a fresh box -- no Python setup required:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
+```
+
+The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `wf` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt), then runs `wf doctor` to confirm the setup.
+
+**System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `wf doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
+
+## What hashd is
+
 Hashd is an orchestration system for AI coding agents. It plans the work, runs agents in isolated worktrees, grounds them in verified code structure, gates each change through review, and records the full lineage of every commit.
 
 **10x developer throughput. 10x fewer tokens spent on exploration. 15%+ accuracy improvement from grounded context.**
@@ -31,14 +45,6 @@ Requirement -> Suggestion -> Story (+ acceptance criteria) -> Workstream -> micr
 
 The bottleneck in shipping AI-written code is not typing speed -- it is **trust**: knowing a change does what was asked, that it was reviewed, that a human signed off where it mattered, and that you can reconstruct the decision chain later. Hashd is a *process and provenance* layer over raw agents. It does not make the agent faster; it makes the agent's output **accountable** -- governed by gates, recorded as it happens, and auditable after the fact. That is the half generation-only tools lack.
 
-## Install
-
-To install, run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
-```
-
 ## Documentation
 
 Start here to learn the system, then dive into the reference docs:
@@ -48,11 +54,11 @@ Start here to learn the system, then dive into the reference docs:
 - **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage, gates, lineage.
 - **[docs/navigation.md](docs/navigation.md)** - the `wf watch` TUI: Dashboard, Story Detail, Workstream Detail, and when to use each.
 - **[docs/provenance.md](docs/provenance.md)** - the audit/lineage story: `wf lineage`, SLSA/in-toto export, hash-chain verify, the durable event log.
-- [QUICKSTART.md](docs/QUICKSTART.md) - installation, first project setup, basic workflows.
+- [QUICKSTART.md](QUICKSTART.md) - installation, first project setup, basic workflows.
 - [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - agent switching, auth configuration, prompt overrides.
 - [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - code intelligence operator commands and troubleshooting.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - client/server boundaries, state, events, and diagnostics.
-- [WF.md](docs/WF.md) - the canonical lifecycle documentation, state machines, and command reference.
+- [WF.md](WF.md) - the canonical lifecycle documentation, state machines, and command reference.
 - [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) - version-by-version release notes.
 
 ## What hashd does
@@ -436,7 +442,7 @@ Stories flow: `drafting` -> `draft` -> `accepted` -> `implementing` -> `implemen
 
 Workstreams loop: `breakdown` -> `implement` -> `test` -> `review` -> `human_review` -> `commit` (repeat for each micro-commit)
 
-See **[WF.md](docs/WF.md)** for detailed lifecycle documentation.
+See **[WF.md](WF.md)** for detailed lifecycle documentation.
 
 ## Context-Aware Reject
 
@@ -511,14 +517,14 @@ Prefect automatically retries transient failures:
 
 ## Requirements
 
-See **[QUICKSTART.md](docs/QUICKSTART.md)** for full installation instructions including platform-specific commands.
+See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
-- Python 3.11+, Node.js 20+, Git
+- **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
+- **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `wf doctor` prints the exact OS-correct install commands.
 - A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
 - [delta (git-delta)](https://github.com/dandavison/delta) - optional TUI side-by-side, syntax-highlighted, word-level diffs (auto-installed by the installer / `setup.sh`)
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
 - [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) - bundled code intelligence backend (auto-fetched by the installer / `setup.sh`; setup fails if the pinned binary cannot be fetched or executed)
-- At least one AI coding agent (see [Agent Configuration](#agent-configuration))
 - A project with tests (Makefile, package.json, Taskfile, etc.)
 
 Minimum agent/tool versions verified for this release:
@@ -638,7 +644,7 @@ platform/              # project root (git repo, may be local-only)
     package.json
 ```
 
-**Setup:** `wf project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `wf project add /path --no-interview --suggest` followed by `wf project add /path --no-interview`; see [QUICKSTART.md](docs/QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
+**Setup:** `wf project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `wf project add /path --no-interview --suggest` followed by `wf project add /path --no-interview`; see [QUICKSTART.md](QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
 
 **Config:** project-level settings live in `config.yaml`; per-repo state for multi-repo projects lives in SQLite `project_repos`, not in a `repos:` block in YAML.
 
@@ -901,7 +907,7 @@ Connectors are hashd's plugin system for external integrations. They're auto-dis
 | Connector | What it does | Docs |
 |---|---|---|
 | **GitHub Sync** | Sync stories with GitHub Issues -- pull, push, auto-sync via labels | [docs](docs/CONNECTORS.md#github-sync) |
-| **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](packages/hashd-connector-jira/src/hashd_connector_jira/README.md) |
+| **Jira Sync** | Sync stories with Jira issues -- pull, push, status tracking | [docs](docs/CONNECTORS.md#jira) |
 | **Figma** | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | [docs](docs/CONNECTORS.md#figma) |
 
 ### Third-party connectors

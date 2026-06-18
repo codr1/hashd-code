@@ -15,6 +15,213 @@ GH_VERSION="2.93.0"
 GLAB_VERSION="1.101.0"
 BKT_VERSION="0.28.1"
 
+# --- Output: restrained color + step markers ---
+#
+# Quiet by default: one line per real step. Color is used sparingly and only
+# when stdout is a TTY and NO_COLOR is unset (https://no-color.org). Errors
+# render in the same error:/-->/Suggestions: shape as server/internal/diagnostic
+# so the installer and `wf doctor` speak with one voice.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_GREEN=$'\033[32m'
+    C_BLUE=$'\033[34m'
+    C_DIM=$'\033[2m'
+    C_BOLD=$'\033[1m'
+    C_RED=$'\033[31m'
+    C_RESET=$'\033[0m'
+else
+    C_GREEN=""
+    C_BLUE=""
+    C_DIM=""
+    C_BOLD=""
+    C_RED=""
+    C_RESET=""
+fi
+
+# step: announce the start of a real step ("-> doing the thing").
+step() {
+    printf '%s->%s %s\n' "$C_BLUE" "$C_RESET" "$1"
+}
+
+# ok: confirm a step finished ("  + result"), optionally with dim detail.
+ok() {
+    if [ -n "${2:-}" ]; then
+        printf '  %s+%s %s %s%s%s\n' "$C_GREEN" "$C_RESET" "$1" "$C_DIM" "$2" "$C_RESET"
+    else
+        printf '  %s+%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+    fi
+}
+
+# verified: surface the SHA-256 check the installer already performs.
+verified() {
+    printf '  %s+%s %s %sverified%s\n' "$C_GREEN" "$C_RESET" "$1" "$C_DIM" "$C_RESET"
+}
+
+# note: dim, secondary information.
+note() {
+    printf '  %s%s%s\n' "$C_DIM" "$1" "$C_RESET"
+}
+
+# die: render a structured diagnostic and exit non-zero.
+#
+# Usage: die "<title>" "<source>" "<explanation>" "<help line>" ["<help line>" ...]
+# The explanation may contain literal "\n" for multi-line context. Help lines
+# render as a "Suggestions:" bullet list -- give the ONE OS-correct fix command,
+# not a multi-platform menu.
+die() {
+    local title="$1" source="$2" explanation="$3"
+    shift 3
+    printf '%serror:%s %s\n' "${C_RED}${C_BOLD}" "$C_RESET" "$title" >&2
+    if [ -n "$source" ]; then
+        printf '  --> %s\n' "$source" >&2
+    fi
+    if [ -n "$explanation" ]; then
+        printf '\n' >&2
+        printf '%b\n' "$explanation" | while IFS= read -r line; do
+            printf '  %s\n' "$line" >&2
+        done
+    fi
+    if [ "$#" -gt 0 ]; then
+        printf '\nSuggestions:\n' >&2
+        local hint
+        for hint in "$@"; do
+            printf '  - %s\n' "$hint" >&2
+        done
+    fi
+    exit 1
+}
+
+# --- uv bootstrap ---
+#
+# The Python -> pip -> pipx -> PEP-668 gauntlet hard-errors on a fresh modern
+# box (Arch, Homebrew Python) where the system interpreter is
+# externally-managed. uv sidesteps all of it: a single curl install with zero
+# prereqs that can both provide a Python 3.11+ runtime and install the wheels
+# via its pipx-equivalent (`uv tool install` + `--with` injected wheels).
+
+UV_BIN=""
+
+# uv_path: locate uv, preferring an already-on-PATH copy, then the standard
+# installer location. Echoes the resolved path; returns non-zero if absent.
+uv_path() {
+    if command -v uv &>/dev/null; then
+        command -v uv
+        return 0
+    fi
+    if [ -x "$HOME/.local/bin/uv" ]; then
+        echo "$HOME/.local/bin/uv"
+        return 0
+    fi
+    return 1
+}
+
+# python_pipx_healthy: true when a usable Python 3.11+ AND a working pipx are
+# both present. This is the "healthy existing toolchain" fast path -- when it
+# holds, we keep using pipx exactly as before and never touch uv.
+python_pipx_healthy() {
+    [ -n "$PYTHON" ] || return 1
+    command -v pipx &>/dev/null || return 1
+    return 0
+}
+
+# pip_pipx_install_blocked: probe whether `pip install --user pipx` is viable.
+# Returns 0 (blocked) when pip is missing or refuses with PEP-668
+# "externally-managed-environment", which is the default on modern Arch and
+# Homebrew Python. Returns 1 (not blocked) when pip can install user packages.
+# Does not actually install -- uses a dry-run probe so the real install path
+# stays a single code path.
+pip_pipx_install_blocked() {
+    [ -n "$PYTHON" ] || return 0
+    if ! "$PYTHON" -m pip --version &>/dev/null; then
+        return 0
+    fi
+    local probe
+    probe="$("$PYTHON" -m pip install --user --dry-run pipx 2>&1)" || {
+        case "$probe" in
+            *externally-managed-environment*|*externally\ managed*)
+                return 0
+                ;;
+        esac
+        # Some pip versions reject --dry-run; fall back to treating a generic
+        # failure as "not blocked" so the real attempt can decide.
+        case "$probe" in
+            *"no such option"*|*"unrecognized arguments"*)
+                return 1
+                ;;
+        esac
+        return 0
+    }
+    return 1
+}
+
+# bootstrap_uv: ensure uv is installed, curl-bootstrapping it if missing.
+# Sets UV_BIN to the resolved path. uv's installer needs no Python and no root.
+bootstrap_uv() {
+    if UV_BIN="$(uv_path)"; then
+        ok "uv" "$("$UV_BIN" --version 2>/dev/null | extract_semver || echo present)"
+        return 0
+    fi
+    step "Installing uv (provides Python 3.11+, no prerequisites)"
+    if ! curl -fsSL https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; then
+        die "Could not install uv" \
+            "install.uv_bootstrap" \
+            "uv is hashd's zero-prerequisite path to a Python 3.11+ runtime, and the curl bootstrap from https://astral.sh failed.\nThis usually means no network access or a proxy blocking astral.sh." \
+            "Install uv manually: https://docs.astral.sh/uv/getting-started/installation/" \
+            "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
+    fi
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! UV_BIN="$(uv_path)"; then
+        die "uv installed but not found on PATH" \
+            "install.uv_bootstrap" \
+            "The uv installer ran but uv is not on PATH at \$HOME/.local/bin/uv." \
+            "Open a new shell or run: export PATH=\"\$HOME/.local/bin:\$PATH\"" \
+            "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
+    fi
+    ok "uv installed" "$("$UV_BIN" --version 2>/dev/null | extract_semver || echo present)"
+}
+
+# install_via_uv: install hashd + all extra wheels through uv's pipx-equivalent.
+# `uv tool install` makes the primary wheel's entry points (wf, hashd-server)
+# available on PATH; `--with` injects the bot/connector/tui wheels into the same
+# managed environment. uv provides a Python 3.11+ interpreter itself, so this
+# works even when the host has no system Python.
+install_via_uv() {
+    step "Installing hashd via uv (Python 3.11+ managed by uv)"
+    "$UV_BIN" tool install --force --python 3.11 \
+        --with "$BOT_WHEEL" \
+        --with "$FIGMA_WHEEL" \
+        --with "$GITHUB_CONNECTOR_WHEEL" \
+        --with "$JIRA_WHEEL" \
+        --with "$TUI_WHEEL" \
+        "$WHEEL"
+    # uv tool installs land in ~/.local/bin by default; make sure it's wired up.
+    "$UV_BIN" tool update-shell >/dev/null 2>&1 || true
+    export PATH="$HOME/.local/bin:$PATH"
+}
+
+# install_via_pipx: the classic healthy-toolchain path. Unchanged behavior:
+# pipx owns the primary wheel, runpip injects the extras.
+install_via_pipx() {
+    step "Installing hashd via pipx"
+    pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$BOT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$FIGMA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$GITHUB_CONNECTOR_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$JIRA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$TUI_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx ensurepath 2>/dev/null || true
+}
+
+# node_install_hint: the ONE OS-correct command to install a Node.js runtime,
+# used in the agent on-ramp printed at finish. Agents are npm-installed, so Node
+# is the agent's prerequisite -- not hashd's.
+node_install_hint() {
+    if [ "$PLATFORM" = "macosx" ]; then
+        echo "brew install node"
+    else
+        echo "https://github.com/nvm-sh/nvm  then: nvm install 20"
+    fi
+}
+
 install_bash_completion() {
     local bashrc="${HOME}/.bashrc"
     local tmp
@@ -62,11 +269,6 @@ promote_pipx_binary() {
 
 extract_first_major_minor() {
     sed -nE 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/p' | head -1
-}
-
-extract_json_string_field() {
-    local field="$1"
-    sed -nE "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" | head -1
 }
 
 extract_semver() {
@@ -214,16 +416,14 @@ install_forge_cli() {
     if [ -n "$existing_path" ]; then
         existing_version="$(forge_binary_version "$existing_path")"
         if [ "$existing_version" = "$version" ]; then
-            echo "  $name $version already installed"
+            ok "$name $version already installed"
             return 0
         fi
         if [ -n "$existing_version" ]; then
-            echo "  $name present at $existing_version, replacing with $version"
+            note "$name present at $existing_version, replacing with $version"
         else
-            echo "  $name present at $existing_path, replacing with $version"
+            note "$name present at $existing_path, replacing with $version"
         fi
-    else
-        echo "  Installing $display CLI ($name) $version..."
     fi
 
     asset_name="$(forge_asset_name "$name" "$version" "$PLATFORM" "$MACHINE")"
@@ -238,6 +438,7 @@ install_forge_cli() {
     curl -fsSL -o "$asset_path" "$base_url/$asset_name"
     curl -fsSL -o "$checksums_path" "$base_url/$checksums_name"
     verify_forge_checksum "$asset_path" "$checksums_path"
+    verified "$display CLI ($name $version)"
 
     case "$asset_name" in
         *.tar.gz)
@@ -272,7 +473,7 @@ install_forge_cli() {
         echo "ERROR: Installed $name but version check returned '${installed_version:-unknown}', expected $version"
         exit 1
     fi
-    echo "  Installed $name $version at $bin_dir/$name"
+    ok "$name $version" "$bin_dir/$name"
 }
 
 warn_external_tools() {
@@ -303,20 +504,16 @@ case "$ARCH" in
         ;;
 esac
 
-echo "hashd installer"
-echo ""
-echo "  Platform: $PLATFORM ($MACHINE)"
-echo ""
-echo "This installer will install:"
-echo "  - pipx (if missing)"
-echo "  - hashd Python wheels (CLI + server + bot/figma/jira/github connectors + TUI)"
-echo "  - Forge CLIs: gh (GitHub), glab (GitLab), bkt (Bitbucket) -- pinned versions, prebuilt binaries"
-echo "  - External runtime tools: gitleaks, git-delta -- pinned versions, prebuilt binaries"
-echo "You still need (not installed automatically):"
-echo "  - At least one AI agent CLI (claude / codex / cursor-agent)"
-echo "After install, run \`wf doctor\` to verify everything is wired up."
+printf '%shashd installer%s  %s%s (%s)%s\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$PLATFORM" "$MACHINE" "$C_RESET"
 
-# --- Check Python ---
+# --- Resolve the Python toolchain ---
+#
+# Fast path: a healthy existing Python 3.11+ with a working pipx -> use pipx.
+# Otherwise (no Python, or a modern externally-managed interpreter where
+# `pip install --user pipx` would hit PEP-668) -> bootstrap uv, which provides
+# both a Python 3.11+ runtime and the install mechanism. One curl, no root.
+step "Resolving Python toolchain"
+
 PYTHON=""
 PYTHON_VERSION=""
 for cmd in python3.14 python3.13 python3.12 python3.11 python3; do
@@ -327,290 +524,157 @@ for cmd in python3.14 python3.13 python3.12 python3.11 python3; do
         if [ -n "$major" ] && [ -n "$minor" ] && { [ "$major" -gt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -ge 11 ]; }; }; then
             PYTHON="$cmd"
             PYTHON_VERSION="$version"
-            echo "  Python:   $version ($cmd)"
             break
         fi
     fi
 done
 
-if [ -z "$PYTHON" ]; then
-    echo ""
-    echo "ERROR: Python 3.11+ is required."
-    echo ""
-    echo "  Install Python:"
-    echo "    Arch:          sudo pacman -S python"
-    echo "    Debian/Ubuntu: sudo apt install python3"
-    echo "    macOS:         brew install python@3.14"
-    echo "    Or:            https://www.python.org/downloads/"
-    exit 1
-fi
-
-# --- Check/install pipx ---
-if ! command -v pipx &>/dev/null; then
-    echo ""
-    echo "Installing pipx..."
-    # Try ensurepip first (bootstraps pip on systems that ship without it)
+INSTALL_VIA=""
+if python_pipx_healthy; then
+    INSTALL_VIA="pipx"
+    ok "Python $PYTHON_VERSION + pipx" "$PYTHON"
+elif [ -n "$PYTHON" ] && command -v uv &>/dev/null; then
+    # Python present but pipx missing. uv is already here, so prefer it over
+    # the pip -> pipx -> PEP-668 gauntlet.
+    INSTALL_VIA="uv"
+    note "Python $PYTHON_VERSION found; pipx missing -- using uv"
+    bootstrap_uv
+elif [ -n "$PYTHON" ] && ! pip_pipx_install_blocked; then
+    # Python present, pip can install user packages: bootstrap pipx the classic
+    # way and keep the healthy toolchain path.
+    note "Python $PYTHON_VERSION found; installing pipx"
     if ! "$PYTHON" -m pip --version &>/dev/null; then
         "$PYTHON" -m ensurepip --user 2>/dev/null || true
     fi
-    if ! "$PYTHON" -m pip install --user pipx 2>/dev/null; then
-        if command -v uv &>/dev/null && uv tool install pipx >/dev/null 2>&1; then
-            export PATH="$HOME/.local/bin:$PATH"
-        else
-            echo ""
-            echo "ERROR: Could not install pipx (pip is not available)."
-            echo ""
-            echo "  Install pipx for your platform, then re-run this script:"
-            echo "    Debian/Ubuntu: sudo apt update && sudo apt install pipx"
-            echo "    Arch:          sudo pacman -S python-pipx"
-            echo "    macOS:         brew install pipx"
-            exit 1
-        fi
+    if "$PYTHON" -m pip install --user pipx 2>/dev/null; then
+        export PATH="$HOME/.local/bin:$PATH"
+        pipx ensurepath 2>/dev/null || "$PYTHON" -m pipx ensurepath 2>/dev/null || true
+        INSTALL_VIA="pipx"
+        ok "pipx" "$(pipx --version 2>/dev/null || echo installed)"
+    else
+        # pip surprised us; fall back to uv rather than hard-error.
+        note "pip could not install pipx -- using uv"
+        INSTALL_VIA="uv"
+        bootstrap_uv
     fi
-    export PATH="$HOME/.local/bin:$PATH"
-    pipx ensurepath 2>/dev/null || "$PYTHON" -m pipx ensurepath 2>/dev/null || true
+else
+    # No usable Python, or a modern externally-managed interpreter that refuses
+    # `pip install --user`. This is the fresh-Arch / Homebrew-Python case the
+    # old installer hard-errored on. uv provides Python 3.11+ itself.
+    if [ -n "$PYTHON" ]; then
+        note "Python $PYTHON_VERSION is externally managed (PEP 668) -- using uv"
+    else
+        note "No Python 3.11+ found -- uv will provide one"
+    fi
+    INSTALL_VIA="uv"
+    bootstrap_uv
 fi
-
-echo "  pipx:     $(pipx --version 2>/dev/null || echo 'installed')"
 
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # --- Find latest release ---
-echo ""
-echo "Finding latest release..."
+step "Finding latest release"
 
-# Try gh CLI first, fall back to curl. A local gh install is not enough:
-# fresh machines often have gh on PATH before `gh auth login` has run.
-USE_GH_RELEASE_DOWNLOAD=0
-if command -v gh &>/dev/null; then
-    GH_RELEASE_ERR="$WORK_DIR/gh-release-view.err"
-    if RELEASE_TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>"$GH_RELEASE_ERR") && [ -n "$RELEASE_TAG" ]; then
-        USE_GH_RELEASE_DOWNLOAD=1
-    else
-        if [ -s "$GH_RELEASE_ERR" ]; then
-            echo "  gh CLI is unauthenticated or cannot read releases; falling back to curl."
-        fi
-        RELEASE_TAG=""
-    fi
-fi
-if [ -z "$RELEASE_TAG" ]; then
-    RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-        | extract_json_string_field "tag_name" || echo "")
-fi
+# Resolve the latest tag WITHOUT api.github.com. github.com/<repo>/releases/latest
+# is a web/CDN 302 redirect to /releases/tag/<tag> -- no 60/hr unauthenticated
+# cap, the cap that broke fresh-box installs (no `gh` yet, so unauthenticated).
+RELEASE_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)"
+RELEASE_TAG=""
+case "$RELEASE_URL" in
+    */releases/tag/*) RELEASE_TAG="${RELEASE_URL##*/releases/tag/}" ;;
+esac
 
 if [ -z "$RELEASE_TAG" ]; then
-    echo "ERROR: No releases found at github.com/$REPO"
-    echo "  Check https://github.com/$REPO/releases"
-    exit 1
+    die "No hashd release found" \
+        "install.release_lookup" \
+        "Could not read the latest release from github.com/$REPO.\nThis usually means no network access or GitHub is unreachable." \
+        "Check connectivity, then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash" \
+        "Or browse releases manually: https://github.com/$REPO/releases"
 fi
 
-echo "  Latest:   $RELEASE_TAG"
+ok "Latest release" "$RELEASE_TAG"
 
-# --- Find matching wheel ---
-# Wheels use abi3 stable ABI (cp311-abi3): works with any Python 3.11+.
-# If minimum Python changes, update this tag AND pyproject.toml requires-python.
+# --- Resolve wheel names (downloaded via direct release-asset CDN URLs) ---
+# Wheels use abi3 stable ABI (cp311-abi3): works with any Python 3.11+. If the
+# minimum Python changes, update this tag AND pyproject.toml requires-python.
+# macOS ships one universal2 wheel; Linux is arch-tagged. Names are constructed
+# from the version + platform so downloads use direct CDN URLs (no GitHub API).
 ABI_TAG="cp311-abi3"
-
-# macOS wheels use "universal2" instead of arch-specific names
+VERSION="${RELEASE_TAG#v}"
 if [ "$PLATFORM" = "macosx" ]; then
-    WHEEL_MACHINE="universal2"
+    WHEEL_PLATFORM="macosx_10_9_universal2"
 else
-    WHEEL_MACHINE="$MACHINE"
+    WHEEL_PLATFORM="${PLATFORM}_${MACHINE}"
 fi
 
-WHEEL_PATTERN="hashd-*-${ABI_TAG}-*${WHEEL_MACHINE}*.whl"
-BOT_WHEEL_PATTERN="hashd_bot_telegram-*.whl"
-FIGMA_WHEEL_PATTERN="hashd_connector_figma-*.whl"
-GITHUB_CONNECTOR_WHEEL_PATTERN="hashd_connector_github-*.whl"
-JIRA_WHEEL_PATTERN="hashd_connector_jira-*.whl"
-TUI_WHEEL_PATTERN="hashd_tui-*.whl"
+WHEEL="hashd-${VERSION}-${ABI_TAG}-${WHEEL_PLATFORM}.whl"
+BOT_WHEEL="hashd_bot_telegram-${VERSION}-py3-none-any.whl"
+FIGMA_WHEEL="hashd_connector_figma-${VERSION}-py3-none-any.whl"
+GITHUB_CONNECTOR_WHEEL="hashd_connector_github-${VERSION}-py3-none-any.whl"
+JIRA_WHEEL="hashd_connector_jira-${VERSION}-py3-none-any.whl"
+TUI_WHEEL="hashd_tui-${VERSION}-py3-none-any.whl"
 
-echo "  Looking for: $WHEEL_PATTERN"
-
-# Download matching wheel
-if [ "$USE_GH_RELEASE_DOWNLOAD" -eq 1 ]; then
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$BOT_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$FIGMA_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$GITHUB_CONNECTOR_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$JIRA_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-    gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$TUI_WHEEL_PATTERN" --dir "$WORK_DIR" 2>/dev/null
-else
-    # Fall back to curl from release assets
-    ASSETS_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
-    WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep "$WHEEL_MACHINE" \
-        | grep "$ABI_TAG" \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No wheel found for Python $PYTHON_VERSION on $PLATFORM/$MACHINE"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
+# Download via direct release-asset CDN URLs -- no api.github.com, so immune to
+# the unauthenticated 60/hr limit that fresh boxes (no `gh` yet) used to hit.
+DL_BASE="https://github.com/$REPO/releases/download/$RELEASE_TAG"
+for _wheel in "$WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$TUI_WHEEL"; do
+    if ! curl -fsSL -o "$WORK_DIR/$_wheel" "$DL_BASE/$_wheel" 2>/dev/null; then
+        die "Could not download $_wheel" \
+            "install.wheel_download" \
+            "Failed to download $_wheel from the $RELEASE_TAG release.\nThis is a direct CDN download (no GitHub API), so it usually means no network access, or no wheel was published for this platform ($PLATFORM/$MACHINE)." \
+            "Check the release assets: https://github.com/$REPO/releases/tag/$RELEASE_TAG" \
+            "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
     fi
+done
 
-    curl -fsSL -o "$WORK_DIR/$(basename "$WHEEL_URL")" "$WHEEL_URL"
+# Resolve to absolute paths for the install step (the loop verified each download).
+WHEEL="$WORK_DIR/$WHEEL"
+BOT_WHEEL="$WORK_DIR/$BOT_WHEEL"
+FIGMA_WHEEL="$WORK_DIR/$FIGMA_WHEEL"
+GITHUB_CONNECTOR_WHEEL="$WORK_DIR/$GITHUB_CONNECTOR_WHEEL"
+JIRA_WHEEL="$WORK_DIR/$JIRA_WHEEL"
+TUI_WHEEL="$WORK_DIR/$TUI_WHEEL"
 
-    BOT_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep 'hashd_bot_telegram-' \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$BOT_WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No Telegram bot wheel found"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
-    fi
-
-    curl -fsSL -o "$WORK_DIR/$(basename "$BOT_WHEEL_URL")" "$BOT_WHEEL_URL"
-
-    FIGMA_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep 'hashd_connector_figma-' \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$FIGMA_WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No Figma connector wheel found"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
-    fi
-
-    curl -fsSL -o "$WORK_DIR/$(basename "$FIGMA_WHEEL_URL")" "$FIGMA_WHEEL_URL"
-
-    GITHUB_CONNECTOR_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep 'hashd_connector_github-' \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$GITHUB_CONNECTOR_WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No GitHub connector wheel found"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
-    fi
-
-    curl -fsSL -o "$WORK_DIR/$(basename "$GITHUB_CONNECTOR_WHEEL_URL")" "$GITHUB_CONNECTOR_WHEEL_URL"
-
-    JIRA_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep 'hashd_connector_jira-' \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$JIRA_WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No Jira connector wheel found"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
-    fi
-
-    curl -fsSL -o "$WORK_DIR/$(basename "$JIRA_WHEEL_URL")" "$JIRA_WHEEL_URL"
-
-    TUI_WHEEL_URL=$(curl -fsSL "$ASSETS_URL" 2>/dev/null \
-        | grep '"browser_download_url"' \
-        | grep 'hashd_tui-' \
-        | head -1 \
-        | extract_json_string_field "browser_download_url")
-
-    if [ -z "$TUI_WHEEL_URL" ]; then
-        echo ""
-        echo "ERROR: No TUI wheel found"
-        echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-        exit 1
-    fi
-
-    curl -fsSL -o "$WORK_DIR/$(basename "$TUI_WHEEL_URL")" "$TUI_WHEEL_URL"
-fi
-
-WHEEL=$(find "$WORK_DIR" -name "$WHEEL_PATTERN" | head -1)
-if [ -z "$WHEEL" ]; then
-    echo ""
-    echo "ERROR: No wheel found for $PLATFORM/$MACHINE"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-BOT_WHEEL=$(find "$WORK_DIR" -name "$BOT_WHEEL_PATTERN" | head -1)
-if [ -z "$BOT_WHEEL" ]; then
-    echo ""
-    echo "ERROR: Telegram bot wheel not found"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-FIGMA_WHEEL=$(find "$WORK_DIR" -name "$FIGMA_WHEEL_PATTERN" | head -1)
-if [ -z "$FIGMA_WHEEL" ]; then
-    echo ""
-    echo "ERROR: Figma connector wheel not found"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-GITHUB_CONNECTOR_WHEEL=$(find "$WORK_DIR" -name "$GITHUB_CONNECTOR_WHEEL_PATTERN" | head -1)
-if [ -z "$GITHUB_CONNECTOR_WHEEL" ]; then
-    echo ""
-    echo "ERROR: GitHub connector wheel not found"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-JIRA_WHEEL=$(find "$WORK_DIR" -name "$JIRA_WHEEL_PATTERN" | head -1)
-if [ -z "$JIRA_WHEEL" ]; then
-    echo ""
-    echo "ERROR: Jira connector wheel not found"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-TUI_WHEEL=$(find "$WORK_DIR" -name "$TUI_WHEEL_PATTERN" | head -1)
-if [ -z "$TUI_WHEEL" ]; then
-    echo ""
-    echo "ERROR: TUI wheel not found"
-    echo "  Available wheels: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
-    exit 1
-fi
-
-echo "  Downloaded: $(basename "$WHEEL")"
-echo "  Downloaded: $(basename "$BOT_WHEEL")"
-echo "  Downloaded: $(basename "$FIGMA_WHEEL")"
-echo "  Downloaded: $(basename "$GITHUB_CONNECTOR_WHEEL")"
-echo "  Downloaded: $(basename "$JIRA_WHEEL")"
-echo "  Downloaded: $(basename "$TUI_WHEEL")"
+ok "Downloaded wheels" "CLI + server + bot + figma/github/jira connectors + TUI"
 
 # --- Install forge CLIs ---
-echo ""
-echo "Installing forge CLIs..."
+# All three, always: prebuilt binaries, SHA-256 verified, no prompts.
+step "Installing forge CLIs (gh, glab, bkt)"
 install_forge_cli gh "GitHub" "$GH_VERSION"
 install_forge_cli glab "GitLab" "$GLAB_VERSION"
 install_forge_cli bkt "Bitbucket" "$BKT_VERSION"
 
-# --- Install ---
-echo ""
-echo "Installing hashd..."
-pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-pipx runpip hashd install --upgrade "$BOT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-pipx runpip hashd install --upgrade "$FIGMA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-pipx runpip hashd install --upgrade "$GITHUB_CONNECTOR_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-pipx runpip hashd install --upgrade "$JIRA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-pipx runpip hashd install --upgrade "$TUI_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
-
-# Ensure ~/.local/bin is on PATH
-pipx ensurepath 2>/dev/null || true
+# --- Install hashd wheels ---
+# Either pipx (healthy existing toolchain) or uv (provides Python 3.11+ and the
+# install mechanism on a bare box). Both land entry points in ~/.local/bin.
+if [ "$INSTALL_VIA" = "uv" ]; then
+    install_via_uv
+else
+    install_via_pipx
+fi
+ok "hashd installed"
 
 OPS_ROOT="${HASHD_OPS_ROOT:-$HOME/.hashd}"
 mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
 WF_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/wf"
-promote_pipx_binary wf || true
-promote_pipx_binary hashd-server || true
+if [ "$INSTALL_VIA" = "pipx" ]; then
+    promote_pipx_binary wf || true
+    promote_pipx_binary hashd-server || true
+fi
 if [ ! -x "$WF_BIN" ]; then
-    echo ""
-    echo "ERROR: Installed wf not found at $WF_BIN"
-    echo "  Expected bundled binary at: ${PIPX_HOME:-$HOME/.local/pipx}/venvs/hashd/bin/wf"
-    exit 1
+    # uv tool install puts entry points directly in ~/.local/bin; pipx puts
+    # them there via the promote step above. Resolve whatever is on PATH.
+    if command -v wf &>/dev/null; then
+        WF_BIN="$(command -v wf)"
+    fi
+fi
+if [ ! -x "$WF_BIN" ]; then
+    die "Installed wf not found on PATH" \
+        "install.wf_missing" \
+        "hashd installed but the wf entry point is not at $WF_BIN and not on PATH.\nInstall method: $INSTALL_VIA." \
+        "Open a new shell or run: export PATH=\"\$HOME/.local/bin:\$PATH\"" \
+        "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
 fi
 
 install_bash_completion
@@ -648,8 +712,7 @@ case "$TOOLS_ARCH" in
     x86_64) TOOLS_ARCH="amd64" ;;
     aarch64) TOOLS_ARCH="arm64" ;;
 esac
-echo ""
-echo "Installing external tools..."
+step "Installing external tools (gitleaks, git-delta)"
 if curl --fail --silent --location \
     --retry 3 --retry-delay 2 \
     --connect-timeout 10 --max-time 60 \
@@ -661,28 +724,41 @@ else
     warn_external_tools "could not download installer script"
 fi
 
-echo ""
-echo "Refreshing services and project databases..."
-"$WF_BIN" restart --yes
+step "Starting hashd services"
+"$WF_BIN" restart --yes >/dev/null 2>&1 || "$WF_BIN" restart --yes
+ok "Services started"
 
+printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C_RESET"
+
+# --- Verify with the green checklist ---
+step "Running wf doctor"
 echo ""
-echo "Done! Installed hashd $RELEASE_TAG."
+"$WF_BIN" doctor || true
 echo ""
-echo "Forge auth not yet configured. Authenticate for the forge(s) you use:"
-echo "  gh:   gh auth login"
-echo "  glab: glab auth login"
-echo "  bkt:  bkt auth login --kind cloud --web"
+
+# --- Agent on-ramp ---
+# hashd needs git + one authenticated agent CLI. Agents are npm-installed, so
+# Node is the agent's prerequisite, not hashd's. Print the ONE OS-correct path.
+NODE_HINT="$(node_install_hint)"
+printf '%sAdd an AI agent%s -- hashd needs one authenticated agent CLI:\n' "$C_BOLD" "$C_RESET"
+step "Install Node.js 20+:  $NODE_HINT"
+step "Install Claude Code:  npm i -g @anthropic-ai/claude-code"
+step "Authenticate:         claude login"
 echo ""
+
+# --- Forge auth ---
+printf '%sAuthenticate a forge%s (only the one you use):\n' "$C_BOLD" "$C_RESET"
+note "GitHub:    gh auth login"
+note "GitLab:    glab auth login"
+note "Bitbucket: bkt auth login --kind cloud --web"
+echo ""
+
 if ! command -v wf &>/dev/null; then
-    echo "NOTE: wf is not yet on your PATH. Run:"
-    echo ""
-    echo "  source ~/.bashrc"
-    echo ""
-    echo "Or open a new terminal."
+    note "wf is not on your PATH yet -- run 'source ~/.bashrc' or open a new terminal."
     echo ""
 fi
-echo "Next steps:"
-echo ""
-echo "  wf --help"
-echo "  wf project add /path/to/your/repo"
+
+# --- One inviting next action ---
+printf '%sNext:%s register your first repo\n' "$C_BOLD" "$C_RESET"
+printf '  %s->%s wf project add /path/to/your/repo\n' "$C_BLUE" "$C_RESET"
 echo ""

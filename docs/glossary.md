@@ -2,7 +2,7 @@
 
 The canonical vocabulary for hashd. Other docs link here on first use of a term.
 For the authoritative state model and lifecycle diagrams, see **[WF.md](../WF.md)**;
-for the full product specification, see **[PRD.md](../PRD.md)**.
+for the full product specification, see **PRD.md**.
 
 ## Entities
 

@@ -4,6 +4,29 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.8.6 - 2026-06-18
+
+### What's Changed
+
+- Onboarding now works on a bare machine in one command. `curl … | install.sh`
+  bootstraps a Python 3.11+ runtime via `uv` when none is present, so a fresh Arch
+  or macOS box no longer dead-ends on a missing Python or a PEP-668 pipx wall. The
+  installer output is quieter and clearer, errors carry the one OS-correct fix, and
+  it finishes by running `wf doctor` and pointing you at your first project.
+- Fixed installs that died with "No wheel found": wheels are now fetched from
+  direct release CDN URLs instead of the unauthenticated GitHub API, which a fresh
+  box (no `gh` yet) could exhaust at 60 requests/hour.
+- Drew an honest dependency boundary: hashd needs `git` and an AI agent CLI; Python
+  is handled by `uv`, and Node is documented as the agent CLI's prerequisite, not
+  hashd's. The README now leads with the install command, and `wf doctor` guides you
+  through installing and authenticating an agent.
+- Trimmed the published docs to a curated, customer-facing set (internal design and
+  planning papers no longer ship), moved QUICKSTART and the workflow reference to the
+  front page, and hid the internal `wf upgrade` command (it runs data migrations,
+  not a self-update) from the CLI surface.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.8.5...v0.8.6
+
 ## v0.8.5 - 2026-06-17
 
 ### What's Changed

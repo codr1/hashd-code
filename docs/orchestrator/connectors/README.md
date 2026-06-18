@@ -138,8 +138,8 @@ my = "hashd_connector_my"
 
 ## Non-Python connectors
 
-The discovery system is Python-only (same model as Neovim's Lua-based plugin discovery). A Rust/Go connector works via a thin Python shim that handles discovery and delegates to the binary via subprocess or IPC. See [CONNECTORS.md](../../docs/CONNECTORS.md#8-non-python-connectors) for details.
+The discovery system is Python-only (same model as Neovim's Lua-based plugin discovery). A Rust/Go connector works via a thin Python shim that handles discovery and delegates to the binary via subprocess or IPC. See CONNECTORS.md for details.
 
 ## Full specification
 
-See [docs/CONNECTORS.md](../../docs/CONNECTORS.md) for the complete system specification including resolution protocol, MCP server, tool dispatch, and future plans.
+See docs/CONNECTORS.md for the complete system specification including resolution protocol, MCP server, tool dispatch, and future plans.
