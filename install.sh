@@ -14,6 +14,7 @@ COMPLETION_LINE='source <(wf completion bash)'
 GH_VERSION="2.93.0"
 GLAB_VERSION="1.101.0"
 BKT_VERSION="0.28.1"
+TEA_VERSION="0.14.1"
 
 # --- Output: restrained color + step markers ---
 #
@@ -222,6 +223,36 @@ node_install_hint() {
     fi
 }
 
+# ensure_tools_dir_on_path: wire the bundled-tools dir (~/.hashd/tools/bin,
+# honoring $HASHD_TOOLS_DIR) into the user's shell rc PATH, the same way
+# pipx/uv wire ~/.local/bin. install-tools.sh drops gitleaks + git-delta there;
+# without this, they resolve for hashd's tools-dir-aware code but not as bare
+# `gitleaks`/`delta` on PATH (subprocesses, the user's own shell). Idempotent:
+# the managed block is keyed by a marker so re-runs don't duplicate it.
+ensure_tools_dir_on_path() {
+    local tools_dir="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}"
+    local bashrc="${HOME}/.bashrc"
+    local marker="# hashd tools dir (managed by hashd install scripts)"
+
+    mkdir -p "$tools_dir"
+
+    # Make it effective for the rest of this install run too.
+    case ":$PATH:" in
+        *":$tools_dir:"*) ;;
+        *) export PATH="$tools_dir:$PATH" ;;
+    esac
+
+    mkdir -p "$(dirname "$bashrc")"
+    touch "$bashrc"
+    if grep -qF "$marker" "$bashrc"; then
+        return 0
+    fi
+    if [[ -s "$bashrc" ]]; then
+        printf '\n' >> "$bashrc"
+    fi
+    printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$tools_dir" >> "$bashrc"
+}
+
 install_bash_completion() {
     local bashrc="${HOME}/.bashrc"
     local tmp
@@ -338,6 +369,18 @@ forge_asset_name() {
                 echo "bkt_${version}_linux_${arch}.tar.gz"
             fi
             ;;
+        tea)
+            case "$machine" in
+                x86_64) arch="amd64" ;;
+                aarch64) arch="arm64" ;;
+                *) return 1 ;;
+            esac
+            if [ "$os" = "macosx" ]; then
+                echo "tea-${version}-darwin-${arch}"
+            else
+                echo "tea-${version}-linux-${arch}"
+            fi
+            ;;
         *) return 1 ;;
     esac
 }
@@ -349,6 +392,7 @@ forge_download_base_url() {
         gh) echo "https://github.com/cli/cli/releases/download/v${version}" ;;
         glab) echo "https://gitlab.com/gitlab-org/cli/-/releases/v${version}/downloads" ;;
         bkt) echo "https://github.com/avivsinai/bitbucket-cli/releases/download/v${version}" ;;
+        tea) echo "https://dl.gitea.com/tea/${version}" ;;
         *) return 1 ;;
     esac
 }
@@ -358,7 +402,7 @@ forge_checksums_name() {
     local version="$2"
     case "$name" in
         gh) echo "gh_${version}_checksums.txt" ;;
-        glab|bkt) echo "checksums.txt" ;;
+        glab|bkt|tea) echo "checksums.txt" ;;
         *) return 1 ;;
     esac
 }
@@ -450,6 +494,9 @@ install_forge_cli() {
                 exit 1
             fi
             unzip -q "$asset_path" -d "$extract_dir"
+            ;;
+        tea-*)
+            install -m 755 "$asset_path" "$extract_dir/$name"
             ;;
         *)
             echo "ERROR: Unsupported forge CLI archive: $asset_name"
@@ -639,11 +686,12 @@ TUI_WHEEL="$WORK_DIR/$TUI_WHEEL"
 ok "Downloaded wheels" "CLI + server + bot + figma/github/jira connectors + TUI"
 
 # --- Install forge CLIs ---
-# All three, always: prebuilt binaries, SHA-256 verified, no prompts.
-step "Installing forge CLIs (gh, glab, bkt)"
+# All supported forge CLIs, always: prebuilt binaries, SHA-256 verified, no prompts.
+step "Installing forge CLIs (gh, glab, bkt, tea)"
 install_forge_cli gh "GitHub" "$GH_VERSION"
 install_forge_cli glab "GitLab" "$GLAB_VERSION"
 install_forge_cli bkt "Bitbucket" "$BKT_VERSION"
+install_forge_cli tea "Gitea" "$TEA_VERSION"
 
 # --- Install hashd wheels ---
 # Either pipx (healthy existing toolchain) or uv (provides Python 3.11+ and the
@@ -713,6 +761,10 @@ case "$TOOLS_ARCH" in
     aarch64) TOOLS_ARCH="arm64" ;;
 esac
 step "Installing external tools (gitleaks, git-delta)"
+# Wire the bundled-tools dir onto PATH before the install runs, so the freshly
+# dropped gitleaks/delta binaries resolve as bare commands everywhere (the
+# user's shell and any subprocess), not just via hashd's tools-dir-aware code.
+ensure_tools_dir_on_path
 if curl --fail --silent --location \
     --retry 3 --retry-delay 2 \
     --connect-timeout 10 --max-time 60 \
@@ -725,12 +777,31 @@ else
 fi
 
 step "Starting hashd services"
-"$WF_BIN" restart --yes >/dev/null 2>&1 || "$WF_BIN" restart --yes
+# `wf restart` brings up Prefect + worker and registers the INSTALL-OWNED
+# infrastructure, including the housekeeping cron, on this first pass -- it
+# waits for Prefect's deployment API to accept writes before reporting success,
+# so a fresh install no longer needs a warm second restart to land housekeeping.
+# First attempt is quiet; on failure we retry once with output, and `set -e`
+# makes a second failure abort the install with the restart diagnostic. A failed
+# restart means the install-owned infrastructure did not converge -- that is a
+# genuinely broken install, so we stop here rather than print a misleading
+# success.
+"$WF_BIN" restart --yes >/dev/null 2>&1 || {
+    printf '%s   first restart did not converge; retrying with output...%s\n' "$C_DIM" "$C_RESET"
+    "$WF_BIN" restart --yes
+}
 ok "Services started"
 
 printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C_RESET"
 
-# --- Verify with the green checklist ---
+# --- Verify with the doctor report ---
+# `wf doctor` now reads honestly: the INSTALL-OWNED checks (server, Prefect,
+# housekeeping cron, bundled gitleaks + delta) must be green after a successful
+# install, and the USER-SETUP gaps (git, an agent CLI, forge auth) render as a
+# "Finish setup:" checklist rather than a red failure wall. doctor exits
+# non-zero while setup is unfinished, so we ignore its exit here: a fresh box
+# WILL have those user-setup steps outstanding, and that is expected, not a
+# broken install (a broken install already aborted at the restart step above).
 step "Running wf doctor"
 echo ""
 "$WF_BIN" doctor || true
@@ -751,6 +822,7 @@ printf '%sAuthenticate a forge%s (only the one you use):\n' "$C_BOLD" "$C_RESET"
 note "GitHub:    gh auth login"
 note "GitLab:    glab auth login"
 note "Bitbucket: bkt auth login --kind cloud --web"
+note "Gitea:     tea login add --name work --url https://git.example.com --token \$TOKEN"
 echo ""
 
 if ! command -v wf &>/dev/null; then

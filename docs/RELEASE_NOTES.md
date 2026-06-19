@@ -4,6 +4,44 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.8.7 - 2026-06-19
+
+### What's Changed
+
+- New `wf project` views surface a project's REQS and SPEC artifacts directly,
+  so you can read the requirements and spec a project is working against without
+  leaving the CLI.
+- `wf` is far more responsive to interruption: it now exits promptly on Ctrl-C
+  and SIGTERM instead of hanging, renders friendly, actionable diagnostics for
+  bad arguments instead of a bare usage dump, and its shell completion works even
+  on machines without the `bash-completion` package installed.
+- `wf restart` is now a careful neighbor: it only stops processes hashd itself
+  launched, and when a foreign process is holding a hashd port it tells you which
+  one instead of killing it.
+- `wf watch` no longer goes down with the server -- a dead or half-dead server
+  surfaces as an error state in the TUI instead of crashing it.
+- Hardened the boundary between the clients (`wf`, TUI, Telegram bot) and the
+  server -- groundwork for running the server on a separate, eventually
+  multi-tenant, host. The CLI now routes every call through a single cancellable
+  HTTP path that reports clearly when a remote server is unreachable, and the
+  Telegram bot gained the same CI-enforced "no direct database access" guard the
+  TUI already enforced.
+- Fresh installs now deliver `gitleaks` and `git-delta` and converge on an honest
+  `wf doctor` that reports what is actually installed and authenticated. `wf
+  project add` runs and classifies your configured test and build commands at
+  setup time -- catching a broken toolchain before the first story instead of
+  hours in -- and adds a Gitea on-ramp.
+- Project discovery now runs on Sonnet instead of Opus: faster and cheaper for a
+  step that does not need the larger model.
+- Internal hardening: pinned every GitHub Action in the dev and back-merge
+  workflows to commit SHAs (matching the release workflow) to close a
+  supply-chain gap, removed dead Python now that the work moved to Go (the
+  `prompt_registry` and the `timeline` mirror, ~760 lines, both superseded by
+  Go-canonical paths), and made the pubsub tests self-heal stale runtime
+  directories.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.8.6...v0.8.7
+
 ## v0.8.6 - 2026-06-18
 
 ### What's Changed

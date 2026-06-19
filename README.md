@@ -12,7 +12,7 @@ One paste on a fresh box -- no Python setup required:
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `wf` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt), then runs `wf doctor` to confirm the setup.
+The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `wf` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `wf doctor` to confirm the setup.
 
 **System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `wf doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
 
@@ -521,11 +521,21 @@ See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions includ
 
 - **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
 - **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `wf doctor` prints the exact OS-correct install commands.
-- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), or [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
-- [delta (git-delta)](https://github.com/dandavison/delta) - optional TUI side-by-side, syntax-highlighted, word-level diffs (auto-installed by the installer / `setup.sh`)
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea/) (Gitea). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
+- [delta (git-delta)](https://github.com/dandavison/delta) - bundled TUI side-by-side, syntax-highlighted, word-level diff renderer (auto-installed by the installer / `setup.sh`)
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
 - [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) - bundled code intelligence backend (auto-fetched by the installer / `setup.sh`; setup fails if the pinned binary cannot be fetched or executed)
 - A project with tests (Makefile, package.json, Taskfile, etc.)
+
+Authenticate the forge you use:
+
+```bash
+gh auth login                         # GitHub
+glab auth login                       # GitLab
+bkt auth login --kind cloud --web     # Bitbucket OAuth
+bkt auth login --kind cloud --web-token # Bitbucket API-token alternative
+tea login add --name work --url https://git.example.com --token $TOKEN  # Gitea
+```
 
 Minimum agent/tool versions verified for this release:
 
@@ -558,7 +568,7 @@ build_cmd: ""
 merge_gate_test_cmd: "make test" # merge-time tests; the visible failure surface
 test_timeout: 300
 merge_mode: "local"              # "local" or "pr"
-forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab"
+forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea"
 
 # --- Autonomy ---
 autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
