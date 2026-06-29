@@ -4,6 +4,71 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.0 - 2026-06-29
+
+A major release on three fronts: hashd now runs as a real **client/server** (CLI and
+TUI on one machine, the server on another, over the internet, securely); the in-TUI
+**AI thinking-partner chat** moved onto the server with live streaming that survives
+disconnects; and the tool itself is now **`hashd`** (`wf` lives on as an alias). Plus
+durable PR reviews and uniform agent permissions.
+
+### What's Changed
+
+- **Run hashd remotely, securely.** Point the CLI and TUI at a server on another box with
+  `hashd server set https://host:1337 --token <token>` -- set it once and every command and
+  the TUI follow. Same-machine use is unchanged: loopback stays fully transparent, with no
+  auth or setup. The server auto-generates its own TLS certificate and `hashd auth create`
+  mints a single pairing token that carries the certificate's fingerprint, so the client
+  trusts it by pinning -- no CA files, no OS trust-store edits. Off-loopback is fail-closed:
+  the server refuses to bind to a public address without TLS, and every remote request needs
+  a valid bearer token. Manage tokens with `hashd auth {create,list,delete}`.
+
+- **The CLI is now `hashd`.** The command renamed from `wf` to `hashd`; `wf` and `ha` remain
+  permanent aliases, so existing muscle memory and scripts keep working. Pure rename, no
+  behavior change.
+
+- **AI chat / thinking-partner, now server-side and first-class.** The in-TUI chat runs on
+  the Go server and streams the reply live, token by token, over SSE -- and generation is
+  detached server-side, so you can drop the connection and reconnect, replay, or resume
+  mid-turn (built for remote/SSH use). It auto-injects the right context for the scope (a
+  story chat loads that story's diff, commits, review, clarifications, and timeline; a
+  project chat loads its stories and workstreams) and resolves `@`-references server-side --
+  `@diff`, `@file`, `@story`, `@commits`, `@review`, `@reqs`, `@spec`, `@timeline`, and
+  connectors `@github` / `@jira` / `@figma`. The agent can propose story edits for you to
+  confirm and apply, and has a read-only hashd MCP tool to query project state. In the answer
+  box, `Ctrl+G` opens a clarification assistant that drafts an answer (refining your current
+  draft if you've started one) for you to edit and submit -- nothing is ever sent on your
+  behalf. Works across all seven agents (Claude, Codex, Gemini, Qwen, Copilot, OpenCode,
+  Kimi) with per-agent live streaming and session reuse on resume.
+
+- **Durable PR reviews.** Rejecting a PR no longer closes it and opens a fresh one -- the
+  same PR gains a FIX commit and is reused, preserving review threads, resolutions, and bot
+  incremental reviews across cycles. hashd reads forge review threads (GitHub, GitLab,
+  Bitbucket, Gitea) with their resolution state, keeps a durable finding ledger, and feeds
+  only still-open findings forward; it never marks a finding resolved itself -- the reviewer
+  does. Late final-review concerns are now posted as PR comments.
+
+- **Uniform agent permissions.** Each stage's tool-permission intent (read-only vs. write,
+  shell access) is declared once and rendered to each agent's own flags, instead of being
+  hand-maintained per agent -- fixing drift such as a review-resume that wasn't actually
+  read-only. Agents without a native read-only mode (OpenCode, Kimi) are explicitly flagged
+  as best-effort.
+
+- **A thinner, server-owned core (the foundation for remote).** The Telegram bot and TUI are
+  now database-clean -- clients reach the server over REST and SSE, never the database
+  directly. Crash/health recovery is native in the Go server (the redundant Python monitor
+  is gone), housekeeping sweeps and project-config reads moved server-side, forge PR/MR
+  operations run through the server, and project Telegram config is served over REST.
+
+- **Installer and tooling.** The installer shows per-wheel download progress and retries
+  transient fetch failures (no more silent hangs or a single CDN blip aborting the install),
+  and vendors the forge CLIs (`gh`, `glab`, `bkt`, `tea`) into hashd's own tools directory;
+  its version parser no longer misreads `tea`'s build-metadata line, fixing aborted installs.
+  A REQS.md viewer/editor opens with `R` from the TUI dashboard. Hyphenated project names are
+  valid end to end, and `project add` preserves the build commands it detects.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.8.7...v0.9.0
+
 ## v0.8.7 - 2026-06-19
 
 ### What's Changed
