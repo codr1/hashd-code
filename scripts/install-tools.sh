@@ -40,6 +40,11 @@ esac
 
 RAW_ARCH="${HASHD_TOOLS_ARCH:-$(uname -m)}"
 
+# Pinned tool versions, hoisted to top level so scripts/check-external-assets.sh
+# can read them as the single source of truth.
+GITLEAKS_VERSION="8.30.1"
+DELTA_VERSION="0.19.2"
+
 log() {
     # Single-line status prefix so source and wheel flows render consistently.
     printf '  %-12s %s\n' "$1" "$2"
@@ -57,8 +62,12 @@ warn_delta_install_failed() {
     echo "      Install manually from https://github.com/dandavison/delta/releases if needed."
 }
 
+# First semver in the input. Anchored to the FIRST match: a tool prints its own
+# version first and may append build metadata that is itself a semver (e.g.
+# `tea --version` ends with "go-sdk: v0.25.1"), which a greedy last-match would
+# wrongly read as the tool version.
 extract_semver() {
-    sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1
+    grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
 
 sha256_file() {
@@ -73,11 +82,11 @@ sha256_file() {
 }
 
 # ---------------------------------------------------------------------
-# gitleaks -- secret scanner used by `wf project add` and the pre-commit
+# gitleaks -- secret scanner used by `hashd project add` and the pre-commit
 # hook. Version pinned; bumps go in a dedicated PR.
 # ---------------------------------------------------------------------
 install_gitleaks() {
-    local version="8.30.1"
+    local version="$GITLEAKS_VERSION"
     local bin="$TOOLS_DIR/gitleaks"
 
     local arch
@@ -149,7 +158,7 @@ install_gitleaks() {
 # Version pinned; bumps go in a dedicated PR.
 # ---------------------------------------------------------------------
 install_delta() {
-    local version="0.19.2"
+    local version="$DELTA_VERSION"
     local bin="$TOOLS_DIR/delta"
 
     local target

@@ -2,11 +2,11 @@
 
 ## Agent-driven Project Add
 
-For scripted onboarding, agents should treat `wf project add` as a two-step flow:
+For scripted onboarding, agents should treat `hashd project add` as a two-step flow:
 
 ```bash
-wf project add /path/to/repo --no-interview --suggest
-wf project add /path/to/repo --no-interview
+hashd project add /path/to/repo --no-interview --suggest
+hashd project add /path/to/repo --no-interview
 ```
 
 The first command runs investigation only. It prints the canonical settings block, stores those proposed settings in the project-add cache, and exits without modifying project state.
@@ -16,7 +16,7 @@ The second command reuses the stored defaults, applies any explicit flag overrid
 Use explicit flags on the second command when the proposal needs correction, for example:
 
 ```bash
-wf project add /path/to/repo --no-interview \
+hashd project add /path/to/repo --no-interview \
   --description "Payments API" \
   --git-name "Alice" \
   --git-email "alice@example.com"
@@ -25,7 +25,7 @@ wf project add /path/to/repo --no-interview \
 Interactive operators can still use:
 
 ```bash
-wf project add /path/to/repo --suggest
+hashd project add /path/to/repo --suggest
 ```
 
 That runs the same investigation, stores the defaults, and then opens the wizard with AI-prefilled values.
@@ -35,7 +35,7 @@ That runs the same investigation, stores the defaults, and then opens the wizard
 ### See what's installed
 
 ```bash
-wf agents
+hashd agents
 ```
 
 Shows all 7 registered agents (Claude, Codex, Gemini, OpenCode, Kimi, Qwen, Copilot), their install status, supported shapes, and current stage assignments.
@@ -46,10 +46,10 @@ Each of the 18 workflow stages has a "shape" describing the kind of invocation i
 
 ```bash
 # Assign gemini to the breakdown stage
-wf project config set stage.breakdown gemini
+hashd project config set stage.breakdown gemini
 
 # Assign claude to review
-wf project config set stage.review claude
+hashd project config set stage.review claude
 ```
 
 Validation prevents incompatible assignments (e.g., an agent without `review_resume` cannot serve the review resume stage).
@@ -59,17 +59,17 @@ Assignments are validated against the agent registry before they are saved.
 Agents with `available` status (not yet verified with hashd) require `--force`:
 
 ```bash
-wf project config set stage.breakdown gemini --force
+hashd project config set stage.breakdown gemini --force
 ```
 
 ### Bulk assignment by role
 
 ```bash
 # Set all non-implement stages (16 stages) to gemini
-wf project config set planner gemini --force
+hashd project config set planner gemini --force
 
 # Set implement + implement_resume (2 stages) to claude
-wf project config set coder claude
+hashd project config set coder claude
 ```
 
 If an agent does not support the required stage shapes, the assignment is rejected.
@@ -99,7 +99,7 @@ If an agent does not support the required stage shapes, the assignment is reject
 
 ### Agent shape support
 
-Which agents can serve which stage shapes (`wf agents` shows this live):
+Which agents can serve which stage shapes (`hashd agents` shows this live):
 
 | Agent | print | json | edit | review | review_resume | implement | implement_resume |
 |-------|-------|------|------|--------|---------------|-----------|-----------------|
@@ -117,22 +117,22 @@ Reset a single stage assignment:
 
 ```bash
 # Reset review back to default agent
-wf project config reset stage.review
+hashd project config reset stage.review
 ```
 
 Reset all stage assignments:
 
 ```bash
 # Reset all stage overrides at once
-wf project config reset --all
+hashd project config reset --all
 ```
 
-Use `wf project config diff` before resetting to inspect which project overrides will be cleared. `wf project config show <key>` shows the effective value and Default/System/Project stack for one setting.
+Use `hashd project config diff` before resetting to inspect which project overrides will be cleared. `hashd project config show <key>` shows the effective value and Default/System/Project stack for one setting.
 
 Nuclear option -- reset all behavioral overrides (stage assignments, autonomy mode, etc.) back to defaults:
 
 ```bash
-wf doctor --reset-to-defaults
+hashd doctor --reset-to-defaults
 ```
 
 This preserves identity and build settings (name, repo_path, test_cmd, etc.) but strips stage_agents and other behavioral overrides.
@@ -149,7 +149,7 @@ Most CLI coding agents support both OAuth (interactive login) and API key authen
 
 ### Auth mode
 
-Set with `wf project config set auth-mode <mode>`:
+Set with `hashd project config set auth-mode <mode>`:
 
 | Mode | Behavior |
 |------|----------|
@@ -200,13 +200,13 @@ It just works. `auto` mode keeps the API key in the environment.
 `auto` mode keeps the API key and lets the CLI decide. If you want OAuth to win for agents where keys override OAuth (Claude, Gemini), set:
 
 ```bash
-wf project config set auth-mode oauth
+hashd project config set auth-mode oauth
 ```
 
 **"I want to switch from OAuth to API key"**
 
 ```bash
-wf project config set auth-mode api-key
+hashd project config set auth-mode api-key
 ```
 
 This is equivalent to `auto` for current env handling, but documents the operator intent that API keys should stay in the agent environment.
@@ -308,13 +308,13 @@ prompt = render_prompt('review_contextual', commit_title='Add auth', diff='...')
 
 ```bash
 # List all prompts grouped by pipeline phase
-wf prompts list
+hashd prompts list
 
 # Show a prompt template (with metadata header)
-wf prompts show implement
+hashd prompts show implement
 
 # Show the built-in default even if a project override exists
-wf prompts show implement --default
+hashd prompts show implement --default
 ```
 
 ### Per-project prompt overrides
@@ -327,14 +327,14 @@ Overrides are by **prompt template name**, not stage name. Some stages compose m
 
 ```bash
 # Create an override (copies default, opens $EDITOR)
-wf prompts edit breakdown
+hashd prompts edit breakdown
 
 # See what changed
-wf prompts diff breakdown
+hashd prompts diff breakdown
 
 # Restore the default
-wf prompts reset breakdown
+hashd prompts reset breakdown
 
 # Reset all overrides at once
-wf prompts reset --all
+hashd prompts reset --all
 ```

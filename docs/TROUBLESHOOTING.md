@@ -4,7 +4,7 @@
 
 ### What it means
 
-When you create a workstream (`wf run STORY-xxxx`), hashd runs the project's
+When you create a workstream (`hashd run STORY-xxxx`), hashd runs the project's
 test suite against the fresh worktree (a clean checkout of main). If tests
 fail, the workstream stays in `provisioning` with `baseline_failures`
 populated (and `runtime_status` reports `provisioning / failed`) instead of
@@ -24,7 +24,7 @@ ERROR: Workstream blocked -- 6 test(s) failing on main.
 
 Main has not changed since worktree creation (47314e5).
 Fix the tests on main first, or override:
-  wf run <ws_id> --run-anyway
+  hashd run <ws_id> --run-anyway
 ```
 
 **TUI:** Status panel shows `BLOCKED -- tests failing on main` in red with
@@ -36,9 +36,9 @@ the failing test names and remediation instructions. Footer shows
 Create a bug-fix story to fix the tests on main:
 
 ```bash
-wf plan bug "Fix broken tests on main"
-wf approve BUG-xxxx
-wf run BUG-xxxx --run-anyway    # This workstream IS the fix
+hashd plan bug "Fix broken tests on main"
+hashd approve BUG-xxxx
+hashd run BUG-xxxx --run-anyway    # This workstream IS the fix
 ```
 
 The bug-fix workstream uses `--run-anyway` because it needs to run despite the
@@ -50,7 +50,7 @@ fix is verified before merging.
 Once the fix merges to main, run the blocked workstream again:
 
 ```bash
-wf run <blocked_ws_id>
+hashd run <blocked_ws_id>
 ```
 
 hashd detects that main has advanced, rebases the worktree, and clears the
@@ -64,8 +64,8 @@ moved, the gate clears.
 If you want to proceed without fixing main (not recommended):
 
 ```bash
-wf run <ws_id> --run-anyway     # Prompts for confirmation
-wf run <ws_id> --run-anyway -y  # Skip confirmation (scripts)
+hashd run <ws_id> --run-anyway     # Prompts for confirmation
+hashd run <ws_id> --run-anyway -y  # Skip confirmation (scripts)
 ```
 
 In the TUI, press `[!]` (Go anyway) and confirm in the modal.
@@ -94,11 +94,11 @@ The default is `true` (enabled).
 
 ## Prefect Server Not Running
 
-If `wf run` fails with a connection error:
+If `hashd run` fails with a connection error:
 
 ```bash
-wf restart            # Restart all services including Prefect
-wf restart server -y  # Restart one component without orphan-process prompt
+hashd restart            # Restart all services including Prefect
+hashd restart server -y  # Restart one component without orphan-process prompt
 ```
 
 ## Stale Flows
@@ -106,8 +106,8 @@ wf restart server -y  # Restart one component without orphan-process prompt
 If a workstream shows as "running" but nothing is happening:
 
 ```bash
-wf show <ws_id>     # Check status and last run
-wf reset <ws_id>    # Reset to active state, cancel stale flows
+hashd show <ws_id>     # Check status and last run
+hashd reset <ws_id>    # Reset to active state, cancel stale flows
 ```
 
 ## Worktree Cleanup
@@ -115,7 +115,7 @@ wf reset <ws_id>    # Reset to active state, cancel stale flows
 If git complains about existing worktrees or branches:
 
 ```bash
-wf close <ws_id> --force    # Remove worktree, branch, and DB record
+hashd close <ws_id> --force    # Remove worktree, branch, and DB record
 ```
 
 Never `cd` into a worktree directory before removing it. Always run cleanup
@@ -142,22 +142,22 @@ WARNING: Post-merge tests FAILED on main!
 
 New workstreams branching off main will sit at `provisioning / failed` (with `baseline_failures` populated).
 
-### How to fix with wf
+### How to fix with hashd
 
 Create a targeted bug story and let the agent fix it:
 
 ```bash
 # 1. Create a bug with specific fix instructions
-wf plan bug "Fix broken main: remove duplicate migration" \
+hashd plan bug "Fix broken main: remove duplicate migration" \
   -f "Delete migrations/073_users_google_id.sql -- it is an exact duplicate of 072_users_google_id.sql. The column already exists from 072. Only delete 073, do not touch 072. Do not create any new migrations."
 
 # 2. The workstream will sit at provisioning / failed (because main is broken).
 #    Override the baseline gate -- the agent's job is to fix the broken tests.
-wf run <ws_id> --run-anyway
+hashd run <ws_id> --run-anyway
 
 # 3. The agent deletes the duplicate, tests pass, merge gate passes.
 #    Merge when ready:
-wf merge <ws_id>
+hashd merge <ws_id>
 ```
 
 This pattern works for any "main is broken" situation: create a bug story
@@ -174,13 +174,46 @@ these issues before they land on main:
 
 ---
 
-## Missing AI Tools
+## REQS/SPEC Edit Rejected
 
-If `wf run` reports missing binaries:
+### What it means
+
+`hashd project reqs edit` and `hashd project spec edit` are server-backed artifact
+edits. The CLI opens the document in `$EDITOR`, but hashd-server owns the write,
+commit, and push. The server rejects edits when it cannot safely commit exactly
+the intended document change.
+
+### Common causes
+
+| Error | Meaning | Fix |
+|-------|---------|-----|
+| `REQS edit touches active WIP sections` | The edit changed bytes between `BEGIN WIP` and `END WIP` markers owned by an active story | Re-run `hashd project reqs edit` and move your change outside the WIP block, or wait for the story to merge/close |
+| `repo has uncommitted changes` | The server repo is dirty, so hashd cannot commit only the artifact edit | Commit, stash, or discard those changes on the server-side repo, then retry |
+| `document changed since it was opened` | The artifact changed after the editor opened | Re-run the edit command so you start from the latest file |
+| `path must not be a symlink` | The configured artifact path is a symlink | Replace it with a regular tracked Markdown file, or update `reqs_path` / `spec_path` |
+| `file not found` | The configured artifact path does not exist | Create and commit the file, or update the path with `hashd project config set reqs_path <path>` or `hashd project config set spec_path <path>` |
+
+### Safe inspection
+
+Use the read-only commands before editing:
 
 ```bash
-wf doctor           # Check all tool versions and configuration
-wf agents           # Show configured agents and their status
+hashd project reqs show
+hashd project spec show
+```
+
+These commands read through hashd-server, so they work from a remote CLI client
+that does not have the repo mounted locally.
+
+---
+
+## Missing AI Tools
+
+If `hashd run` reports missing binaries:
+
+```bash
+hashd doctor           # Check all tool versions and configuration
+hashd agents           # Show configured agents and their status
 ```
 
 See README.md for installation instructions.
@@ -213,7 +246,7 @@ Hook exceeded timeout of 300s and was killed.
 2. Re-run the workstream. Provisioning is idempotent and picks up from the
    failed step:
    ```bash
-   wf run <ws_id>
+   hashd run <ws_id>
    ```
 
 Alternatively, simplify the hook -- prefer `npm ci` over `npm install`,
@@ -235,11 +268,11 @@ Hook failed: exit status 1
   not the project root. Use absolute paths or paths rooted at the worktree.
 - **Missing tool on PATH.** Hooks inherit the parent's environment, so the
   tool must be on the PATH that started the hashd server. Try
-  `which <tool>` from the same shell that runs `wf`.
+  `which <tool>` from the same shell that runs `hashd`.
 - **Partial success.** If a multi-step hook fails halfway, add
   `set -euo pipefail` at the top so later steps don't run on garbage state.
 
-After fixing the underlying issue, re-run `wf run <ws_id>`.
+After fixing the underlying issue, re-run `hashd run <ws_id>`.
 
 ### Teardown hook failed (but worktree was removed anyway)
 

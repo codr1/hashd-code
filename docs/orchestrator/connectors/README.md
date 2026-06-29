@@ -59,7 +59,7 @@ Each entry maps a command name to a `(register_fn, dispatch_fn)` tuple:
 
 ### DOCTOR_CHECKS
 
-List of `check_fn(project_dir) -> list[DiagnosticResult]` functions. Only called when `IS_CONFIGURED` returns True. Results are printed in the `wf doctor` Connectors section.
+List of `check_fn(project_dir) -> list[DiagnosticResult]` functions. Only called when `IS_CONFIGURED` returns True. Results are printed in the `hashd doctor` Connectors section.
 
 ### IS_CONFIGURED
 
@@ -75,7 +75,7 @@ String used by `get_connector_cache_dir()`. Cache lives at `projects/<project>/.
 
 ### TOOLS
 
-List of `ToolSpec` objects. Tools are loaded lazily when `@connector` is detected in a prompt. The model can call them via MCP (in agent stages) or prompt-based dispatch (in `wf chat`).
+List of `ToolSpec` objects. Tools are loaded lazily when `@connector` is detected in a prompt. The model can call them via MCP (in agent stages) or prompt-based dispatch (in `hashd chat`).
 
 ```python
 @dataclass(frozen=True)

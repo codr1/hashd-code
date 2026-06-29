@@ -45,6 +45,12 @@ Requirement (REQS.md)  ->  Suggestion  ->  Story  ->  Workstream  ->  micro-comm
   micro-commits are done, the branch gets a holistic final review and a merge gate,
   then merges.
 
+REQS.md and SPEC.md are living project artifacts. Operators can inspect them with
+`hashd project reqs` and `hashd project spec`, and can make guarded manual edits with
+`hashd project reqs edit` or `hashd project spec edit`. Those commands go through
+hashd-server; a remote CLI client does not need the repository mounted locally,
+and successful edits are committed by the server in the configured repo.
+
 The key insight: these are not just labels on a kanban board. Each entity is an
 FSM. State only changes through a *validated transition* that persists atomically
 and emits an event. You always know what stage a piece of work is in and what
@@ -133,9 +139,9 @@ tools that hook the commit event see the agent session but lack the upstream
 context (why was the agent invoked?) and the downstream context (what did the
 reviewer think? did a human approve?). hashd defines that chain by construction.
 
-The chain is queryable (`wf lineage`), exportable as standard attestations
-(`wf lineage export --format slsa|in-toto`), and tamper-evident: commit records
-are linked by a SHA-256 hash chain that `wf lineage verify` validates. This is the
+The chain is queryable (`hashd lineage`), exportable as standard attestations
+(`hashd lineage export --format slsa|in-toto`), and tamper-evident: commit records
+are linked by a SHA-256 hash chain that `hashd lineage verify` validates. This is the
 audit/provenance story in full — see [provenance.md](provenance.md) and
 **[docs/LINEAGE.md](LINEAGE.md)**.
 
@@ -145,7 +151,7 @@ Honesty matters here, because the value proposition depends on it:
 
 - **Spec-driven is the intended path, not an enforced one.** hashd's flow assumes
   you start from a requirement, but a project can skip `REQS.md` and create Stories
-  directly with `wf plan story` / `wf plan bug`. Discovery is a convenience, not a
+  directly with `hashd plan story` / `hashd plan bug`. Discovery is a convenience, not a
   gate.
 - **Single-operator today.** The audit/governance story is real, but the shipped
   ops model is one operator per project. There is no multi-user coordination, RBAC,

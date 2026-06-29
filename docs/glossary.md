@@ -8,9 +8,9 @@ for the full product specification, see **PRD.md**.
 
 ### Suggestion
 
-A discovered planning candidate that can be claimed into a Story. `wf plan` reads
+A discovered planning candidate that can be claimed into a Story. `hashd plan` reads
 the project's requirements (normally `REQS.md`) and produces suggestions in the
-`suggestions` table. An operator inspects them (`wf plan list`) and claims one to
+`suggestions` table. An operator inspects them (`hashd plan list`) and claims one to
 create a Story. Suggestions have their own short lifecycle: `available -> claimed
 -> done` (with `claimed -> available` revert). See **[WF.md > Suggestion
 Lifecycle](../WF.md)**.
@@ -18,8 +18,8 @@ Lifecycle](../WF.md)**.
 ### Story
 
 The unit of planned product work — a feature or bug with a problem statement and
-**acceptance criteria**. A story is created from a Suggestion, from `wf plan story`
-/ `wf plan bug`, or by cloning/editing an existing story. It flows `drafting ->
+**acceptance criteria**. A story is created from a Suggestion, from `hashd plan story`
+/ `hashd plan bug`, or by cloning/editing an existing story. It flows `drafting ->
 draft -> accepted -> implementing -> implemented` (with `editing`, `draft_failed`,
 and `abandoned` branches). A story is the *source of truth* for what a change is
 supposed to do; the requirement text it fulfills is frozen onto the story so it
@@ -31,7 +31,7 @@ Lifecycle](../WF.md)**.
 The bulleted, testable conditions a Story must satisfy to be considered done.
 ACs are *input documentation* that grounds the implementer and reviewer — they
 are not completion markers, and merge readiness is gated by FSM state and review
-verdicts, not by checking off AC bullets. Operators reshape ACs with `wf plan
+verdicts, not by checking off AC bullets. Operators reshape ACs with `hashd plan
 {edit-ac, delete-ac, descope-ac, rescope-ac}`.
 
 ### Workstream
@@ -67,11 +67,33 @@ A registered product repository — or a multi-repo container — with hashd
 configuration. Planning happens at the project level; execution happens per repo.
 A project repo carries a role: `primary`, `active`, `reference`, or `ignore`.
 
+### Project artifacts
+
+The configured project documents hashd reads and updates as work moves through the
+system. The two core artifacts are REQS.md and SPEC.md. Inspect them with
+`hashd project reqs` / `hashd project spec`; make guarded manual edits with
+`hashd project reqs edit` / `hashd project spec edit`.
+
+### REQS.md
+
+The project's requirements source. Discovery reads it to create Suggestions, and
+planning annotates active story scope with WIP markers. Treat text between
+`BEGIN WIP` and `END WIP` markers as story-owned: `hashd project reqs edit` rejects
+changes inside those sections so manual edits cannot clobber active planning
+state.
+
+### SPEC.md
+
+The project or repo specification hashd grows after successful work. Direct merges
+update SPEC.md from the story and resulting diff, then commit it with REQS cleanup.
+Use `hashd project spec` to inspect the configured artifact and `hashd project spec edit`
+for guarded manual corrections.
+
 ### Clarification
 
 A durable human question raised by an agent during planning or implementation
 that blocks progress until answered. Clarifications are recorded in SQLite and
-answered with `wf answer`; answering can dispatch the next agent run. See
+answered with `hashd answer`; answering can dispatch the next agent run. See
 **[WF.md > Questions and Answers](../WF.md)**.
 
 ### Directive
@@ -148,9 +170,9 @@ spine of the audit trail. See [provenance.md](provenance.md).
 **Lineage** is the chain that answers "why does this code exist?" — tracing a line
 of code back through its commit, micro-commit, run, prompt, agent call,
 workstream, story, requirement, reviews, and the human decisions that gated it.
-`wf lineage` walks the chain in either direction. An **attestation** is a
-machine-readable export of that chain — `wf lineage export` emits SLSA v1.0
-provenance or an in-toto statement — and `wf lineage verify` validates the
+`hashd lineage` walks the chain in either direction. An **attestation** is a
+machine-readable export of that chain — `hashd lineage export` emits SLSA v1.0
+provenance or an in-toto statement — and `hashd lineage verify` validates the
 SHA-256 hash chain that links commit records. See [provenance.md](provenance.md)
 and **[docs/LINEAGE.md](LINEAGE.md)**.
 
@@ -158,7 +180,7 @@ and **[docs/LINEAGE.md](LINEAGE.md)**.
 
 ### Dashboard
 
-The home screen of the `wf watch` TUI and hashd's navigation hub. It lists the
+The home screen of the `hashd watch` TUI and hashd's navigation hub. It lists the
 project's active Workstreams (selectable `1-9`) and Stories (selectable `a-i`),
 and is the jumping-off point to the Plan screen (`p`), the autonomy-mode switch
 (`m`), the command palette (`/`), and context-aware help (`?`). From the Dashboard

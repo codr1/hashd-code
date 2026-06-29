@@ -49,8 +49,8 @@ investigate but won't leave orphaned workstreams just because a container
 didn't shut down cleanly.
 
 Called from:
-- `server/internal/cli/close.go` (`wf close`)
-- `server/internal/cli/workstream.go` (`wf workstream remove`)
+- `server/internal/cli/close.go` (`hashd close`)
+- `server/internal/cli/workstream.go` (`hashd workstream remove`)
 - `orchestrator/workflow/merge/archive.py` (post-merge archive)
 
 ## HASHD_* Environment Variables

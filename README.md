@@ -12,9 +12,9 @@ One paste on a fresh box -- no Python setup required:
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `wf` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `wf doctor` to confirm the setup.
+The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `hashd` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `hashd doctor` to confirm the setup. `wf` remains a permanent alias for the same CLI, and installs also include the short `ha` alias.
 
-**System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `wf doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
+**System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `hashd doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
 
 ## What hashd is
 
@@ -39,7 +39,7 @@ Requirement -> Suggestion -> Story (+ acceptance criteria) -> Workstream -> micr
 - Running an accepted Story creates a **Workstream**: one git branch in one isolated worktree, holding a plan of **micro-commits** (the smallest planned units of work).
 - Each micro-commit runs the **governed loop** -- `implement -> test -> review -> human approval -> commit` -- where every arrow is a **gate**. When all micro-commits land, the branch gets a holistic final review and a merge gate (tests, conflict check, secrets scan), then merges.
 - Whether a gate stops for a human is set by the project's **autonomy mode** (supervised / gatekeeper / autonomous). All modes still block to a human on failures.
-- Every state change is **dual-written**: pushed live over ZMQ and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `wf lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
+- Every state change is **dual-written**: pushed live over ZMQ and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `hashd lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
 
 ## Philosophy
 
@@ -52,8 +52,8 @@ Start here to learn the system, then dive into the reference docs:
 - **[docs/how-hashd-works.md](docs/how-hashd-works.md)** - the mental model: entities, the governed gates, the event log, and the provenance chain, as concepts.
 - **[docs/walkthrough.md](docs/walkthrough.md)** - one feature start-to-finish, from spec to a merged commit with a full audit trail.
 - **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage, gates, lineage.
-- **[docs/navigation.md](docs/navigation.md)** - the `wf watch` TUI: Dashboard, Story Detail, Workstream Detail, and when to use each.
-- **[docs/provenance.md](docs/provenance.md)** - the audit/lineage story: `wf lineage`, SLSA/in-toto export, hash-chain verify, the durable event log.
+- **[docs/navigation.md](docs/navigation.md)** - the `hashd watch` TUI: Dashboard, Story Detail, Workstream Detail, and when to use each.
+- **[docs/provenance.md](docs/provenance.md)** - the audit/lineage story: `hashd lineage`, SLSA/in-toto export, hash-chain verify, the durable event log.
 - [QUICKSTART.md](QUICKSTART.md) - installation, first project setup, basic workflows.
 - [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - agent switching, auth configuration, prompt overrides.
 - [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - code intelligence operator commands and troubleshooting.
@@ -67,7 +67,7 @@ Start here to learn the system, then dive into the reference docs:
 
 **Grounds the agents.** Agents query a pre-computed Context Graph instead of re-discovering the codebase on every run. AST structure, dependency edges, and project knowledge are extracted once and made available to every agent in every workstream. Published research on systems like Aider shows tool-based exploration consumes 54-70% of the context window for orientation alone; pre-computed structural maps reduce this to 4-6%. That's a 10-15x reduction in tokens spent discovering what static analysis already knows -- and a corresponding reduction in cost, latency, hallucinated file paths, and first-pass review failures.
 
-**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `wf lineage <file|sha|STORY-xxx>` reconstructs the chain. `wf lineage export --format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `wf lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
+**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `hashd lineage <file|sha|STORY-xxx>` reconstructs the chain. `hashd lineage export --format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `hashd lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
 
 ```
 file -> git log -> commit message (COMMIT-XX-NNN)
@@ -76,13 +76,13 @@ file -> git log -> commit message (COMMIT-XX-NNN)
 ```
 
 
-**Runs in parallel, safely.** Multiple workstreams execute against the same project concurrently. Each gets its own git worktree and per-workstream lock. `wf conflicts` warns when workstreams touch overlapping files. The FSM serializes per-workstream operations so concurrent runs don't corrupt shared state. With grounded agents and parallel execution working together, hashd users routinely ship 10x more debugged code per day than they would driving an agent by hand.
+**Runs in parallel, safely.** Multiple workstreams execute against the same project concurrently. Each gets its own git worktree and per-workstream lock. `hashd conflicts` warns when workstreams touch overlapping files. The FSM serializes per-workstream operations so concurrent runs don't corrupt shared state. With grounded agents and parallel execution working together, hashd users routinely ship 10x more debugged code per day than they would driving an agent by hand.
 
 **Works with any agent.** Use Claude Code, Codex, Copilot, Gemini, OpenCode, Kimi, or Qwen -- any combination, any stage. Stages declare their required invocation shape; any agent that supports the shape can fill the slot. You're not locked to one vendor.
 
 **Spans multiple repositories.** A single project can include a backend repo, a frontend repo, and an infra repo. Planning happens at the project level; execution happens in the right repo automatically.
 
-**Multiple interfaces.** A TUI (`wf watch`) for real-time monitoring with status-adaptive keybindings, a CLI for power users and scripting, and a Telegram bot for mobile workflow management.
+**Multiple interfaces.** A TUI (`hashd watch`) for real-time monitoring with status-adaptive keybindings, a CLI for power users and scripting, and a Telegram bot for mobile workflow management.
 
 **Keeps you in the loop where it matters.** Three autonomy modes -- supervised, gatekeeper, and autonomous -- with confidence-threshold gating. A clarification queue holds work until you answer agent questions. Structured approve and reject flows.
 
@@ -112,22 +112,22 @@ Install shell completion for your shell:
 
 ```bash
 # Bash (managed automatically by setup.sh and dist/install.sh)
-source <(wf completion bash)
+source <(hashd completion bash)
 
 # Zsh (managed automatically by setup.sh for source installs)
 autoload -Uz compinit && compinit
-source <(wf completion zsh)
+source <(hashd completion zsh)
 
 # Fish
-wf completion fish > ~/.config/fish/completions/wf.fish
+hashd completion fish > ~/.config/fish/completions/hashd.fish
 ```
 
 Examples:
 ```bash
-wf r<TAB>                    # -> wf run
-wf run o<TAB>                # -> wf run open_play_rules
-wf run STORY-<TAB>           # -> wf run STORY-0001
-wf show <TAB>                # Shows both stories and workstreams
+hashd r<TAB>                    # -> hashd run
+hashd run o<TAB>                # -> hashd run open_play_rules
+hashd run STORY-<TAB>           # -> hashd run STORY-0001
+hashd show <TAB>                # Shows both stories and workstreams
 ```
 
 ## Parallel Workstreams
@@ -136,13 +136,13 @@ Hashd supports running multiple workstreams simultaneously. Each workstream gets
 
 ```bash
 # Terminal 1
-wf run feature_auth --loop
+hashd run feature_auth --loop
 
 # Terminal 2 (at the same time)
-wf run feature_api --loop
+hashd run feature_api --loop
 
 # Terminal 3
-wf run bugfix_123 --loop
+hashd run bugfix_123 --loop
 ```
 
 A warning is shown when more than 3 workstreams are running concurrently (to avoid API rate limits).
@@ -174,31 +174,31 @@ sudo pacman -S libnotify
 Set a current workstream to avoid typing it repeatedly:
 
 ```bash
-wf use my_feature        # Set current workstream
-wf run --loop            # Operates on my_feature
-wf approve               # Still my_feature
-wf show                  # Still my_feature
+hashd use my_feature        # Set current workstream
+hashd run --loop            # Operates on my_feature
+hashd approve               # Still my_feature
+hashd show                  # Still my_feature
 
-wf use                   # Show current workstream
-wf use --clear           # Clear current workstream
+hashd use                   # Show current workstream
+hashd use --clear           # Clear current workstream
 ```
 
 When a workstream context is set, you can still override it explicitly:
 
 ```bash
-wf use my_feature
-wf show other_feature  # Operates on other_feature, context unchanged
+hashd use my_feature
+hashd show other_feature  # Operates on other_feature, context unchanged
 ```
 
 ## Pair Programming Chat
 
-`wf chat` opens an AI pair programmer with persistent conversation history. Use `@` syntax to inject context:
+`hashd chat` opens an AI pair programmer with persistent conversation history. Use `@` syntax to inject context:
 
 ```bash
-wf chat                    # Auto-detect context from current directory
-wf chat STORY-0001         # Explicit story context
-wf chat my-workstream      # Explicit workstream context
-wf chat --history          # View past conversation as markdown
+hashd chat                    # Auto-detect context from current directory
+hashd chat STORY-0001         # Explicit story context
+hashd chat my-workstream      # Explicit workstream context
+hashd chat --history          # View past conversation as markdown
 ```
 
 **Available @ artifacts:**
@@ -220,6 +220,11 @@ wf chat --history          # View past conversation as markdown
 | `@STORY-xxxx` | Cross-reference another story |
 | `@BUG-xxxx` | Cross-reference a bug |
 
+For full artifact inspection or manual edits, use the server-backed project
+artifact commands: `hashd project reqs` / `hashd project reqs edit` and
+`hashd project spec` / `hashd project spec edit`. The `@reqs` and `@spec` references
+are prompt/chat context shortcuts.
+
 `@file:path` is project-scoped. The path must resolve inside the project
 directory. Planning treats file references as metadata only and never loads file
 contents into prompts; agents read reachable project files on demand. A
@@ -228,14 +233,14 @@ outside-project path so the operator can move the file into the project tree.
 
 In TUI mode, press `C` from any screen to open chat. Type `@` to see autocomplete.
 
-**Actionable chat:** When chatting in a story context, the AI can propose edits to story artifacts (acceptance criteria, title, problem statement, non-goals) and run safe read-only `wf` commands. Each proposed action appears in a confirmation bar -- press `y` to apply or `n` to skip. Actions are logged to the story transcript.
+**Actionable chat:** When chatting in a story context, the AI can propose edits to story artifacts (acceptance criteria, title, problem statement, non-goals) and run safe read-only `hashd` commands. Each proposed action appears in a confirmation bar -- press `y` to apply or `n` to skip. Actions are logged to the story transcript.
 
 ## Directives
 
 Directives are curated rules that guide AI implementation. They exist at three levels:
 
 ```
-~/.config/wf/directives.md        # Global user preferences
+~/.config/hashd/directives.md        # Global user preferences
 {repo}/directives.md              # Project rules
 workstreams/{id}/directives.md    # Workstream-specific (rare)
 ```
@@ -256,19 +261,19 @@ workstreams/{id}/directives.md    # Workstream-specific (rare)
 ### Commands
 
 ```bash
-wf directives                       # View global directives
-wf directives all                   # View all (global + project)
-wf directives all -w <ws>           # View all including workstream
-wf directives project               # View project only
-wf directives workstream <ws>       # View workstream's only
+hashd directives                       # View global directives
+hashd directives all                   # View all (global + project)
+hashd directives all -w <ws>           # View all including workstream
+hashd directives project               # View project only
+hashd directives workstream <ws>       # View workstream's only
 
-wf directives edit                  # Edit global in $EDITOR
-wf directives edit project          # Edit project in $EDITOR
-wf directives edit workstream <ws>  # Edit workstream's in $EDITOR
+hashd directives edit                  # Edit global in $EDITOR
+hashd directives edit project          # Edit project in $EDITOR
+hashd directives edit workstream <ws>  # Edit workstream's in $EDITOR
 
-wf directives ai-edit               # AI-assisted edit of global
-wf directives ai-edit project       # AI-assisted edit of project
-wf directives ai-edit workstream <ws>  # AI-assisted edit of workstream's
+hashd directives ai-edit               # AI-assisted edit of global
+hashd directives ai-edit project       # AI-assisted edit of project
+hashd directives ai-edit workstream <ws>  # AI-assisted edit of workstream's
 ```
 
 Directives are automatically included in implementation prompts.
@@ -279,26 +284,26 @@ Directives are automatically included in implementation prompts.
 
 | Command | Description |
 |---------|-------------|
-| `wf plan` | Plan stories from REQS.md (saves suggestions) |
-| `wf plan list` | View current suggestions |
-| `wf plan story "title"` | Quick feature story (skips REQS discovery) |
-| `wf plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
-| `wf plan clone STORY-xxx` | Clone a locked story to edit |
-| `wf plan edit STORY-xxx` | Edit existing story (if unlocked) |
-| `wf plan reset` | Reclaim suggestions stranded by a dead flow or deleted story (unblocks discovery) |
-| `wf run [id]` | Run workstream or create from story |
-| `wf list` | List all stories and workstreams |
-| `wf show <id>` | Show story or workstream details |
-| `wf approve <id>` | Accept story or approve workstream gate |
-| `wf pr create [id]` | Create PR/MR on forge (for external review) |
-| `wf pr feedback <ws>` | View PR/MR review comments |
-| `wf merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge) |
-| `wf close <id>` | Close story or workstream (abandon) |
-| `wf watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx) |
+| `hashd plan` | Plan stories from REQS.md (saves suggestions) |
+| `hashd plan list` | View current suggestions |
+| `hashd plan story "title"` | Quick feature story (skips REQS discovery) |
+| `hashd plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
+| `hashd plan clone STORY-xxx` | Clone a locked story to edit |
+| `hashd plan edit STORY-xxx` | Edit existing story (if unlocked) |
+| `hashd plan reset` | Reclaim suggestions stranded by a dead flow or deleted story (unblocks discovery) |
+| `hashd run [id]` | Run workstream or create from story |
+| `hashd list` | List all stories and workstreams |
+| `hashd show <id>` | Show story or workstream details |
+| `hashd approve <id>` | Accept story or approve workstream gate |
+| `hashd pr create [id]` | Create PR/MR on forge (for external review) |
+| `hashd pr feedback <ws>` | View PR/MR review comments |
+| `hashd merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge) |
+| `hashd close <id>` | Close story or workstream (abandon) |
+| `hashd watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx) |
 
 ### Watch UI Keybindings
 
-The `wf watch` TUI adapts keybindings to workstream status:
+The `hashd watch` TUI adapts keybindings to workstream status:
 
 | Status | Key Actions |
 |--------|-------------|
@@ -327,114 +332,126 @@ The Telegram bot covers the full workflow from mobile. Send `/` for the button m
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) (`/newbot`), copy the token:
    ```bash
-   wf telegram bot <YOUR_TOKEN>
+   hashd telegram bot <YOUR_TOKEN>
    ```
 2. Get your user ID from [@userinfobot](https://t.me/userinfobot), then allow it and set as chat target:
    ```bash
-   wf telegram allow <YOUR_USER_ID>
-   wf telegram chat-id <YOUR_USER_ID>
+   hashd telegram allow <YOUR_USER_ID>
+   hashd telegram chat-id <YOUR_USER_ID>
    ```
 3. Start the bot:
    ```bash
-   wf telegram start
+   hashd telegram start
    ```
 
-The bot also auto-starts when you run `wf run` or `wf watch`.
+The bot also auto-starts when you run `hashd run` or `hashd watch`.
 
 ### Supporting Commands
 
 | Command | Description |
 |---------|-------------|
-| `wf use [id]` | Set/show current workstream context |
-| `wf run [id] --loop` | Run until blocked or complete |
-| `wf run [id] --yes` | Skip confirmation prompts |
-| `wf run [id] --verbose` | Show implement/review exchange |
-| `wf log [id]` | Show workstream timeline |
-| `wf review [id]` | Show latest saved final review |
-| `wf lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
-| `wf lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
-| `wf lineage verify` | Validate commit hash chain integrity |
-| `wf reject [id] -f "..."` | Reject with feedback (context-aware) |
-| `wf reject [id] --reset` | Discard changes, start fresh (human gate only) |
-| `wf diff [id]` | Show workstream diff |
-| `wf skip [id]` | Mark commit as done without changes |
-| `wf reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
-| `wf replan [id] [-f "..."]` | Regenerate the plan from a clean base |
-| `wf refresh [id]` | Refresh touched files |
-| `wf conflicts [id]` | Check for file conflicts |
-| `wf archive work` | List archived workstreams |
-| `wf archive stories` | List archived stories |
-| `wf open <id> [--force]` | Resurrect archived workstream |
-| `wf answer list` | List entities with pending clarifications |
-| `wf answer show <entity>` | Show pending questions for a story or workstream |
-| `wf answer <entity> "<text>"` | Bundle-answer pending clarifications and dispatch the next agent run |
-| `wf directives` | View/edit project directives |
-| `wf workstream add-commit <ws> "title"` | Add AI-generated micro-commit to plan |
-| `wf workstream edit-commit <ws> <id>` | Edit a micro-commit's title/description |
-| `wf workstream feedback <ws> "text"` | Add feedback to workstream |
-| `wf workstream remove <ws>` | Remove orphaned workstream |
-| `wf plan retry STORY-xxx` | Retry failed planning run |
-| `wf plan resurrect STORY-xxx` | Resurrect abandoned story |
+| `hashd use [id]` | Set/show current workstream context |
+| `hashd run [id] --loop` | Run until blocked or complete |
+| `hashd run [id] --yes` | Skip confirmation prompts |
+| `hashd run [id] --verbose` | Show implement/review exchange |
+| `hashd log [id]` | Show workstream timeline |
+| `hashd review [id]` | Show latest saved final review |
+| `hashd lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
+| `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
+| `hashd lineage verify` | Validate commit hash chain integrity |
+| `hashd reject [id] -f "..."` | Reject with feedback (context-aware) |
+| `hashd reject [id] --reset` | Discard changes, start fresh (human gate only) |
+| `hashd diff [id]` | Show workstream diff |
+| `hashd skip [id]` | Mark commit as done without changes |
+| `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
+| `hashd replan [id] [-f "..."]` | Regenerate the plan from a clean base |
+| `hashd refresh [id]` | Refresh touched files |
+| `hashd conflicts [id]` | Check for file conflicts |
+| `hashd archive work` | List archived workstreams |
+| `hashd archive stories` | List archived stories |
+| `hashd open <id> [--force]` | Resurrect archived workstream |
+| `hashd answer list` | List entities with pending clarifications |
+| `hashd answer show <entity>` | Show pending questions for a story or workstream |
+| `hashd answer <entity> "<text>"` | Bundle-answer pending clarifications and dispatch the next agent run |
+| `hashd directives` | View/edit project directives |
+| `hashd workstream add-commit <ws> "title"` | Add AI-generated micro-commit to plan |
+| `hashd workstream edit-commit <ws> <id>` | Edit a micro-commit's title/description |
+| `hashd workstream feedback <ws> "text"` | Add feedback to workstream |
+| `hashd workstream remove <ws>` | Remove orphaned workstream |
+| `hashd plan retry STORY-xxx` | Retry failed planning run |
+| `hashd plan resurrect STORY-xxx` | Resurrect abandoned story |
 
 ### Project Commands
 
 | Command | Description |
 |---------|-------------|
-| `wf project add <path>` | Register a new project (wizard by default; investigate-then-execute also supported) |
-| `wf project add <path> --no-interview` | Register a new project without prompts, using stored defaults or explicit overrides |
-| `wf project list` | List registered projects |
-| `wf project use [name] [--clear]` | Set/show/clear current project context |
-| `wf project show` | Show current project configuration |
-| `wf project interview` | Reconfigure project (build/test commands, merge mode, autonomy) |
-| `wf project remove <name> -y` | Remove a project without confirmation prompt |
-| `wf project config list` | List effective project config, highlighting project overrides in TTY output |
-| `wf project config diff` | Show project overrides against inherited system/default config |
-| `wf project config show <key>` | Show effective value, source, override stack, and schema description |
-| `wf project config get <key>` | Print one effective config value |
-| `wf project config set <key> <value>` | Set config value |
-| `wf project config reset <key>` | Remove one project override |
-| `wf project config reset --all` | Remove all project overrides while preserving project identity |
-| `wf project describe` | Show current project description |
-| `wf project describe --suggest` | AI-generate and save a description suggestion |
-| `wf project tech` | Show current project tech stack |
-| `wf project tech --suggest` | AI-analyze and save a tech stack suggestion |
-| `wf project repo list [--json]` | List repos registered under the current project |
-| `wf project repo show <name> [--json]` | Show one registered repo |
-| `wf project repo add <path> --status <status>` | Add a repo to the current project |
-| `wf project repo set-status <name> <status>` | Reclassify a repo as primary, active, reference, or ignore |
-| `wf project repo set-path <name> <new-path>` | Update a repo's relative path within the project |
-| `wf project repo edit <name> ...` | Update per-repo commands and metadata |
-| `wf project repo remove <name>` | Soft-delete a repo entry (status=`ignore`) |
-| `wf project repo prune` | Hard-delete ignored repos whose paths no longer exist |
+| `hashd project add <path>` | Register a new project (wizard by default; investigate-then-execute also supported) |
+| `hashd project add <path> --no-interview` | Register a new project without prompts, using stored defaults or explicit overrides |
+| `hashd project list` | List registered projects |
+| `hashd project use [name] [--clear]` | Set/show/clear current project context |
+| `hashd project show` | Show current project configuration |
+| `hashd project interview` | Reconfigure project (build/test commands, merge mode, autonomy) |
+| `hashd project remove <name> -y` | Remove a project without confirmation prompt |
+| `hashd project config list` | List effective project config, highlighting project overrides in TTY output |
+| `hashd project config diff` | Show project overrides against inherited system/default config |
+| `hashd project config show <key>` | Show effective value, source, override stack, and schema description |
+| `hashd project config get <key>` | Print one effective config value |
+| `hashd project config set <key> <value>` | Set config value |
+| `hashd project config reset <key>` | Remove one project override |
+| `hashd project config reset --all` | Remove all project overrides while preserving project identity |
+| `hashd project describe` | Show current project description |
+| `hashd project describe --suggest` | AI-generate and save a description suggestion |
+| `hashd project tech` | Show current project tech stack |
+| `hashd project tech --suggest` | AI-analyze and save a tech stack suggestion |
+| `hashd project reqs [show]` | Show configured REQS artifact content through hashd-server |
+| `hashd project reqs edit` | Edit configured REQS in `$EDITOR`; WIP sections are protected |
+| `hashd project spec [show]` | Show configured SPEC artifact content through hashd-server |
+| `hashd project spec edit` | Edit configured SPEC in `$EDITOR` through the server-side commit flow |
+| `hashd project repo list [--json]` | List repos registered under the current project |
+| `hashd project repo show <name> [--json]` | Show one registered repo |
+| `hashd project repo add <path> --status <status>` | Add a repo to the current project |
+| `hashd project repo set-status <name> <status>` | Reclassify a repo as primary, active, reference, or ignore |
+| `hashd project repo set-path <name> <new-path>` | Update a repo's relative path within the project |
+| `hashd project repo edit <name> ...` | Update per-repo commands and metadata |
+| `hashd project repo remove <name>` | Soft-delete a repo entry (status=`ignore`) |
+| `hashd project repo prune` | Hard-delete ignored repos whose paths no longer exist |
 
-`wf project describe --suggest` and `wf project tech --suggest` persist the AI result to
+`hashd project describe --suggest` and `hashd project tech --suggest` persist the AI result to
 `config.yaml` by default. Use `--no-save` for a dry run, or `-y` to skip the interactive
-save prompt. `wf project show`, `wf project describe`, `wf project tech`, and
-`wf project list` warn when saved AI-generated metadata may be stale relative to the
+save prompt. `hashd project show`, `hashd project describe`, `hashd project tech`, and
+`hashd project list` warn when saved AI-generated metadata may be stale relative to the
 current `reqs_path` or fallback source files.
+
+`hashd project reqs` and `hashd project spec` read the configured artifacts through
+hashd-server, so remote CLI clients do not need local filesystem access to the
+repository. Their `edit` subcommands open the current artifact in `$EDITOR`, send
+the replacement back with a compare-and-swap head SHA, and let the server commit
+and push exactly that artifact change. The server rejects stale edits, dirty
+repos, symlink artifact paths, and any REQS edit that changes text between
+`BEGIN WIP` and `END WIP` markers owned by active stories.
 
 ### Observability Commands
 
 | Command | Description |
 |---------|-------------|
-| `wf system-log` | View system event log |
-| `wf prompts list` | List prompt templates |
-| `wf prompts show <name>` | Show prompt content |
-| `wf prompts edit <name>` | Edit prompt override |
-| `wf agents` | Show installed AI agents and stage assignments |
-| `wf doctor` | Validate setup and diagnose issues |
-| `wf restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
-| `wf search <query> [--kind kind] [-n limit]` | Full-text search across stories, events, reviews, chat (default limit: 20) |
+| `hashd system-log` | View system event log |
+| `hashd prompts list` | List prompt templates |
+| `hashd prompts show <name>` | Show prompt content |
+| `hashd prompts edit <name>` | Edit prompt override |
+| `hashd agents` | Show installed AI agents and stage assignments |
+| `hashd doctor` | Validate setup and diagnose issues |
+| `hashd restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
+| `hashd search <query> [--kind kind] [-n limit]` | Full-text search across stories, events, reviews, chat (default limit: 20) |
 
 ### Smart ID Routing
 
 Commands automatically route based on ID prefix:
-- `STORY-xxx` - Routes to story commands (e.g., `wf show STORY-0001`)
-- `lowercase_id` - Routes to workstream commands (e.g., `wf show my_feature`)
+- `STORY-xxx` - Routes to story commands (e.g., `hashd show STORY-0001`)
+- `lowercase_id` - Routes to workstream commands (e.g., `hashd show my_feature`)
 
 Commands marked with `[id]` use the current workstream context if no ID is provided.
 
-When reopening archived workstreams, `wf open` analyzes staleness by comparing file changes on the branch against the default branch. It prints commits-behind, overlapping files, default-branch line churn, and a low/moderate/high/critical severity score. High and critical reopens require interactive confirmation, or `--force` for non-interactive use.
+When reopening archived workstreams, `hashd open` analyzes staleness by comparing file changes on the branch against the default branch. It prints commits-behind, overlapping files, default-branch line churn, and a low/moderate/high/critical severity score. High and critical reopens require interactive confirmation, or `--force` for non-interactive use.
 
 ## Lifecycle
 
@@ -446,15 +463,15 @@ See **[WF.md](WF.md)** for detailed lifecycle documentation.
 
 ## Context-Aware Reject
 
-The `wf reject` command adapts its behavior based on workstream state:
+The `hashd reject` command adapts its behavior based on workstream state:
 
 ### During Human Review Gate
 
 When status is `awaiting_human_review` (mid-micro-commit):
 
 ```bash
-wf reject my_feature -f "Fix the null check"    # Iterate with feedback
-wf reject my_feature --reset                    # Discard, start fresh
+hashd reject my_feature -f "Fix the null check"    # Iterate with feedback
+hashd reject my_feature --reset                    # Discard, start fresh
 ```
 
 This writes a rejection file and continues the run loop.
@@ -464,8 +481,8 @@ This writes a rejection file and continues the run loop.
 When all micro-commits are done (pre-merge):
 
 ```bash
-wf reject my_feature -f "address review concerns"  # Any non-empty feedback; server appends review concerns automatically
-wf reject my_feature -f "also fix the tests"       # Add explicit guidance alongside the auto-included review concerns
+hashd reject my_feature -f "address review concerns"  # Any non-empty feedback; server appends review concerns automatically
+hashd reject my_feature -f "also fix the tests"       # Add explicit guidance alongside the auto-included review concerns
 ```
 
 This:
@@ -479,14 +496,14 @@ This:
 When a PR exists:
 
 ```bash
-wf pr feedback my_feature                        # View PR comments
-wf reject my_feature -f "Fix the null check"     # Create fix commit
+hashd pr feedback my_feature                        # View PR comments
+hashd reject my_feature -f "Fix the null check"     # Create fix commit
 ```
 
 For PR states (`pr_open`, `pr_approved`):
 - feedback text is **required** (via `-f`/`--feedback`, no auto-fetch)
-- Use `wf pr feedback` to view comments first
-- In `wf watch`, the `[r]` modal pre-fills with PR feedback for editing
+- Use `hashd pr feedback` to view comments first
+- In `hashd watch`, the `[r]` modal pre-fills with PR feedback for editing
 
 ## Workflow Execution
 
@@ -494,14 +511,14 @@ Hashd uses [Prefect](https://www.prefect.io/) for workflow orchestration. The Pr
 
 ```bash
 # Run a workstream (Prefect starts automatically)
-wf run my_feature  # Submits to Prefect, returns immediately
+hashd run my_feature  # Submits to Prefect, returns immediately
 
 # Monitor progress
-wf watch my_feature  # Interactive TUI
-wf show my_feature   # Status snapshot
+hashd watch my_feature  # Interactive TUI
+hashd show my_feature   # Status snapshot
 ```
 
-The `wf run` command submits work to the Prefect worker and returns immediately. Use `wf watch` or `wf show` to monitor execution.
+The `hashd run` command submits work to the Prefect worker and returns immediately. Use `hashd watch` or `hashd show` to monitor execution.
 
 ### Automatic Retries
 
@@ -520,7 +537,7 @@ Prefect automatically retries transient failures:
 See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions including platform-specific commands.
 
 - **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
-- **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `wf doctor` prints the exact OS-correct install commands.
+- **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `hashd doctor` prints the exact OS-correct install commands.
 - A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea/) (Gitea). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
 - [delta (git-delta)](https://github.com/dandavison/delta) - bundled TUI side-by-side, syntax-highlighted, word-level diff renderer (auto-installed by the installer / `setup.sh`)
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
@@ -546,12 +563,12 @@ Minimum agent/tool versions verified for this release:
 | uv | 0.11+ | |
 | Go | 1.26+ | |
 
-Run `wf doctor` to check your setup.
+Run `hashd doctor` to check your setup.
 
 
 ## Configuration
 
-All project configuration lives in a single `config.yaml` per project. Generated by `wf project add` or `wf project interview`. You can also edit it manually. See `config.sample.yaml` for all available settings with documentation.
+All project configuration lives in a single `config.yaml` per project. Generated by `hashd project add` or `hashd project interview`. You can also edit it manually. See `config.sample.yaml` for all available settings with documentation.
 
 ### config.yaml
 
@@ -561,6 +578,7 @@ name: "myproject"
 repo_path: "/path/to/repo"
 default_branch: "main"
 reqs_path: "REQS.md"
+spec_path: "SPEC.md"
 
 # --- Build & Test ---
 test_cmd: "make test"            # impl-phase tests; falls through to merge_gate_test_cmd if empty
@@ -581,10 +599,10 @@ autonomy: "gatekeeper"          # "supervised", "gatekeeper", or "autonomous"
 #     timeout: 2400
 ```
 
-Run `wf doctor --show-defaults` to see all available settings and their default values.
-Run `wf doctor --reset-to-defaults` to strip behavioral overrides and restore defaults while preserving identity and build settings.
+Run `hashd doctor --show-defaults` to see all available settings and their default values.
+Run `hashd doctor --reset-to-defaults` to strip behavioral overrides and restore defaults while preserving identity and build settings.
 
-Use `wf config ...` for system-wide overrides and `wf project config ...` for project overrides. `list` shows the effective config and marks overridden values on TTYs, `diff` shows only overrides with their baseline values, and `show <key>` prints the effective value plus its Default/System/Project provenance. `reset --all` clears all overrides at the invoked scope. Shell completion includes config verbs and schema-backed key names.
+Use `hashd config ...` for system-wide overrides and `hashd project config ...` for project overrides. `list` shows the effective config and marks overridden values on TTYs, `diff` shows only overrides with their baseline values, and `show <key>` prints the effective value plus its Default/System/Project provenance. `reset --all` clears all overrides at the invoked scope. Shell completion includes config verbs and schema-backed key names.
 
 ### Test Command Configuration
 
@@ -593,7 +611,7 @@ Each project (or each repo, in multi-repo mode) has two test command fields:
 - `test_cmd` — runs during implementation, after each commit. Provides per-commit feedback so agents catch regressions early.
 - `merge_gate_test_cmd` — runs at merge time, before changes land. Final validation.
 
-For most projects, set them to the same command. The CLI defaults `test_cmd` to **fall through to `merge_gate_test_cmd`** when unset, so configuring just the merge gate is sufficient for "run the same tests at both gates" semantics. `wf project show` renders this as `Test command: (falls through to merge gate test)` so the implication is visible.
+For most projects, set them to the same command. The CLI defaults `test_cmd` to **fall through to `merge_gate_test_cmd`** when unset, so configuring just the merge gate is sufficient for "run the same tests at both gates" semantics. `hashd project show` renders this as `Test command: (falls through to merge gate test)` so the implication is visible.
 
 Set `test_cmd` explicitly only when you want a faster subset for per-commit feedback (e.g. `test_cmd: "pytest -m fast"` and `merge_gate_test_cmd: "pytest"` for fast-vs-full split).
 
@@ -602,7 +620,7 @@ Set `tests_skipped: true` to acknowledge that no test command is configured. Thi
 Configure with:
 
 ```bash
-wf project repo edit <repo-name> --test-cmd "..." --merge-gate-test-cmd "..."
+hashd project repo edit <repo-name> --test-cmd "..." --merge-gate-test-cmd "..."
 ```
 
 ### Workspace Hooks
@@ -616,7 +634,7 @@ hooks:
   timeout_seconds: 600               # default: 300 (5 min)
 ```
 
-- **setup** runs in the worktree after creation, before baseline tests. Failure records `provision_error` and keeps the workstream at `provisioning`; `runtime_status` reports `provisioning / failed`. Retry by re-dispatching with `wf run` (the next provisioning attempt clears `provision_error` on success).
+- **setup** runs in the worktree after creation, before baseline tests. Failure records `provision_error` and keeps the workstream at `provisioning`; `runtime_status` reports `provisioning / failed`. Retry by re-dispatching with `hashd run` (the next provisioning attempt clears `provision_error` on success).
 - **teardown** runs in the worktree before removal (close, merge, workstream remove). Failure is logged but doesn't block cleanup.
 - **timeout_seconds** applies to both hooks. Hooks killed after the timeout get an actionable diagnostic pointing at the config key.
 
@@ -638,7 +656,7 @@ hashd supports projects that span multiple git repositories (e.g., a Go backend 
 
 **Supported shapes:**
 - Single repo: one Git repo, including monorepos for now.
-- Multi-repo container: a non-repo directory containing child Git repos; `wf project add` can initialize a local-only control repo at the container root.
+- Multi-repo container: a non-repo directory containing child Git repos; `hashd project add` can initialize a local-only control repo at the container root.
 - Superproject: a parent Git repo with submodules; treated as a multi-repo variant.
 
 **Directory layout:**
@@ -654,21 +672,24 @@ platform/              # project root (git repo, may be local-only)
     package.json
 ```
 
-**Setup:** `wf project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `wf project add /path --no-interview --suggest` followed by `wf project add /path --no-interview`; see [QUICKSTART.md](QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
+**Setup:** `hashd project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `hashd project add /path --no-interview --suggest` followed by `hashd project add /path --no-interview`; see [QUICKSTART.md](QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
 
 **Config:** project-level settings live in `config.yaml`; per-repo state for multi-repo projects lives in SQLite `project_repos`, not in a `repos:` block in YAML.
 
-**Repo management after setup:** use `wf project repo list`, `wf project repo show <name>`, `wf project repo add <path> --status <status>`, `wf project repo set-status <name> <status>`, `wf project repo edit <name> ...`, `wf project repo set-path <name> <new-path>`, `wf project repo remove <name>`, and `wf project repo prune`.
+**Repo management after setup:** use `hashd project repo list`, `hashd project repo show <name>`, `hashd project repo add <path> --status <status>`, `hashd project repo set-status <name> <status>`, `hashd project repo edit <name> ...`, `hashd project repo set-path <name> <new-path>`, `hashd project repo remove <name>`, and `hashd project repo prune`.
 
 **How it works:**
 - During planning, stories are automatically routed to the correct repo based on content
 - Each workstream targets one repo -- worktrees, branches, and merges happen in that repo
 - REQS.md stays at the project root; SPEC.md is per-repo
-- `wf run`, `wf merge`, `wf watch` all work the same -- they resolve the target repo automatically
+- Inspect or edit the configured REQS and SPEC paths with `hashd project reqs` and
+  `hashd project spec`; the server applies those paths and commits successful
+  manual edits
+- `hashd run`, `hashd merge`, `hashd watch` all work the same -- they resolve the target repo automatically
 
 ### Build and Test Execution
 
-When you run `wf project add` or `wf project interview`, the CLI detects your build system (Makefile, Taskfile, package.json, etc.) and prompts you to confirm or customize the commands:
+When you run `hashd project add` or `hashd project interview`, the CLI detects your build system (Makefile, Taskfile, package.json, etc.) and prompts you to confirm or customize the commands:
 
 ```
 Detected: Taskfile
@@ -743,7 +764,7 @@ The key is ensuring generated code exists before compilation, whether it's a fre
 
 ### Autonomy Modes
 
-Autonomy is configured per-project via `wf project interview` or directly in `config.yaml`:
+Autonomy is configured per-project via `hashd project interview` or directly in `config.yaml`:
 
 | Mode | Behavior |
 |------|----------|
@@ -751,7 +772,7 @@ Autonomy is configured per-project via `wf project interview` or directly in `co
 | **gatekeeper** (default) | Auto-continue if AI confidence >= 90%, human approves at merge |
 | **autonomous** | Auto-continue commits + auto-merge if thresholds met |
 
-Override per-run: `wf run --supervised`, `wf run --gatekeeper`, or `wf run --autonomous`
+Override per-run: `hashd run --supervised`, `hashd run --gatekeeper`, or `hashd run --autonomous`
 
 ```yaml
 # In config.yaml
@@ -765,7 +786,7 @@ modes:
 
 ### Automatic Conflict Resolution
 
-When using the PR workflow (`wf merge --pr` or `merge_mode: pr`), PRs may become conflicting if main moves ahead. The merge command handles this automatically:
+When using the PR workflow (`hashd merge --pr` or `merge_mode: pr`), PRs may become conflicting if main moves ahead. The merge command handles this automatically:
 
 1. Fetches latest main
 2. Attempts rebase of the PR branch
@@ -780,7 +801,7 @@ If rebase fails due to merge conflicts, blocks for human resolution with instruc
 |------|------------|
 | Force push loses work | `--force-with-lease` prevents overwriting if branch changed |
 | Infinite rebase loop | Max 3 attempts before blocking for human |
-| Forge API timing | 2s delay after push; worst case run `wf merge` again |
+| Forge API timing | 2s delay after push; worst case run `hashd merge` again |
 | Review bypass | Checks for `REVIEW_REQUIRED` status from forge |
 
 ### Review Requirements
@@ -789,7 +810,7 @@ The merge respects the forge's configured review requirements:
 
 - **APPROVED** - Merge proceeds
 - **PENDING/None** - Merge proceeds (assumes no review required)
-- **CHANGES_REQUESTED** - Blocks; use `wf reject` to generate fix commit from PR feedback
+- **CHANGES_REQUESTED** - Blocks; use `hashd reject` to generate fix commit from PR feedback
 - **REVIEW_REQUIRED** - Blocks until required reviews complete
 
 ### Check Requirements
@@ -828,12 +849,12 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 By default, **Claude** handles every stage -- planning, implementation, and review. Any supported agent can be swapped in per stage.
 
 ```bash
-wf agents                                # See installed agents and stage assignments
-wf agents --suggest                      # Scan agents and apply a default for all stages
-wf config stages-use codex               # Use one agent for every stage system-wide
-wf project config set coder codex        # Use Codex for implementation (this project)
-wf project config set planner gemini     # All non-implement stages
-wf project config set stage.review gemini  # Single stage override
+hashd agents                                # See installed agents and stage assignments
+hashd agents --suggest                      # Scan agents and apply a default for all stages
+hashd config stages-use codex               # Use one agent for every stage system-wide
+hashd project config set coder codex        # Use Codex for implementation (this project)
+hashd project config set planner gemini     # All non-implement stages
+hashd project config set stage.review gemini  # Single stage override
 ```
 
 ### Stage Reference

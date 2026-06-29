@@ -8,7 +8,9 @@ set -e
 
 REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
-COMPLETION_LINE='source <(wf completion bash)'
+COMPLETION_BLOCK='source <(hashd completion bash)
+source <(wf completion bash)
+source <(ha completion bash)'
 
 # Forge CLI pinned versions. Bump in lockstep with hashd release cuts.
 GH_VERSION="2.93.0"
@@ -21,7 +23,7 @@ TEA_VERSION="0.14.1"
 # Quiet by default: one line per real step. Color is used sparingly and only
 # when stdout is a TTY and NO_COLOR is unset (https://no-color.org). Errors
 # render in the same error:/-->/Suggestions: shape as server/internal/diagnostic
-# so the installer and `wf doctor` speak with one voice.
+# so the installer and `hashd doctor` speak with one voice.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     C_GREEN=$'\033[32m'
     C_BLUE=$'\033[34m'
@@ -181,7 +183,8 @@ bootstrap_uv() {
 }
 
 # install_via_uv: install hashd + all extra wheels through uv's pipx-equivalent.
-# `uv tool install` makes the primary wheel's entry points (wf, hashd-server)
+# `uv tool install` makes the primary wheel's entry points (hashd, wf, ha,
+# hashd-server)
 # available on PATH; `--with` injects the bot/connector/tui wheels into the same
 # managed environment. uv provides a Python 3.11+ interpreter itself, so this
 # works even when the host has no system Python.
@@ -271,13 +274,15 @@ install_bash_completion() {
         -e '^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
         -e '^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
         -e '^[[:space:]]*source[[:space:]]+<\(wf completion bash\)[[:space:]]*$' \
+        -e '^[[:space:]]*source[[:space:]]+<\(hashd completion bash\)[[:space:]]*$' \
+        -e '^[[:space:]]*source[[:space:]]+<\(ha completion bash\)[[:space:]]*$' \
         "$bashrc" > "$tmp" || true
     mv "$tmp" "$bashrc"
 
     if [[ -s "$bashrc" ]]; then
         printf '\n' >> "$bashrc"
     fi
-    printf '%s\n%s\n' "$COMPLETION_MARKER" "$COMPLETION_LINE" >> "$bashrc"
+    printf '%s\n%s\n' "$COMPLETION_MARKER" "$COMPLETION_BLOCK" >> "$bashrc"
 }
 
 promote_pipx_binary() {
@@ -302,8 +307,13 @@ extract_first_major_minor() {
     sed -nE 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/p' | head -1
 }
 
+# Print the first semver in the input. Anchored to the FIRST match, not the
+# last: tools print their own version first and may append build metadata that
+# is itself a semver -- e.g. `tea --version` emits
+# "Version: 0.14.1  golang: 1.26.3  go-sdk: v0.25.1", and a greedy last-match
+# would wrongly read the go-sdk version as the tool version.
 extract_semver() {
-    sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1
+    grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
 
 sha256_file() {
@@ -443,9 +453,10 @@ install_forge_cli() {
     local name="$1"
     local display="$2"
     local version="$3"
-    local bin_dir="${PIPX_BIN_DIR:-$HOME/.local/bin}"
-    local existing_path
-    local existing_version
+    # hashd vendors forge CLIs into its OWN tools dir (alongside gitleaks/delta)
+    # and invokes them by absolute path -- never from the system PATH -- so a
+    # user upgrading or removing their own gh/tea can't shadow or break hashd.
+    local bin_dir="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}"
     local asset_name
     local base_url
     local checksums_name
@@ -456,18 +467,13 @@ install_forge_cli() {
     local found_binary
     local installed_version
 
-    existing_path="$(command -v "$name" 2>/dev/null || true)"
-    if [ -n "$existing_path" ]; then
-        existing_version="$(forge_binary_version "$existing_path")"
-        if [ "$existing_version" = "$version" ]; then
-            ok "$name $version already installed"
-            return 0
-        fi
-        if [ -n "$existing_version" ]; then
-            note "$name present at $existing_version, replacing with $version"
-        else
-            note "$name present at $existing_path, replacing with $version"
-        fi
+    # Always vendor our own pinned copy. We deliberately do NOT consult the
+    # system (PATH) -- a system install is irrelevant since hashd invokes the
+    # absolute bundled path. Skip the download only when OUR copy already
+    # matches the pin.
+    if [ -x "$bin_dir/$name" ] && [ "$(forge_binary_version "$bin_dir/$name")" = "$version" ]; then
+        ok "$name $version already vendored"
+        return 0
     fi
 
     asset_name="$(forge_asset_name "$name" "$version" "$PLATFORM" "$MACHINE")"
@@ -664,9 +670,24 @@ TUI_WHEEL="hashd_tui-${VERSION}-py3-none-any.whl"
 
 # Download via direct release-asset CDN URLs -- no api.github.com, so immune to
 # the unauthenticated 60/hr limit that fresh boxes (no `gh` yet) used to hit.
+#
+# An interactive terminal gets a per-wheel progress bar -- the hashd wheel is
+# ~170MB and otherwise downloads in total silence (looks hung). A non-TTY run
+# (CI / piped logs) stays quiet but still surfaces curl's error (-sS). --retry
+# absorbs a transient CDN blip on any single wheel; without it one failed fetch
+# aborts the whole install. No --max-time: the hashd wheel is large and must not
+# be cut off mid-download.
+step "Downloading wheels"
+if [ -t 2 ]; then
+    _curl_dl=(--progress-bar)
+else
+    _curl_dl=(-sS)
+fi
 DL_BASE="https://github.com/$REPO/releases/download/$RELEASE_TAG"
 for _wheel in "$WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$TUI_WHEEL"; do
-    if ! curl -fsSL -o "$WORK_DIR/$_wheel" "$DL_BASE/$_wheel" 2>/dev/null; then
+    printf '  %s\n' "$_wheel"
+    if ! curl -fL --connect-timeout 20 --retry 3 --retry-delay 2 \
+            "${_curl_dl[@]}" -o "$WORK_DIR/$_wheel" "$DL_BASE/$_wheel"; then
         die "Could not download $_wheel" \
             "install.wheel_download" \
             "Failed to download $_wheel from the $RELEASE_TAG release.\nThis is a direct CDN download (no GitHub API), so it usually means no network access, or no wheel was published for this platform ($PLATFORM/$MACHINE)." \
@@ -705,31 +726,36 @@ ok "hashd installed"
 
 OPS_ROOT="${HASHD_OPS_ROOT:-$HOME/.hashd}"
 mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
-WF_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/wf"
+HASHD_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
 if [ "$INSTALL_VIA" = "pipx" ]; then
+    promote_pipx_binary hashd || true
     promote_pipx_binary wf || true
+    promote_pipx_binary ha || true
     promote_pipx_binary hashd-server || true
 fi
-if [ ! -x "$WF_BIN" ]; then
+if [ ! -x "$HASHD_BIN" ]; then
     # uv tool install puts entry points directly in ~/.local/bin; pipx puts
     # them there via the promote step above. Resolve whatever is on PATH.
-    if command -v wf &>/dev/null; then
-        WF_BIN="$(command -v wf)"
+    if command -v hashd &>/dev/null; then
+        HASHD_BIN="$(command -v hashd)"
     fi
 fi
-if [ ! -x "$WF_BIN" ]; then
-    die "Installed wf not found on PATH" \
-        "install.wf_missing" \
-        "hashd installed but the wf entry point is not at $WF_BIN and not on PATH.\nInstall method: $INSTALL_VIA." \
+if [ ! -x "$HASHD_BIN" ]; then
+    die "Installed hashd not found on PATH" \
+        "install.hashd_missing" \
+        "hashd installed but the hashd entry point is not at $HASHD_BIN and not on PATH.\nInstall method: $INSTALL_VIA." \
         "Open a new shell or run: export PATH=\"\$HOME/.local/bin:\$PATH\"" \
         "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
 fi
+bin_dir="$(dirname "$HASHD_BIN")"
+ln -sf hashd "$bin_dir/wf"
+ln -sf hashd "$bin_dir/ha"
 
 install_bash_completion
 
 # --- Install external tools (gitleaks, git-delta, ...) ---
 # Delegates to scripts/install-tools.sh from main -- the same script
-# `wf` auto-invokes on source checkouts when a tool is missing. One
+# `hashd` auto-invokes on source checkouts when a tool is missing. One
 # script, two entry points, no drift.
 #
 # Why main, not $RELEASE_TAG:
@@ -744,9 +770,9 @@ install_bash_completion
 #    install-tools.sh pins the tool versions itself, so a wheel
 #    user today always gets the script's current pins regardless of
 #    when they install.
-#    The latent risk: if we ever ship wf code that depends on a
+#    The latent risk: if we ever ship hashd code that depends on a
 #    specific tool version's output shape (say, gitleaks 9.x
-#    reshuffles the JSON fields wf parses) and later bump the
+#    reshuffles the JSON fields hashd parses) and later bump the
 #    script's pin, old wheels in the wild start getting the new
 #    tool. Revisit this pin at that point: either switch to
 #    $RELEASE_TAG, or freeze per-tool versions per wheel release.
@@ -777,7 +803,7 @@ else
 fi
 
 step "Starting hashd services"
-# `wf restart` brings up Prefect + worker and registers the INSTALL-OWNED
+# `hashd restart` brings up Prefect + worker and registers the INSTALL-OWNED
 # infrastructure, including the housekeeping cron, on this first pass -- it
 # waits for Prefect's deployment API to accept writes before reporting success,
 # so a fresh install no longer needs a warm second restart to land housekeeping.
@@ -786,25 +812,25 @@ step "Starting hashd services"
 # restart means the install-owned infrastructure did not converge -- that is a
 # genuinely broken install, so we stop here rather than print a misleading
 # success.
-"$WF_BIN" restart --yes >/dev/null 2>&1 || {
+"$HASHD_BIN" restart --yes >/dev/null 2>&1 || {
     printf '%s   first restart did not converge; retrying with output...%s\n' "$C_DIM" "$C_RESET"
-    "$WF_BIN" restart --yes
+    "$HASHD_BIN" restart --yes
 }
 ok "Services started"
 
 printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C_RESET"
 
 # --- Verify with the doctor report ---
-# `wf doctor` now reads honestly: the INSTALL-OWNED checks (server, Prefect,
+# `hashd doctor` now reads honestly: the INSTALL-OWNED checks (server, Prefect,
 # housekeeping cron, bundled gitleaks + delta) must be green after a successful
 # install, and the USER-SETUP gaps (git, an agent CLI, forge auth) render as a
 # "Finish setup:" checklist rather than a red failure wall. doctor exits
 # non-zero while setup is unfinished, so we ignore its exit here: a fresh box
 # WILL have those user-setup steps outstanding, and that is expected, not a
 # broken install (a broken install already aborted at the restart step above).
-step "Running wf doctor"
+step "Running hashd doctor"
 echo ""
-"$WF_BIN" doctor || true
+"$HASHD_BIN" doctor || true
 echo ""
 
 # --- Agent on-ramp ---
@@ -825,12 +851,12 @@ note "Bitbucket: bkt auth login --kind cloud --web"
 note "Gitea:     tea login add --name work --url https://git.example.com --token \$TOKEN"
 echo ""
 
-if ! command -v wf &>/dev/null; then
-    note "wf is not on your PATH yet -- run 'source ~/.bashrc' or open a new terminal."
+if ! command -v hashd &>/dev/null; then
+    note "hashd is not on your PATH yet -- run 'source ~/.bashrc' or open a new terminal."
     echo ""
 fi
 
 # --- One inviting next action ---
 printf '%sNext:%s register your first repo\n' "$C_BOLD" "$C_RESET"
-printf '  %s->%s wf project add /path/to/your/repo\n' "$C_BLUE" "$C_RESET"
+printf '  %s->%s hashd project add /path/to/your/repo\n' "$C_BLUE" "$C_RESET"
 echo ""

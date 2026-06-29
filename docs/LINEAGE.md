@@ -167,7 +167,7 @@ Supporting infrastructure that already records lineage data:
 
 3. **Requirement text captured in stories (Phase 2).** `source_refs` field repurposed to hold closely paraphrased requirement text from REQS.md. `origin` field added to tag how each story was created (`"discovery"`, `"manual"`, `"bug"`).
 
-4. **Lineage query commands (Phase 3).** `wf lineage` command with auto-detection of target type (file, SHA, story/bug ID). Three query paths: file blame -> commit lookup -> story enrichment; commit -> story + reviews + human decisions; story -> all commits + reviews + decisions. Output formats: `--format table|json|markdown`. Human rejection of final reviews recorded as queryable `human_input` events.
+4. **Lineage query commands (Phase 3).** `hashd lineage` command with auto-detection of target type (file, SHA, story/bug ID). Three query paths: file blame -> commit lookup -> story enrichment; commit -> story + reviews + human decisions; story -> all commits + reviews + decisions. Output formats: `--format table|json|markdown`. Human rejection of final reviews recorded as queryable `human_input` events.
 
 ### What is missing
 
@@ -207,7 +207,7 @@ ORDER BY id DESC LIMIT 10;
 **Implemented:** Repurposed the existing `source_refs` field on stories. Updated the `refine_story.md` and `edit_story.md` prompts to instruct Claude to closely paraphrase the original REQS.md text rather than cite section numbers. No schema change needed -- `source_refs` already exists.
 
 - `source_refs`: prompts updated (`refine_story.md`, `edit_story.md`) to paraphrase requirement text instead of citing section numbers. Display labels renamed to "Source Requirements".
-- `origin` field added to Story model: `"discovery"` (from REQS.md via `wf plan`), `"manual"` (`wf plan story`), `"bug"` (`wf plan bug`), `""` (legacy). Set automatically in `create_drafting_placeholder()`.
+- `origin` field added to Story model: `"discovery"` (from REQS.md via `hashd plan`), `"manual"` (`hashd plan story`), `"bug"` (`hashd plan bug`), `""` (legacy). Set automatically in `create_drafting_placeholder()`.
 
 **Design rationale:** REQS.md is a living document -- lines get deleted as stories consume them. Section references become meaningless. Paraphrasing the requirement text creates a frozen, readable record. The `reqs_refs` field on suggestions (discovery phase) still uses section references, which is fine since REQS.md exists at discovery time.
 
@@ -225,12 +225,12 @@ ORDER BY id DESC LIMIT 10;
 - Human rejection of final reviews now recorded as `human_input` events in the events table (previously only in story transcript), matching the in-pipeline `record_human_input()` format. Added in `approve.py:_reject_post_completion()`.
 - Output formats: `--format table` (default), `--format json`, `--format markdown`.
 
-#### `wf lineage <file> [--line N] [--lines N-M]`
+#### `hashd lineage <file> [--line N] [--lines N-M]`
 
 Trace a file (or specific lines) back to the stories and decisions that produced it.
 
 ```
-$ wf lineage src/auth/jwt.go --lines 42-58
+$ hashd lineage src/auth/jwt.go --lines 42-58
 
 Lines 42-58 of src/auth/jwt.go
 
@@ -247,12 +247,12 @@ Implementation: `git blame -L N,M <file>` to get SHAs, look up each in `commits`
 
 Without `--line`/`--lines`: `git log --follow <file>` for all commits touching the file.
 
-#### `wf lineage <sha>`
+#### `hashd lineage <sha>`
 
 Full chain for a single commit.
 
 ```
-$ wf lineage a1b2c3d
+$ hashd lineage a1b2c3d
 
 Commit a1b2c3d: COMMIT-AUTH-003: Implement JWT token validation
   Workstream: auth_jwt
@@ -264,12 +264,12 @@ Commit a1b2c3d: COMMIT-AUTH-003: Implement JWT token validation
   Human:      approved
 ```
 
-#### `wf lineage <STORY-XXXX>`
+#### `hashd lineage <STORY-XXXX>`
 
 Everything produced by a story.
 
 ```
-$ wf lineage STORY-0012
+$ hashd lineage STORY-0012
 
 STORY-0012: JWT Authentication
   Origin:      discovery
@@ -302,7 +302,7 @@ STORY-0012: JWT Authentication
 
 **Goal:** Export lineage in standard formats for compliance.
 
-`wf lineage export <sha> --format slsa`:
+`hashd lineage export <sha> --format slsa`:
 - in-toto Statement with SLSA v1.0 provenance predicate
 - `buildType`: `https://hashd.ai/provenance/v1`
 - `externalParameters`: story_id, microcommit_id, requirement (source_refs), origin
@@ -310,13 +310,13 @@ STORY-0012: JWT Authentication
 - `builder.id`: `https://hashd.ai/builder/v1`
 - `metadata.invocationId`: run_id
 
-`wf lineage export <sha> --format in-toto`:
+`hashd lineage export <sha> --format in-toto`:
 - in-toto Statement with custom hashd predicate (`https://hashd.ai/provenance/v1`)
 - Full commit row, story summary, reviews (type/decision/confidence)
 - Human decisions, agent calls (model/tokens/duration)
 - `chain` section with `prev_hash` and `record_hash` for verifiability
 
-`wf lineage export STORY-XXXX --format slsa`:
+`hashd lineage export STORY-XXXX --format slsa`:
 - Exports array of attestations for all commits in the story
 
 ### Phase 5: Tamper evidence -- hash chain (DONE)
@@ -326,7 +326,7 @@ STORY-0012: JWT Authentication
 - Each commit record includes `prev_hash`: SHA-256 of the previous record's canonical JSON
 - Canonical form: sorted keys, compact separators, all commit fields
 - First commit for a project has `prev_hash = None` (genesis)
-- `wf lineage verify` walks the chain, reports total/verified/breaks
+- `hashd lineage verify` walks the chain, reports total/verified/breaks
 - Exit code 0 if chain valid, 1 if broken
 
 Future options (deferred):

@@ -4,7 +4,7 @@
 
 The current diff panel in the TUI (`d` key) fetches unified diff text from the hashd-server REST API and can render it with `git-delta` when the client has delta installed. Without delta, it falls back to plain unified diff text.
 
-The TUI must not run git or wf subprocesses to access repository data or mutate workflow state. Local render subprocesses are different: delta is a terminal formatter over REST-fetched text, not a git operation. That client-side formatter carve-out is allowed; data/action subprocesses remain forbidden and must stay behind REST.
+The TUI must not run git or hashd subprocesses to access repository data or mutate workflow state. Local render subprocesses are different: delta is a terminal formatter over REST-fetched text, not a git operation. That client-side formatter carve-out is allowed; data/action subprocesses remain forbidden and must stay behind REST.
 
 The goal is to evolve the diff experience across four incremental steps, from "prettier output" to "select a line and trace it back to the requirement that produced it." The realistic target is Step 2.5. Steps beyond that are documented for future direction.
 
@@ -189,9 +189,9 @@ This is where hashd's unique value becomes visible. Anyone can render a diff. Tr
 
 LINEAGE.md Phase 3 landed in PR #85. The full CLI and data layer already exist:
 
-- **`wf lineage <file> [--line N] [--lines N-M]`** -- file blame -> commit -> story chain
-- **`wf lineage <sha>`** -- commit -> story/reviews/human decisions
-- **`wf lineage STORY-XXXX`** -- story -> all commits/reviews/decisions
+- **`hashd lineage <file> [--line N] [--lines N-M]`** -- file blame -> commit -> story chain
+- **`hashd lineage <sha>`** -- commit -> story/reviews/human decisions
+- **`hashd lineage STORY-XXXX`** -- story -> all commits/reviews/decisions
 - Output formats: `--format table` (default), `json`, `markdown`
 
 Key functions already implemented:
@@ -260,7 +260,7 @@ If the commit has been through multiple review cycles (rejected, then approved),
 
 The modal has a keybinding to open the full story transcript (`o`), which switches to the transcript panel filtered to that run.
 
-### CLI: `wf lineage` (already implemented)
+### CLI: `hashd lineage` (already implemented)
 
 Landed in PR #85. The TUI lineage view reuses the same query functions from `orchestrator/commands/lineage.py` -- specifically `_parse_blame_shas()`, `get_commit_row()`, and the story/review enrichment logic. No new CLI commands needed for this step.
 
@@ -281,7 +281,7 @@ The TUI lineage view may need a richer return type than the CLI formatters produ
 - Navigating to a line and pressing Enter shows the full lineage chain in a modal.
 - The modal displays story, microcommit, review decision, prompt template, and requirement text.
 - Lines not in the commits table show "untracked" gracefully.
-- CLI `wf lineage` already works (PR #85). TUI lineage view reuses the same query layer.
+- CLI `hashd lineage` already works (PR #85). TUI lineage view reuses the same query layer.
 
 ### Design decisions
 
@@ -327,8 +327,8 @@ Step 2 shows files changed in the current workstream diff (base..HEAD) or in a s
 |------|-----------|-------|-----------------|-------------|
 | 1 | delta installed | Small | None | None (existing `d` key, better output) |
 | 2 | Step 1 | Medium | None | `s` (side-by-side toggle) |
-| 2.5 | Step 2 | Medium | None (CLI `wf lineage` already exists, PR #85) | `I` (lineage) |
-| 3 | Step 2.5 | Large | Extensions to `wf diff` and `wf lineage` | TBD |
+| 2.5 | Step 2 | Medium | None (CLI `hashd lineage` already exists, PR #85) | `I` (lineage) |
+| 3 | Step 2.5 | Large | Extensions to `hashd diff` and `hashd lineage` | TBD |
 
 ---
 
@@ -351,7 +351,7 @@ Step 2 shows files changed in the current workstream diff (base..HEAD) or in a s
 
 This document covers the **user-facing diff and lineage experience**. LINEAGE.md covers the **data model, query API, attestation export, and compliance story**.
 
-LINEAGE.md Phase 3 (query commands) landed in PR #85. The `wf lineage` CLI command, `git_blame()` function, `get_commit_row()`, `list_commits_by_story()`, and `list_commits_by_workstream()` are all implemented and tested. The diff viewer's lineage view (Step 2.5) is the first TUI consumer of this query layer.
+LINEAGE.md Phase 3 (query commands) landed in PR #85. The `hashd lineage` CLI command, `git_blame()` function, `get_commit_row()`, `list_commits_by_story()`, and `list_commits_by_workstream()` are all implemented and tested. The diff viewer's lineage view (Step 2.5) is the first TUI consumer of this query layer.
 
 The key integration point is the enrichment logic in `orchestrator/commands/lineage.py`. Currently it formats directly to stdout (table/json/markdown). For the TUI lineage view, we need the same enrichment as structured data. Step 2.5 will refactor the shared parts into reusable functions that both the CLI formatters and the TUI widget can call.
 

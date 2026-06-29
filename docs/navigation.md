@@ -1,6 +1,6 @@
 # Navigating the TUI
 
-`wf watch` opens hashd's terminal UI. This page is the *navigation journey* — what
+`hashd watch` opens hashd's terminal UI. This page is the *navigation journey* — what
 each view is for and when you'd move between them. For the exhaustive,
 state-by-state keybinding tables, see **[WF.md > Watch UI
 Keybindings](../WF.md)**. For the terms used here, see [glossary.md](glossary.md).
@@ -92,9 +92,13 @@ Two surfaces are reached from within the views above rather than from the Dashbo
   (`d`), create a story from a suggestion (`1-9`), or create a new story (`s`) or
   bug (`b`).
 
+Project artifact inspection/editing is CLI-first: use `hashd project reqs` /
+`hashd project spec` to show the configured documents and their `edit` subcommands
+for guarded manual changes.
+
 ## A typical journey
 
-1. Open `wf watch` — land on the **Dashboard**.
+1. Open `hashd watch` — land on the **Dashboard**.
 2. Press `p`, run discovery, claim a suggestion into a Story.
 3. Press `a-i` to open **Story Detail**; review acceptance criteria; press `A` to
    accept, then `G` to launch the Workstream.

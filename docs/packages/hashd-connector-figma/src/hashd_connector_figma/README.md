@@ -15,14 +15,14 @@ Import and reference Figma design artifacts in hashd. Designs become first-class
 export FIGMA_TOKEN="figd_your_token_here"
 
 # 2. Connect a Figma file
-wf figma connect https://figma.com/file/abc123/My-Designs
+hashd figma connect https://figma.com/file/abc123/My-Designs
 
 # 3. Browse what's available
-wf figma list
-wf figma list --page "Job Browsing"
+hashd figma list
+hashd figma list --page "Job Browsing"
 
 # 4. Import frames you need
-wf figma import job-list job-detail job-filter
+hashd figma import job-list job-detail job-filter
 
 # 5. Reference in stories, ACs, chat, anywhere
 #    @figma:job-list resolves to cached file references
@@ -32,14 +32,14 @@ wf figma import job-list job-detail job-filter
 
 | Command | What it does |
 |---|---|
-| `wf figma` | Show status or setup instructions |
-| `wf figma connect <url>` | Link Figma file, validate token, detect plan, recommend profile |
-| `wf figma list [--page NAME]` | Browse pages and frames in the linked file |
-| `wf figma import <name> [...]` | Fetch frames from Figma API, cache locally |
-| `wf figma show <name>` | Display a cached artifact |
-| `wf figma status` | Show cache status and staleness (API check depends on profile) |
-| `wf figma sync` | Refresh all cached artifacts from Figma |
-| `wf figma profile [name]` | Show or switch API rate limit profile |
+| `hashd figma` | Show status or setup instructions |
+| `hashd figma connect <url>` | Link Figma file, validate token, detect plan, recommend profile |
+| `hashd figma list [--page NAME]` | Browse pages and frames in the linked file |
+| `hashd figma import <name> [...]` | Fetch frames from Figma API, cache locally |
+| `hashd figma show <name>` | Display a cached artifact |
+| `hashd figma status` | Show cache status and staleness (API check depends on profile) |
+| `hashd figma sync` | Refresh all cached artifacts from Figma |
+| `hashd figma profile [name]` | Show or switch API rate limit profile |
 
 ## How it works
 
@@ -55,11 +55,11 @@ Use `@figma:name` anywhere text goes to an agent:
 - Job cards match layout in @figma:job-list
 - Filter panel slides up per @figma:job-filter
 
-# In wf chat
+# In hashd chat
 you> @figma:job-list how should I structure the card component?
 
-# In wf workstream add-commit
-$ wf workstream add-commit my_ws "Add filter panel per @figma:job-filter"
+# In hashd workstream add-commit
+$ hashd workstream add-commit my_ws "Add filter panel per @figma:job-filter"
 ```
 
 ### What the agent sees
@@ -122,25 +122,25 @@ Figma's API rate limits vary dramatically by plan. The connector detects your pl
 | SVG export on import | no (saves 1 API call) | yes | yes |
 | Raw JSON cache | yes | yes | yes |
 | Text summary | yes (from cached JSON) | yes | yes |
-| Staleness check | never (manual sync only) | on `wf figma status/sync` | on every resolve pre-implementation |
+| Staleness check | never (manual sync only) | on `hashd figma status/sync` | on every resolve pre-implementation |
 | API call tracking | warns at 4 of 6 monthly | warns at threshold | warns at threshold |
 
 ### Switching profiles
 
 ```bash
 # Show current profile and plan
-wf figma profile
+hashd figma profile
 
 # Switch to a different profile
-wf figma profile standard
+hashd figma profile standard
 
 # Re-detect plan (e.g., after upgrading)
-wf figma connect https://figma.com/file/abc123/My-Designs
+hashd figma connect https://figma.com/file/abc123/My-Designs
 ```
 
 ### Plan detection
 
-`wf figma connect` detects your plan through:
+`hashd figma connect` detects your plan through:
 1. The MCP server's `whoami` tool (if available) -- returns plan and seat type directly
 2. API response headers on rate limit (429) -- returns `X-Figma-Plan-Tier` and `X-Figma-Rate-Limit-Type`
 3. If neither is available, defaults to `conservative` and asks you to set the profile manually
@@ -163,7 +163,7 @@ The token is never stored in config. Only the env var name. Set the actual token
 
 ## Health checks
 
-`wf doctor` Figma section validates:
+`hashd doctor` Figma section validates:
 
 - Token env var set and non-empty
 - Figma API reachable with the token

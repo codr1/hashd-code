@@ -7,7 +7,7 @@ first; for installation and setup, see [../QUICKSTART.md](../QUICKSTART.md); for
 every command's flags, see **[WF.md](../WF.md)**.
 
 We'll add a "log out" button to an example web app. Assume hashd is installed and
-the project is registered (`wf project add /path/to/repo`).
+the project is registered (`hashd project add /path/to/repo`).
 
 ## 1. Point at a spec
 
@@ -16,11 +16,24 @@ normally `REQS.md` in your repo, that describes *what* you want in plain languag
 You don't have to use it — you can create work directly (step 2b) — but starting
 from a spec is what makes the rest of the chain traceable back to an intent.
 
-Add a line to your `REQS.md`:
+If the project is already registered, edit the configured requirements artifact
+through hashd-server:
+
+```bash
+hashd project reqs edit
+```
+
+Before registration, create or edit `REQS.md` directly in the repo. Add a line:
 
 ```markdown
 ## Authentication
 - Logged-in users need a visible way to log out from any page.
+```
+
+You can inspect the current configured requirements with:
+
+```bash
+hashd project reqs show
 ```
 
 ## 2a. Generate a Story (the spec-driven path)
@@ -29,8 +42,8 @@ Run discovery. hashd reads `REQS.md` and proposes **Suggestions** — candidate
 pieces of work safe to start against the current `main`:
 
 ```bash
-wf plan          # discovery; proposes suggestions
-wf plan list     # view them, numbered
+hashd plan          # discovery; proposes suggestions
+hashd plan list     # view them, numbered
 ```
 
 Claim the one you want. Claiming turns a Suggestion into a **Story** — a feature
@@ -38,7 +51,7 @@ Claim the one you want. Claiming turns a Suggestion into a **Story** — a featu
 conditions for "done"):
 
 ```bash
-wf plan claim 1  # or claim it from the TUI plan screen
+hashd plan claim 1  # or claim it from the TUI plan screen
 ```
 
 ## 2b. Or create a Story directly (skip discovery)
@@ -46,8 +59,8 @@ wf plan claim 1  # or claim it from the TUI plan screen
 If you don't want to go through `REQS.md`, create the Story straight away:
 
 ```bash
-wf plan story "add a log out button"
-# for a bug:  wf plan bug "logout link 404s on mobile"
+hashd plan story "add a log out button"
+# for a bug:  hashd plan bug "logout link 404s on mobile"
 ```
 
 Either path lands you at the same place: a drafted Story.
@@ -58,16 +71,16 @@ A Story is the **source of truth** for what the change should do, so it's worth 
 look before you commit agents to it:
 
 ```bash
-wf show STORY-0001     # read the problem statement and acceptance criteria
+hashd show STORY-0001     # read the problem statement and acceptance criteria
 ```
 
 If the acceptance criteria need work, reshape them — edit, delete, descope, or
-rescope individual criteria (`wf plan edit-ac` / `delete-ac` / `descope-ac` /
-`rescope-ac`), or hand the whole story to the AI editor (`wf plan edit STORY-0001
+rescope individual criteria (`hashd plan edit-ac` / `delete-ac` / `descope-ac` /
+`rescope-ac`), or hand the whole story to the AI editor (`hashd plan edit STORY-0001
 -f "also handle the mobile nav"`). When it reads right, accept it:
 
 ```bash
-wf approve STORY-0001  # draft -> accepted
+hashd approve STORY-0001  # draft -> accepted
 ```
 
 Accepting unlocks the Story to be run.
@@ -78,7 +91,7 @@ Running an accepted Story creates a **Workstream** — one git branch in one
 isolated worktree — and starts the implement/test/review loop:
 
 ```bash
-wf run STORY-0001 --loop   # --loop runs until it blocks or completes
+hashd run STORY-0001 --loop   # --loop runs until it blocks or completes
 ```
 
 hashd first breaks the Story into a **plan**: an ordered list of **micro-commits**,
@@ -105,8 +118,8 @@ implement  ->  test  ->  review  ->  human gate  ->  commit
 Watch it run:
 
 ```bash
-wf watch STORY-0001    # live TUI, or:
-wf show <workstream>   # status snapshot
+hashd watch STORY-0001    # live TUI, or:
+hashd show <workstream>   # status snapshot
 ```
 
 ## 5. Hit an approval gate
@@ -116,11 +129,11 @@ When the loop pauses for you, the Workstream's `runtime_status` reads `blocked` 
 decide:
 
 ```bash
-wf diff <workstream>                      # see the change
-wf approve <workstream>                   # looks good, continue
-wf reject <workstream> -f "rename the handler to logout()"   # iterate with feedback
-wf reset  <workstream>                    # keep the plan, redo from a clean baseline
-wf replan <workstream> -f "split the endpoint out"  # the plan itself is wrong; regenerate it
+hashd diff <workstream>                      # see the change
+hashd approve <workstream>                   # looks good, continue
+hashd reject <workstream> -f "rename the handler to logout()"   # iterate with feedback
+hashd reset  <workstream>                    # keep the plan, redo from a clean baseline
+hashd replan <workstream> -f "split the endpoint out"  # the plan itself is wrong; regenerate it
 ```
 
 (`reset` keeps the plan and redoes the implementation from baseline; `replan`
@@ -131,8 +144,8 @@ If an agent needs information to proceed it raises a **clarification** and the
 Workstream blocks. Answer it and the run continues:
 
 ```bash
-wf answer list
-wf answer <workstream> "use the existing session-cookie clear path"
+hashd answer list
+hashd answer <workstream> "use the existing session-cookie clear path"
 ```
 
 ## 6. Final review and merge
@@ -142,21 +155,23 @@ When every micro-commit is done, two branch-level gates run before anything land
 - **Final review** — a holistic review of the *whole branch diff*. It either marks
   the branch `ready_to_merge`, flags `final_review_with_concerns` (mergeable, but
   worth a human read), or — if you reject — generates a FIX micro-commit you then
-  `wf run` to address.
+  `hashd run` to address.
 - **Merge gate** — runs the merge-gate test command, checks for conflicts against
   fresh `main`, and runs a `gitleaks` secrets scan. A secret finding blocks the merge.
 
 Then merge:
 
 ```bash
-wf merge <workstream> --wait        # direct merge to main (default)
+hashd merge <workstream> --wait        # direct merge to main (default)
 # or, for external review on a forge:
-wf merge <workstream> --pr --wait   # opens a PR; merge after CI/team review
+hashd merge <workstream> --pr --wait   # opens a PR; merge after CI/team review
 ```
 
-In PR mode you can pull review comments (`wf pr feedback`) and reject to generate a
+In PR mode you can pull review comments (`hashd pr feedback`) and reject to generate a
 fix commit that produces a fresh PR. On a direct merge, hashd updates `SPEC.md`,
 merges, cleans up the `REQS.md` WIP markers, and archives the Workstream.
+Inspect the final project documents with `hashd project spec show` and
+`hashd project reqs show`; use the matching `edit` commands for manual corrections.
 
 ## 7. View the audit trail
 
@@ -164,22 +179,22 @@ The change is now in `main` — and every step that produced it was recorded. Th
 is the payoff of the governed path: a full, queryable **lineage** chain.
 
 ```bash
-wf lineage <workstream-or-sha-or-STORY-0001>
+hashd lineage <workstream-or-sha-or-STORY-0001>
 ```
 
 Trace a specific file or line back to the Story and decisions that produced it:
 
 ```bash
-wf lineage src/auth/logout.go --lines 12-30
+hashd lineage src/auth/logout.go --lines 12-30
 ```
 
 Export a machine-readable attestation for compliance, or verify the tamper-evident
 hash chain:
 
 ```bash
-wf lineage export <sha> --format slsa     # SLSA v1.0 provenance
-wf lineage export <sha> --format in-toto  # in-toto statement, hashd predicate
-wf lineage verify                         # validate the commit hash chain
+hashd lineage export <sha> --format slsa     # SLSA v1.0 provenance
+hashd lineage export <sha> --format in-toto  # in-toto statement, hashd predicate
+hashd lineage verify                         # validate the commit hash chain
 ```
 
 For the full provenance story — what's captured, the standards it maps to, and why
@@ -191,7 +206,7 @@ it's the differentiator — see [provenance.md](provenance.md) and
 ```text
 REQS.md  ->  Suggestion  ->  Story (+ ACs)  ->  Workstream  ->  micro-commits
    ->  implement/test/review/approve loop  ->  final review  ->  merge gate
-   ->  merged commit  ->  wf lineage (full audit trail)
+   ->  merged commit  ->  hashd lineage (full audit trail)
 ```
 
 Every arrow is a validated transition that was logged. That is the whole point:

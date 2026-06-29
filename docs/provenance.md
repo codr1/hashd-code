@@ -54,9 +54,9 @@ Each link is a real, recorded relationship in SQLite, not a heuristic:
 | clarification history | `clarifications` (question + answer) |
 | cross-commit patterns | final review spans all commits |
 
-## Querying lineage: `wf lineage`
+## Querying lineage: `hashd lineage`
 
-`wf lineage <target>` walks the chain in either direction. The target type is
+`hashd lineage <target>` walks the chain in either direction. The target type is
 auto-detected:
 
 - `STORY-NNN` / `BUG-NNN` -> everything produced by that story;
@@ -64,10 +64,10 @@ auto-detected:
 - anything else -> a file path.
 
 ```bash
-wf lineage STORY-0012                 # all commits, reviews, decisions for a story
-wf lineage a1b2c3d                     # full chain for one commit
-wf lineage src/auth/jwt.go             # all commits touching a file
-wf lineage src/auth/jwt.go --lines 42-58   # lineage for specific lines (git blame)
+hashd lineage STORY-0012                 # all commits, reviews, decisions for a story
+hashd lineage a1b2c3d                     # full chain for one commit
+hashd lineage src/auth/jwt.go             # all commits touching a file
+hashd lineage src/auth/jwt.go --lines 42-58   # lineage for specific lines (git blame)
 ```
 
 A commit query reads like a lab notebook entry — the story it served, the
@@ -75,7 +75,7 @@ requirement it fulfilled, the run and prompt that produced it, the review verdic
 and confidence, and the human decision:
 
 ```text
-$ wf lineage a1b2c3d
+$ hashd lineage a1b2c3d
 
 Commit a1b2c3d: COMMIT-AUTH-003: Implement JWT token validation
   Workstream: auth_jwt
@@ -91,15 +91,15 @@ Output formats: `--format table` (default), `--format json` (for `jq` / tooling)
 `--format markdown` (for pasting into PRs or reports). In the TUI, the **Lineage
 view** (`I` in diff mode) traces a selected line interactively.
 
-## Exporting attestations: `wf lineage export`
+## Exporting attestations: `hashd lineage export`
 
 For supply-chain compliance, export the chain as a standard, machine-readable
 attestation:
 
 ```bash
-wf lineage export <sha> --format slsa      # in-toto Statement, SLSA v1.0 provenance predicate
-wf lineage export <sha> --format in-toto   # in-toto Statement, hashd predicate
-wf lineage export STORY-0012 --format slsa # array of attestations, one per commit
+hashd lineage export <sha> --format slsa      # in-toto Statement, SLSA v1.0 provenance predicate
+hashd lineage export <sha> --format in-toto   # in-toto Statement, hashd predicate
+hashd lineage export STORY-0012 --format slsa # array of attestations, one per commit
 ```
 
 - **SLSA** export emits an in-toto Statement carrying a SLSA v1.0 provenance
@@ -112,7 +112,7 @@ wf lineage export STORY-0012 --format slsa # array of attestations, one per comm
   duration) — plus a `chain` section with `prev_hash` and `record_hash` for
   verifiability.
 
-## Tamper evidence: `wf lineage verify`
+## Tamper evidence: `hashd lineage verify`
 
 Commit records are linked into a hash chain: each record stores a `prev_hash` —
 the SHA-256 of the previous record's canonical JSON (sorted keys, compact
@@ -120,7 +120,7 @@ separators). The first commit for a project is the genesis record with no
 predecessor.
 
 ```bash
-wf lineage verify   # exit 0 if the chain is intact, 1 if broken
+hashd lineage verify   # exit 0 if the chain is intact, 1 if broken
 ```
 
 `verify` walks the chain and reports total / verified / breaks. It tolerates legacy

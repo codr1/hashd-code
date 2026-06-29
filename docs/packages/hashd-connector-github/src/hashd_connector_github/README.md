@@ -6,11 +6,11 @@ hashd stories, create GitHub issues, or run a background sync daemon.
 ## Setup
 
 ```bash
-wf project config set github.repo owner/repo
-wf github setup
+hashd project config set github.repo owner/repo
+hashd github setup
 ```
 
-`wf github setup` validates GitHub access and creates the optional `hashd:*`
+`hashd github setup` validates GitHub access and creates the optional `hashd:*`
 labels used by older projects. Issue resolution uses the GitHub CLI auth context.
 
 ## Usage
@@ -39,7 +39,7 @@ the GitHub CLI in the configured project repo.
 
 ## Health Checks
 
-`wf doctor` validates:
+`hashd doctor` validates:
 
 - `gh` CLI is installed and authenticated
 - repository is accessible

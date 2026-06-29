@@ -70,7 +70,14 @@ jira = "hashd_connector_jira"
 
 ### How it works
 
-`resolve_refs()` scans text for `@connector:ref` patterns, dispatches to the connector's `ARTIFACT_RESOLVER`, and replaces refs with file metadata. Resolution happens in the harness BEFORE any prompt reaches an agent.
+`resolve_refs()` scans text for `@connector:ref` patterns, dispatches to the connector's `ARTIFACT_RESOLVER`, and replaces refs with file metadata. Resolution happens BEFORE any prompt reaches an agent.
+
+There are two resolver implementations sharing the same connector-host surface:
+
+- **Python harness** (`lib/ref_resolver.py`) -- used by the planner, tool dispatch, and the legacy Python chat path. Connector dispatch only; built-in artifacts (`@diff`, `@story`, ...) are handled separately by `lib/chat_context.py`.
+- **Go server** (`server/internal/refs/`) -- used by the server-side chat generation path (`POST /chat/messages`). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home as the Python chat path is retired.
+
+Both call the identical connector-host verbs (`capabilities`, `resolve_artifacts`), so connectors plug into either resolver unchanged.
 
 ### Reference types
 
@@ -155,7 +162,7 @@ class ToolSpec:
 
 ### Two delivery paths
 
-**Prompt-based dispatch** (for `wf chat` one-shot mode):
+**Prompt-based dispatch** (for `hashd chat` one-shot mode):
 - Tools described in a prompt section appended by `format_tools_section()`
 - Model signals tool calls via `tool_call` fenced blocks
 - Harness parses, dispatches to handler, injects result, re-invokes
@@ -191,8 +198,8 @@ The connector owns its cache layout. Core doesn't read it directly -- the `ARTIF
 
 ### Cache lifecycle
 
-- **Populate**: `wf <connector> import` or fetch-on-miss
-- **Refresh**: `wf <connector> sync` or staleness check (profile-dependent)
+- **Populate**: `hashd <connector> import` or fetch-on-miss
+- **Refresh**: `hashd <connector> sync` or staleness check (profile-dependent)
 - **Read**: `ARTIFACT_RESOLVER` reads from cache, returns file references
 - **Inspect**: files are plain text/JSON/SVG, human-readable
 
@@ -298,7 +305,7 @@ CONFIG_SECTION = "linear"          # config.yaml section
 CACHE_DIR_NAME = "linear"          # .cache/linear/
 ```
 
-That's the minimum. hashd discovers it, `wf doctor` shows it, `@linear` is reserved. Everything else is optional.
+That's the minimum. hashd discovers it, `hashd doctor` shows it, `@linear` is reserved. Everything else is optional.
 
 ### Step 3: Add configuration
 
@@ -346,7 +353,7 @@ def _check_health(project_dir):
     if not config.api_key:
         results.append(DiagnosticResult("Linear config", False,
             "linear.api_key is empty\n"
-            "      set it:  wf project config set linear.api_key <key>"))
+            "      set it:  hashd project config set linear.api_key <key>"))
         return results
 
     # ... API health checks ...
@@ -415,7 +422,7 @@ TOOLS = [
 ]
 ```
 
-Tools are exposed to agents via MCP (agent stages) and prompt-based dispatch (`wf chat`).
+Tools are exposed to agents via MCP (agent stages) and prompt-based dispatch (`hashd chat`).
 
 ### Step 8: Add autocomplete (optional)
 
@@ -447,7 +454,7 @@ CACHE_STRATEGY = "snapshot"  # or "live" (default), or callable
 ### What you get for free
 
 Without writing any integration code in core:
-- `wf doctor` validates your config and runs your health checks
+- `hashd doctor` validates your config and runs your health checks
 - `@linear:ref` resolves in every prompt surface
 - Your tools appear in MCP and chat
 - Autocomplete works in TUI and CLI

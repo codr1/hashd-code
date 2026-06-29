@@ -7,43 +7,43 @@ Import and reference Figma design artifacts in hashd planning, stories, implemen
 ## CLI Commands
 
 ```
-wf figma connect <figma-url>           # Link a Figma file/project to hashd project
-wf figma list                          # Browse frames, components, pages
-wf figma import <node-id-or-name>      # Import specific frames/components
-wf figma status                        # Show changes since last import
-wf figma sync                          # Pull updates for imported artifacts
-wf figma show <artifact>               # Display a specific imported artifact
+hashd figma connect <figma-url>           # Link a Figma file/project to hashd project
+hashd figma list                          # Browse frames, components, pages
+hashd figma import <node-id-or-name>      # Import specific frames/components
+hashd figma status                        # Show changes since last import
+hashd figma sync                          # Pull updates for imported artifacts
+hashd figma show <artifact>               # Display a specific imported artifact
 ```
 
 ## Example Session
 
 ```
-$ wf --project hbc figma connect https://figma.com/file/abc123/HBC-Designs
+$ hashd --project hbc figma connect https://figma.com/file/abc123/HBC-Designs
 Connected: "HBC Designs" (14 pages, 87 frames, 23 components)
 Stored Figma file ID in projects/hbc/config.yaml
 
-$ wf --project hbc figma list
+$ hashd --project hbc figma list
 Pages:
   1. Onboarding (6 frames)
   2. Job Browsing (12 frames)
   3. Candidate Profile (8 frames)
   4. Components (23 components)
 
-$ wf --project hbc figma list --page "Job Browsing"
+$ hashd --project hbc figma list --page "Job Browsing"
 Frames:
   job-list          Job List (Mobile)         1200x2400
   job-detail        Job Detail View           1200x2400
   job-filter        Filter Panel              800x1600
   job-apply         Apply Flow (3 steps)      3600x2400
 
-$ wf --project hbc figma import job-list job-detail job-filter
+$ hashd --project hbc figma import job-list job-detail job-filter
 Imported 3 frames -> projects/hbc/design/
   design/frames/job-list.md        (structured description + layout)
   design/frames/job-detail.md      (structured description + layout)
   design/frames/job-filter.md      (structured description + layout)
   design/tokens.md                 (updated: 4 new colors, 2 text styles)
 
-$ wf --project hbc figma status
+$ hashd --project hbc figma status
 job-list       up to date
 job-detail     modified 2 hours ago (layout change)
 job-filter     up to date
@@ -139,10 +139,10 @@ Follow the design tokens in @figma:tokens for all UI work.
 Component names should match @figma:components where applicable.
 ```
 
-### In wf workstream add-commit
+### In hashd workstream add-commit
 
 ```
-$ wf workstream add-commit my_ws "Add filter panel per @figma:job-filter"
+$ hashd workstream add-commit my_ws "Add filter panel per @figma:job-filter"
 ```
 
 ## Prompt Injection Points
@@ -172,23 +172,23 @@ One resolver function used by gather_context(), build_full_implement_prompt(), c
 
 ```
 1. Connect Figma
-   $ wf --project hbc figma connect https://figma.com/file/abc123
+   $ hashd --project hbc figma connect https://figma.com/file/abc123
 
 2. Browse and import relevant frames
-   $ wf figma list --page "Job Browsing"
-   $ wf figma import job-list job-detail job-filter
+   $ hashd figma list --page "Job Browsing"
+   $ hashd figma import job-list job-detail job-filter
 
 3. Reference in REQS.md
    ## Job Browsing
    5. **Job list** -- @figma:job-list @figma:job-filter
 
 4. Plan discovers designs automatically
-   $ wf plan
+   $ hashd plan
    -> Discovery prompt includes design inventory
    -> Suggestions reference specific frames
 
 5. Story gets design refs in source_refs + ACs
-   $ wf watch   # claim a suggestion from the plan screen
+   $ hashd watch   # claim a suggestion from the plan screen
    -> source_refs: "REQS.md Section 5, @figma:job-list, @figma:job-filter"
    -> AC: "Job cards match layout in @figma:job-list"
 
@@ -205,15 +205,15 @@ One resolver function used by gather_context(), build_full_implement_prompt(), c
    -> Can flag mismatches
 
 9. Designs change, catch and sync
-   $ wf figma status
-   $ wf figma sync
+   $ hashd figma status
+   $ hashd figma sync
    -> Next run picks up changes
 ```
 
 ## Phasing
 
 ### Phase 1 (first cut)
-- `wf figma connect` / `list` / `import` / `show` / `status` / `sync`
+- `hashd figma connect` / `list` / `import` / `show` / `status` / `sync`
 - Local storage in `design/` with structured markdown
 - `@figma:` resolution in gather_context() and build_full_implement_prompt()
 - Design section injection into planning + implementation prompts
@@ -224,7 +224,7 @@ One resolver function used by gather_context(), build_full_implement_prompt(), c
 - Design token extraction as CSS variables / language-specific constants
 - Image export alongside structured descriptions
 - Figma webhook for push-based updates
-- `wf figma diff` showing visual before/after
+- `hashd figma diff` showing visual before/after
 
 ## Config Changes
 

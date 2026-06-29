@@ -13,20 +13,20 @@ Jira issues, or run a background sync daemon.
 3. Configure hashd:
 
 ```bash
-wf project config set jira.url https://your-company.atlassian.net
-wf project config set jira.project_key PROJ
-wf project config set jira.email you@company.com
-wf project config set jira.api_token <your-api-token>
-wf jira setup
+hashd project config set jira.url https://your-company.atlassian.net
+hashd project config set jira.project_key PROJ
+hashd project config set jira.email you@company.com
+hashd project config set jira.api_token <your-api-token>
+hashd jira setup
 ```
 
 ### Jira Server/Data Center
 
 ```bash
-wf project config set jira.url https://jira.company.local
-wf project config set jira.project_key PROJ
-wf project config set jira.pat <your-personal-access-token>
-wf jira setup
+hashd project config set jira.url https://jira.company.local
+hashd project config set jira.project_key PROJ
+hashd project config set jira.pat <your-personal-access-token>
+hashd jira setup
 ```
 
 ## Environment Variables

@@ -6,7 +6,7 @@ developer docs, and release artifacts may cite.
 
 ## Client And Server Boundary
 
-`wf` is a thin Go client. Operator-visible diagnostics, queries, and mutations
+`hashd` is a thin Go client. Operator-visible diagnostics, queries, and mutations
 go through the hashd-server REST API. Local mode means the client and server
 run on the same host. Remote mode means the client runs elsewhere. Both modes
 use the same code path.
@@ -20,7 +20,7 @@ CLI commands, subcommands, flags, and REST API patterns are public interfaces.
 Changing or adding them requires explicit maintainer agreement on naming,
 placement, and behavior before implementation.
 
-Every `wf` command must work non-interactively. Commands that prompt for
+Every `hashd` command must work non-interactively. Commands that prompt for
 confirmation need a non-interactive confirmation flag, and commands that ask
 for values need flags or arguments that provide those values in scripts.
 
