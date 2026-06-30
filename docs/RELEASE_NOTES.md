@@ -4,6 +4,28 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.3 - 2026-06-30
+
+A follow-up to 0.9.2 that restores local-only merges and makes a declined breakdown
+recoverable.
+
+### What's Changed
+
+- **Local-only merges work again.** A project with no git remote couldn't merge -- the
+  pre-merge rebase/test safety gate added in 0.9.2 unconditionally fetched `origin` and
+  aborted when there wasn't one. It now sources the latest base locally when no remote is
+  configured, so the same rebase-onto-latest-then-retest gate runs for local and remote
+  projects alike.
+
+- **A declined breakdown is now a recoverable operator decision, not a dead end.** When the
+  breakdown step declines to break a story down, it blocks with the agent's reason and a
+  proceed/hold choice -- `hashd answer <ws> proceed` to build it anyway, or `hold` to fix
+  the story first -- instead of failing with an opaque "no JSON" error. The step is also
+  clearer that REQS work-in-progress markers are internal bookkeeping (not a "not ready"
+  signal) and that a plan carrying more detail than REQS is expected.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.2...v0.9.3
+
 ## v0.9.2 - 2026-06-30
 
 A follow-up to 0.9.1 that fixes a review-loop stall on stories that span more than
