@@ -4,6 +4,46 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.1 - 2026-06-30
+
+A focused follow-up to 0.9.0 that unblocks autonomous end-to-end runs on a clean
+install, brings live streaming to Codex chat, and repairs several agents' headless
+commands.
+
+### What's Changed
+
+- **Breakdown no longer refuses ready stories.** A persona line shipped in 0.9.0 told
+  the breakdown stage to "refuse to break down a story that isn't ready" -- and on a
+  requirements-anchored project it read hashd's *own* internal WIP markers (which claim a
+  region of REQS for an active story) as a human "not ready" signal and refused,
+  dead-ending the run before any code was written. That directive is reverted so breakdown
+  proceeds normally; a readiness check with proper, surfaced refusal handling will return
+  in a later release.
+
+- **Merge gate finds the bundled gitleaks.** The mandatory secret-scan merge gate searched
+  for `gitleaks` on `PATH` only, so a fresh install -- where the installer places gitleaks
+  in hashd's own tools directory rather than on `PATH` -- failed every merge with "install
+  gitleaks" even though it was already present. The gate now resolves bundled tools the same
+  tools-dir-first way the rest of hashd does (honoring `$HASHD_TOOLS_DIR`, falling back to
+  `PATH`).
+
+- **Codex chat reaches parity with Claude.** The in-TUI thinking-partner chat now streams
+  Codex replies token-by-token over the app-server transport, and Codex gains the read-only
+  hashd MCP tool to query project state over that same transport -- bringing it to
+  co-primary parity with Claude for chat.
+
+- **Agent fixes across the fleet.** Gemini's headless invocation is fixed and live-verified
+  so it runs non-interactively again; OpenCode's non-chat shapes no longer emit broken
+  flags; and `_resume` stages now inherit their original base agent (covered by a live Codex
+  regression test), so a resumed stage runs on the same agent it started on.
+
+- **Internal robustness and cleanup.** hashd resolves which Python interpreter its
+  subprocesses use through a single shared resolver, fixing divergence for non-default
+  virtualenvs, and a batch of orphaned Python modules plus dead, uncalled functions was
+  removed (a net reduction of roughly nine hundred lines).
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.0...v0.9.1
+
 ## v0.9.0 - 2026-06-29
 
 A major release on three fronts: hashd now runs as a real **client/server** (CLI and
