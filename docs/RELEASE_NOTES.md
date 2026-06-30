@@ -4,6 +4,25 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.2 - 2026-06-30
+
+A follow-up to 0.9.1 that fixes a review-loop stall on stories that span more than
+one micro-commit.
+
+### What's Changed
+
+- **Micro-commit reviews no longer stall on deferred work.** The per-commit reviewer
+  scored its confidence against the *whole story's* acceptance criteria, so an early
+  micro-commit that legitimately leaves some criteria to later commits (for example,
+  validation handled in its own commit) couldn't reach the confidence bar and looped
+  through implement/review until it exhausted its attempts. The micro-commit reviewers now
+  score against the commit's own scope -- story acceptance criteria are shown for context,
+  and criteria a commit isn't responsible for no longer lower its confidence or raise
+  findings. The whole-branch final review still verifies every acceptance criterion before
+  merge.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.1...v0.9.2
+
 ## v0.9.1 - 2026-06-30
 
 A focused follow-up to 0.9.0 that unblocks autonomous end-to-end runs on a clean
