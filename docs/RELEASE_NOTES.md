@@ -4,6 +4,28 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.5 - 2026-07-01
+
+Attributes work to the user who did it (team mode), and lets the implementer resolve
+non-regression test conflicts it previously stalled on.
+
+### What's Changed
+
+- **Work is attributed to the acting user.** Stories, workstreams, suggestions, and
+  clarification answers now record which user created or acted on them, backed by
+  `user_id` columns on the core work items; existing unowned items are backfilled to
+  the host owner. In team mode this makes "who did what" queryable. Solo mode is
+  unaffected.
+
+- **Legitimate test conflicts no longer stall the implementer.** When a failing test
+  is judged a non-regression -- your change is fine, but the failure comes from a
+  superseded test or an environmental/setup/harness issue -- the implementer is now
+  explicitly authorized to fix that root cause, even in a file outside the current
+  commit, while keeping the fix tightly scoped. Previously it documented the fix but
+  wouldn't make it, and the commit looped to exhaustion.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.4...v0.9.5
+
 ## v0.9.4 - 2026-07-01
 
 Adds multi-user / team-server identity, and finishes the local-only merge story so AI
