@@ -211,6 +211,8 @@ ORDER BY id DESC LIMIT 10;
 
 **Design rationale:** REQS.md is a living document -- lines get deleted as stories consume them. Section references become meaningless. Paraphrasing the requirement text creates a frozen, readable record. The `reqs_refs` field on suggestions (discovery phase) still uses section references, which is fine since REQS.md exists at discovery time.
 
+**Verbatim capture at burn-down (`requirement_burned` event):** `source_refs` is the story's *reading* of the requirement (a paraphrase), not the original wording. When a story merges and its WIP block is removed from REQS.md (`reqs.DeleteReqsSections` at merge archival), the server records a durable `requirement_burned` event in the `events` table holding the **verbatim** requirement text, the consuming `story_id`, the completion timestamp, and -- when REQS.md is git-tracked -- the source commit ref (so `git show <ref>:<reqs_path>` retrieves the full requirements file as it stood). This closes the gap between the paraphrase and the exact original, and makes "completed requirements, by story, in chronological order" a query over those events. Recorded server-side in `server/internal/api/spec.go` (`recordRequirementBurned`); the text the burn-down extracts was previously discarded.
+
 ### Phase 3: Lineage query commands -- DONE
 
 **Goal:** Walk the chain in either direction from any point.

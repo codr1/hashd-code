@@ -4,6 +4,39 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.4 - 2026-07-01
+
+Adds multi-user / team-server identity, and finishes the local-only merge story so AI
+conflict resolution works without a remote.
+
+### What's Changed
+
+- **Multi-user identity and team-server mode.** hashd now supports real users. A host
+  provisions accounts (users table + host-local provisioning); a new user completes setup
+  with a self-service password (replacing the shared setup key); and `hashd login` exchanges
+  that password for a user-scoped bearer token. Deployment modes make it explicit: **solo**
+  stays the default -- one implicit user, no auth ceremony, exactly like today -- while
+  **team** enforces per-user identity on every request. Existing single-user setups are
+  unaffected.
+
+- **AI conflict resolution works on local-only repos.** `hashd merge --ai-resolve` assumed a
+  git remote and aborted immediately (without ever running the resolver) on a project with
+  no `origin`. It now rebases against the local base and resolves locally, matching the
+  local-merge support added in 0.9.3.
+
+- **Reviewers see the implementer's scope reasoning.** The per-commit reviewer can now read
+  the implementer's optional `reason` (why work was deferred -- e.g. "tests belong to a
+  later commit") and is told to verify it against this commit's scope rather than guess, so
+  it stops docking confidence on deferrals it had to infer.
+
+- **Completed requirements are captured verbatim at merge.** When a story merges and its
+  requirement block is removed from REQS.md, hashd now records a durable `requirement_burned`
+  event holding the exact original wording, the consuming story, the completion timestamp,
+  and (when REQS.md is git-tracked) the source commit -- so the full history of completed
+  requirements is queryable instead of being discarded on burn-down.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.3...v0.9.4
+
 ## v0.9.3 - 2026-06-30
 
 A follow-up to 0.9.2 that restores local-only merges and makes a declined breakdown

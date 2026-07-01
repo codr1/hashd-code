@@ -802,6 +802,32 @@ else
     warn_external_tools "could not download installer script"
 fi
 
+step "Configuring owner identity"
+# hashd-server fails closed when no user is configured, so the first user -- the
+# active, keyless owner (the solo default identity) -- is created before the
+# server starts. This installer is non-interactive (curl | bash), so the owner is
+# derived from git config, falling back to $USER@host. Idempotent: skip if any
+# user already exists.
+if "$HASHD_BIN" admin user list 2>/dev/null | grep -q '@'; then
+    ok "Owner already configured"
+else
+    OWNER_NAME="$(git config --global user.name 2>/dev/null || true)"
+    OWNER_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+    [ -n "$OWNER_EMAIL" ] || OWNER_EMAIL="${USER:-hashd}@$(hostname -s 2>/dev/null || echo localhost)"
+    [ -n "$OWNER_NAME" ] || OWNER_NAME="${USER:-hashd}"
+    OWNER_CREATED=""
+    if [ -n "$OWNER_NAME" ]; then
+        "$HASHD_BIN" admin user add "$OWNER_EMAIL" --name "$OWNER_NAME" >/dev/null 2>&1 && OWNER_CREATED=1 || true
+    else
+        "$HASHD_BIN" admin user add "$OWNER_EMAIL" >/dev/null 2>&1 && OWNER_CREATED=1 || true
+    fi
+    if [ -n "$OWNER_CREATED" ]; then
+        ok "Owner: $OWNER_EMAIL"
+    else
+        printf '%s   could not create owner automatically; run: hashd admin user add %s%s\n' "$C_DIM" "$OWNER_EMAIL" "$C_RESET"
+    fi
+fi
+
 step "Starting hashd services"
 # `hashd restart` brings up Prefect + worker and registers the INSTALL-OWNED
 # infrastructure, including the housekeeping cron, on this first pass -- it
