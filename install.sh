@@ -8,9 +8,6 @@ set -e
 
 REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
-COMPLETION_BLOCK='source <(hashd completion bash)
-source <(wf completion bash)
-source <(ha completion bash)'
 
 # Forge CLI pinned versions. Bump in lockstep with hashd release cuts.
 GH_VERSION="2.93.0"
@@ -226,63 +223,98 @@ node_install_hint() {
     fi
 }
 
-# ensure_tools_dir_on_path: wire the bundled-tools dir (~/.hashd/tools/bin,
-# honoring $HASHD_TOOLS_DIR) into the user's shell rc PATH, the same way
-# pipx/uv wire ~/.local/bin. install-tools.sh drops gitleaks + git-delta there;
-# without this, they resolve for hashd's tools-dir-aware code but not as bare
-# `gitleaks`/`delta` on PATH (subprocesses, the user's own shell). Idempotent:
-# the managed block is keyed by a marker so re-runs don't duplicate it.
-ensure_tools_dir_on_path() {
-    local tools_dir="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}"
-    local bashrc="${HOME}/.bashrc"
-    local marker="# hashd tools dir (managed by hashd install scripts)"
+# rc_targets: the shell rc files the installer manages (PATH + completions).
+# Always ~/.bashrc (bash). macOS Terminal runs zsh and never sources ~/.bashrc,
+# so include ~/.zshrc on macOS -- and on Linux too when the login shell is zsh.
+# Without this the freshly installed hashd/wf entry points and the bundled tools
+# never land on the zsh PATH, and `hashd`/`wf` read as command-not-found.
+rc_targets() {
+    printf '%s\n' "$HOME/.bashrc"
+    case "${SHELL:-}" in
+        *zsh*) printf '%s\n' "$HOME/.zshrc"; return ;;
+    esac
+    [ "${PLATFORM:-}" = "macosx" ] && printf '%s\n' "$HOME/.zshrc"
+}
 
-    mkdir -p "$tools_dir"
+# ensure_dir_on_path: put DIR on PATH for the rest of this run and persist it
+# into every rc_targets file, keyed by MARKER so re-runs don't duplicate. Used
+# for the entry-points dir (~/.local/bin -- uv/pipx wire it for bash but not
+# reliably for zsh) and the bundled-tools dir (~/.hashd/tools/bin).
+ensure_dir_on_path() {
+    local dir="$1" marker="$2" rc
+    mkdir -p "$dir"
 
     # Make it effective for the rest of this install run too.
     case ":$PATH:" in
-        *":$tools_dir:"*) ;;
-        *) export PATH="$tools_dir:$PATH" ;;
+        *":$dir:"*) ;;
+        *) export PATH="$dir:$PATH" ;;
     esac
 
-    mkdir -p "$(dirname "$bashrc")"
-    touch "$bashrc"
-    if grep -qF "$marker" "$bashrc"; then
-        return 0
-    fi
-    if [[ -s "$bashrc" ]]; then
-        printf '\n' >> "$bashrc"
-    fi
-    printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$tools_dir" >> "$bashrc"
+    while IFS= read -r rc; do
+        mkdir -p "$(dirname "$rc")"
+        touch "$rc"
+        if grep -qF "$marker" "$rc"; then
+            continue
+        fi
+        if [[ -s "$rc" ]]; then
+            printf '\n' >> "$rc"
+        fi
+        printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$dir" >> "$rc"
+    done < <(rc_targets)
 }
 
-install_bash_completion() {
-    local bashrc="${HOME}/.bashrc"
-    local tmp
+# ensure_tools_dir_on_path: persist the bundled-tools dir (~/.hashd/tools/bin,
+# honoring $HASHD_TOOLS_DIR) onto PATH. install-tools.sh drops gitleaks +
+# git-delta there; without this they resolve for hashd's tools-dir-aware code
+# but not as bare `gitleaks`/`delta` on the user's own PATH.
+ensure_tools_dir_on_path() {
+    ensure_dir_on_path "${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}" \
+        "# hashd tools dir (managed by hashd install scripts)"
+}
 
-    mkdir -p "$(dirname "$bashrc")"
-    touch "$bashrc"
-    tmp="$(mktemp)"
+# install_completions: wire shell completions into each rc_targets file, per
+# shell -- bash rc gets `completion bash`, zsh rc gets `completion zsh` (which
+# cobra emits as a compdef script, so it needs compinit first). Idempotent: the
+# prior managed block and any legacy hand-written wf-completion lines are
+# stripped before the current block is appended, so re-runs don't stack.
+install_completions() {
+    local rc tmp block
 
-    # Strip any legacy hashd/wf completion lines. Use grep, not awk: minimal
-    # distro/container images ship coreutils (grep) but not always gawk. grep -v
-    # exits 1 when every line is filtered out (e.g. an all-completions bashrc),
-    # which is not an error here, so guard with `|| true`.
-    grep -vE \
-        -e '^[[:space:]]*# hashd/wf shell completions[[:space:]]*$' \
-        -e '^[[:space:]]*# hashd/wf completions \(managed by .* drop after v1\.0 once everyone has migrated\)[[:space:]]*$' \
-        -e '^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
-        -e '^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
-        -e '^[[:space:]]*source[[:space:]]+<\(wf completion bash\)[[:space:]]*$' \
-        -e '^[[:space:]]*source[[:space:]]+<\(hashd completion bash\)[[:space:]]*$' \
-        -e '^[[:space:]]*source[[:space:]]+<\(ha completion bash\)[[:space:]]*$' \
-        "$bashrc" > "$tmp" || true
-    mv "$tmp" "$bashrc"
+    while IFS= read -r rc; do
+        mkdir -p "$(dirname "$rc")"
+        touch "$rc"
+        tmp="$(mktemp)"
 
-    if [[ -s "$bashrc" ]]; then
-        printf '\n' >> "$bashrc"
-    fi
-    printf '%s\n%s\n' "$COMPLETION_MARKER" "$COMPLETION_BLOCK" >> "$bashrc"
+        # Strip the prior managed block + any legacy hashd/wf completion lines.
+        # Use grep, not awk: minimal images ship coreutils (grep) but not always
+        # gawk. grep -v exits 1 when every line is filtered out, which is not an
+        # error here, so guard with `|| true`.
+        grep -vE \
+            -e '^[[:space:]]*# hashd/wf shell completions[[:space:]]*$' \
+            -e '^[[:space:]]*# hashd/wf completions \(managed by .* drop after v1\.0 once everyone has migrated\)[[:space:]]*$' \
+            -e '^[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
+            -e '^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
+            -e '^[[:space:]]*autoload -Uz compinit && compinit -u[[:space:]]*$' \
+            -e '^[[:space:]]*source[[:space:]]+<\((hashd|wf|ha) completion (bash|zsh)\)[[:space:]]*$' \
+            "$rc" > "$tmp" || true
+        mv "$tmp" "$rc"
+
+        if [[ -s "$rc" ]]; then
+            printf '\n' >> "$rc"
+        fi
+        case "$rc" in
+            *.zshrc)
+                # cobra's zsh completion is a compdef script; compinit must have
+                # run for it to register. compinit is safe to re-run (-u skips
+                # the insecure-directory prompt in a non-interactive rc).
+                block=$'autoload -Uz compinit && compinit -u\nsource <(hashd completion zsh)\nsource <(wf completion zsh)\nsource <(ha completion zsh)'
+                ;;
+            *)
+                block=$'source <(hashd completion bash)\nsource <(wf completion bash)\nsource <(ha completion bash)'
+                ;;
+        esac
+        printf '%s\n%s\n' "$COMPLETION_MARKER" "$block" >> "$rc"
+    done < <(rc_targets)
 }
 
 promote_pipx_binary() {
@@ -751,7 +783,12 @@ bin_dir="$(dirname "$HASHD_BIN")"
 ln -sf hashd "$bin_dir/wf"
 ln -sf hashd "$bin_dir/ha"
 
-install_bash_completion
+# uv/pipx wire the entry-points dir onto PATH for bash, but not reliably for
+# zsh -- so hashd/wf land in ~/.local/bin yet read as command-not-found in a
+# fresh macOS (zsh) terminal. Persist it into the zsh rc too.
+ensure_dir_on_path "$bin_dir" "# hashd bin dir (managed by hashd install scripts)"
+
+install_completions
 
 # --- Install external tools (gitleaks, git-delta, ...) ---
 # Delegates to scripts/install-tools.sh from main -- the same script
@@ -878,7 +915,7 @@ note "Gitea:     tea login add --name work --url https://git.example.com --token
 echo ""
 
 if ! command -v hashd &>/dev/null; then
-    note "hashd is not on your PATH yet -- run 'source ~/.bashrc' or open a new terminal."
+    note "hashd is not on your PATH yet -- open a new terminal (or: source ~/.zshrc on macOS, ~/.bashrc on Linux)."
     echo ""
 fi
 

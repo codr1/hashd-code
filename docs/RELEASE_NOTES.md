@@ -4,6 +4,29 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.7 - 2026-07-02
+
+Fixes the fresh-macOS binary install: `hashd`/`wf` now land on the zsh PATH,
+completions work, and the bundled secret scanner no longer trips a timeout on
+first run.
+
+### What's Changed
+
+- **Fresh macOS installs work end to end.** The binary installer wired PATH and
+  shell completions only into `~/.bashrc`, which macOS Terminal (zsh) never
+  sources -- so `hashd`/`wf` read as command-not-found and `hashd <TAB>`
+  completion did nothing. The installer now writes the managed PATH + completion
+  blocks to `~/.zshrc` too (on macOS, or when the login shell is zsh), including
+  the entry-points directory. Linux and bash behavior is unchanged.
+
+- **gitleaks no longer times out on first run.** The bundled secret scanner is now
+  warmed once at install time -- paying macOS's one-time Gatekeeper cost up front
+  -- and ad-hoc-signed with its quarantine attribute cleared, so `hashd doctor`'s
+  dependency check passes on the first run instead of being killed by the probe
+  timeout. That per-check timeout is also raised to 1s as a backstop.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.6...v0.9.7
+
 ## v0.9.6 - 2026-07-02
 
 Makes provisioning fail loud when a fresh worktree can't run its toolchain, and

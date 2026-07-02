@@ -81,6 +81,29 @@ sha256_file() {
     fi
 }
 
+# harden_darwin_binary: on macOS a freshly-downloaded binary pays a one-time
+# Gatekeeper/notarization cost on first exec (and, if unsigned, may be refused
+# outright). Strip the quarantine bit and ad-hoc re-sign so the first run is
+# cheap and never blocked. Mirrors scripts/fetch-cbm.sh. codesign/xattr are
+# macOS base tools; tolerate failures rather than fail the install over a
+# hardening nicety.
+harden_darwin_binary() {
+    [ "$OS" = darwin ] || return 0
+    local bin="$1"
+    xattr -d com.apple.quarantine "$bin" 2>/dev/null || true
+    codesign --remove-signature "$bin" 2>/dev/null || true
+    codesign --sign - --force "$bin" 2>/dev/null || true
+}
+
+# warm_tool: run a tool once so its expensive first-launch cost (macOS Gatekeeper
+# assessment / dyld closure build) is paid here at install time, not later on a
+# latency-budgeted probe like `hashd doctor` -- which would SIGKILL a cold exec
+# mid-assessment and then re-time-out on every run. Output and exit code are
+# discarded; this is a warm-up, not a gate.
+warm_tool() {
+    "$@" >/dev/null 2>&1 || true
+}
+
 # ---------------------------------------------------------------------
 # gitleaks -- secret scanner used by `hashd project add` and the pre-commit
 # hook. Version pinned; bumps go in a dedicated PR.
@@ -149,6 +172,11 @@ install_gitleaks() {
         warn_gitleaks_install_failed "could not mark $bin executable"
         return 0
     fi
+    # Unlike delta below, gitleaks has no post-install version check, so without
+    # this its first-ever exec would be hashd doctor's -- cold, and killed by the
+    # per-probe timeout. Harden + warm here so doctor only ever sees a warm binary.
+    harden_darwin_binary "$bin"
+    warm_tool "$bin" version
     log "gitleaks" "$version -> $bin"
 }
 
@@ -240,6 +268,9 @@ install_delta() {
         warn_delta_install_failed "could not write $bin"
         return 0
     fi
+
+    # Harden before the version check below, which doubles as the warm-up run.
+    harden_darwin_binary "$bin"
 
     local installed_after
     installed_after="$("$bin" --version 2>/dev/null | extract_semver || true)"
