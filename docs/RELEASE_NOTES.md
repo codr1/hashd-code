@@ -4,6 +4,31 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.6 - 2026-07-02
+
+Makes provisioning fail loud when a fresh worktree can't run its toolchain, and
+surfaces auth and mode in the watch dashboard.
+
+### What's Changed
+
+- **Baseline gate fails loud on a missing toolchain.** When a fresh worktree can't
+  launch its configured test/build runner -- exit 126/127 or an exec launch error,
+  e.g. a local-toolchain project whose dependencies aren't reachable from the
+  worktree -- provisioning now stops at `provisioning / failed` with an actionable
+  diagnostic (make the runner resolvable from a fresh worktree, or configure a
+  `hooks.setup` install) instead of silently passing and surfacing the failure
+  cryptically a few commits later. A legitimate greenfield non-zero exit (no tests
+  yet) still passes.
+
+- **Watch dashboard shows auth and mode.** The `hashd watch` dashboard header now
+  surfaces the server's authentication surface and deployment mode.
+
+- **Docs use the canonical `hashd` command.** QUICKSTART and the product docs now
+  reference `hashd` throughout instead of the legacy `wf` alias (the alias still
+  works).
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.5...v0.9.6
+
 ## v0.9.5 - 2026-07-01
 
 Attributes work to the user who did it (team mode), and lets the implementer resolve
