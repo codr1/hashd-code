@@ -852,17 +852,22 @@ else
     OWNER_EMAIL="$(git config --global user.email 2>/dev/null || true)"
     [ -n "$OWNER_EMAIL" ] || OWNER_EMAIL="${USER:-hashd}@$(hostname -s 2>/dev/null || echo localhost)"
     [ -n "$OWNER_NAME" ] || OWNER_NAME="${USER:-hashd}"
-    OWNER_CREATED=""
+    OWNER_ERR=""
     if [ -n "$OWNER_NAME" ]; then
-        "$HASHD_BIN" admin user add "$OWNER_EMAIL" --name "$OWNER_NAME" >/dev/null 2>&1 && OWNER_CREATED=1 || true
+        OWNER_ERR="$("$HASHD_BIN" admin user add "$OWNER_EMAIL" --name "$OWNER_NAME" 2>&1)" || OWNER_ADD_FAILED=1
     else
-        "$HASHD_BIN" admin user add "$OWNER_EMAIL" >/dev/null 2>&1 && OWNER_CREATED=1 || true
+        OWNER_ERR="$("$HASHD_BIN" admin user add "$OWNER_EMAIL" 2>&1)" || OWNER_ADD_FAILED=1
     fi
-    if [ -n "$OWNER_CREATED" ]; then
-        ok "Owner: $OWNER_EMAIL"
-    else
-        printf '%s   could not create owner automatically; run: hashd admin user add %s%s\n' "$C_DIM" "$OWNER_EMAIL" "$C_RESET"
+    if [ -n "${OWNER_ADD_FAILED:-}" ]; then
+        # Hard-fail: hashd-server fails closed without an owner, so a swallowed
+        # failure here just surfaces later as a dead server. Better to abort the
+        # install loudly with the exact recovery command.
+        die "could not provision the hashd owner" \
+            "install.owner" \
+            "hashd-server fails closed until an active owner exists, so the install is not usable without one.\n${OWNER_ERR}" \
+            "Create it manually, then re-run the installer: $HASHD_BIN admin user add $OWNER_EMAIL"
     fi
+    ok "Owner: $OWNER_EMAIL"
 fi
 
 step "Starting hashd services"
@@ -914,10 +919,21 @@ note "Bitbucket: bkt auth login --kind cloud --web"
 note "Gitea:     tea login add --name work --url https://git.example.com --token \$TOKEN"
 echo ""
 
-if ! command -v hashd &>/dev/null; then
-    note "hashd is not on your PATH yet -- open a new terminal (or: source ~/.zshrc on macOS, ~/.bashrc on Linux)."
-    echo ""
+# The install always writes PATH + completions into your shell rc, so the
+# current shell needs a reload before hashd, its completions, and PATH are live.
+# We can't source your interactive shell from here (a child process can't mutate
+# its parent's environment), so tell you exactly what to run.
+case "${SHELL:-}" in
+    *zsh*) RELOAD_RC="$HOME/.zshrc" ;;
+    *bash*) RELOAD_RC="$HOME/.bashrc" ;;
+    *) [ "${PLATFORM:-}" = "macosx" ] && RELOAD_RC="$HOME/.zshrc" || RELOAD_RC="" ;;
+esac
+if [ -n "$RELOAD_RC" ]; then
+    printf '%sReload your shell to finish:%s source %s   (or open a new terminal)\n' "$C_BOLD" "$C_RESET" "$RELOAD_RC"
+else
+    printf '%sReload your shell to finish:%s open a new terminal so PATH + completions take effect\n' "$C_BOLD" "$C_RESET"
 fi
+echo ""
 
 # --- One inviting next action ---
 printf '%sNext:%s register your first repo\n' "$C_BOLD" "$C_RESET"
