@@ -4,6 +4,69 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.9 - 2026-07-05
+
+The butter release: a day of hunting operator-experience bugs end to end.
+Quitting the watch TUI is instant instead of a 6-second stall, restarts no
+longer leak event-bus daemons, upgrades stop re-running first-install
+ceremony, and an operator-level smoke suite now drives hashd the way a
+human does so this class of bug gets caught before it ships.
+
+### What's Changed
+
+- **Quitting `hashd watch` is instant.** Every quit (and project switch)
+  stalled ~6.3 seconds: the event subscriber's stop path closed the SSE
+  response to interrupt a blocked read, but closing a file descriptor does
+  not wake a thread parked in recv() -- only a socket shutdown does. stop()
+  now shuts the raw socket down first. Measured through the real TUI:
+  6.35s before, 0.33s after. (#1215)
+
+- **`hashd restart` no longer leaks event-bus daemons.** Every restart
+  stacked a fresh ZMQ forwarder pair on top of the old one (the pid file
+  named a process whose group id did not exist, so the stop silently killed
+  nothing), and a superseded pair's eventual exit deleted the live pair's
+  socket files -- silently killing real-time updates for the TUI, Telegram,
+  and web. Stops now resolve the real process group, cleanup only removes
+  files it still owns, and a sweep converges boxes that already accumulated
+  strays back to exactly one forwarder on the next restart. (#1207)
+
+- **Upgrades stop re-running first-install ceremony.** `setup.sh` now
+  detects a working install and: never rewrites your per-stage agent
+  assignments (previously it re-applied the default to all stages on every
+  upgrade), no longer hard-fails on missing golangci-lint (a lint tool is
+  needed to contribute, not to run hashd), and closes with an upgrade
+  summary instead of "register your project" onboarding copy. (#1208)
+
+- **Schema-gate errors say what they looked at.** "schema checkpoint behind
+  source" now names the exact ops root, checkpoint file, and both versions,
+  plus a HASHD_OPS_ROOT hint -- so a stale leftover install can no longer
+  produce an undebuggable refusal. (#1210)
+
+- **Operator-level smoke suite, wired into every release.** A hermetic
+  harness boots a fully isolated hashd instance and drives it the way an
+  operator does: `hashd watch` under a real pty (paints, owns the terminal
+  foreground, quits clean), restart lifecycle (the forwarder-leak detector
+  is a hard gate), an event-bus roundtrip, and a no-TTY contract table.
+  Runs via `task smoke` locally, and every release candidate must now pass
+  it -- plus a Tier 3 upgrade gate that installs the previous release,
+  populates it with state, upgrades to the candidate, and asserts the
+  server comes back healthy with the owner and data intact.
+  (#1209, #1214, #1216, #1217)
+
+- Internal: release tooling fails a cut with missing release notes in
+  seconds instead of after the full CI pipeline, and stops compiling
+  toolchain binaries just to record their version strings (~2.5 minutes
+  saved per release). Code generators write atomically so parallel build
+  chains can no longer truncate a generated artifact. Release builds
+  actually reuse their Go module and C-compile caches across cuts (the
+  Go cache restore was silently failing; the ccache directory died with
+  the runner). Test-suite hygiene: TUI tests no longer leak a fake server
+  URL across tests (the suite dropped from 112s to under 4s) and the api
+  dispatch tests no longer sleep through production retry backoffs
+  (70s to 38s cold). (#1206, #1212)
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.8...v0.9.9
+
 ## v0.9.8 - 2026-07-05
 
 Fixes the two ways a working install could go dark: `hashd watch` freezing on
