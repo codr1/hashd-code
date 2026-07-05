@@ -4,6 +4,57 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.8 - 2026-07-05
+
+Fixes the two ways a working install could go dark: `hashd watch` freezing on
+a blank screen at launch, and upgrades stranding a solo server that then
+refused to start.
+
+### What's Changed
+
+- **`hashd watch` no longer freezes at launch.** Since v0.9.0 the CLI started
+  the Python TUI in its own background process group (for clean Ctrl-C
+  group-kill), but never handed it the terminal foreground -- and a TUI in a
+  background group suspends itself waiting for an `fg` that never comes. The
+  operator saw a frozen blank screen before the first paint, in local and
+  remote mode alike. The launcher now starts the TUI's process group as the
+  terminal foreground group and takes the terminal back when it exits; Ctrl-C
+  reaches the TUI directly. Scripted / non-tty invocations are unchanged.
+  (#1205)
+
+- **Upgrades can no longer strand a solo server without an owner.** A
+  solo-mode server that starts with no active user now self-heals by
+  provisioning the implicit owner (derived from git config, the same way the
+  installers do) instead of failing closed. A leftover non-active row for the
+  same email is promoted, not collided with. Manual source upgrades
+  (git pull + rebuild + restart) get a speed bump: a bare `hashd restart`
+  that is really an upgrade asks for `--yes` so it isn't mistaken for a
+  routine restart, and the installers hard-fail if owner provisioning fails
+  instead of leaving a dead server behind. Team mode still fails closed on
+  missing identity. (#1204)
+
+- **One event surface for the watch TUI.** The TUI now consumes the server's
+  SSE stream in local mode too, instead of opening its own ZMQ socket --
+  local and remote share one code path, and the footer indicator now says
+  "server disconnected" honestly. Remote mode also gains a client/server
+  version banner: when the connecting CLI's build differs from the server's,
+  the status line flags it in red (banner only, never blocks). (#1203)
+
+- **Autonomous runs no longer park on final-review concerns.** In autonomous
+  mode a final-review `CONCERNS` verdict now feeds a bounded self-heal loop
+  (matching how the per-commit qa-gate already auto-continues) instead of
+  stopping the unattended run at the first concern. Gatekeeper and supervised
+  behavior are unchanged. (#1201)
+
+- **Quieter doctor and install output.** Dropped the per-tool "dev-only;
+  skipped in packaged install" noise, the raw schema version number in
+  `hashd status` (only a mismatch is actionable), and other non-actionable
+  chatter. (#1202)
+
+- Internal: dead Python swept out (net -322 lines). (#1200)
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.7...v0.9.8
+
 ## v0.9.7 - 2026-07-02
 
 Fixes the fresh-macOS binary install: `hashd`/`wf` now land on the zsh PATH,
