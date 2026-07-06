@@ -4,6 +4,49 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.10 - 2026-07-06
+
+Remote and team-server mode, made real. Driving a hashd-server from another
+machine over TLS worked in pieces but fell apart at the one step that matters --
+restarting the server -- and was undocumented. This release fixes the restart
+path, adds a one-command way to onboard a teammate, and ships the manual that
+explains how to run hashd for more than one person.
+
+### What's Changed
+
+- **`hashd restart` supervises an off-loopback TLS server instead of killing
+  it.** When the server listens on a LAN address it serves HTTPS with a
+  self-signed certificate and requires a bearer token on every request --
+  including the health probe the restart supervisor uses. The supervisor sent a
+  tokenless plain-HTTP probe, read the connection failure as "server dead," and
+  tore the server down on every restart. It now probes with the resolved token
+  over TLS, pinning the server's persisted certificate fingerprint, and the
+  probe never writes TLS material. This was the last thing standing between
+  "remote mode works" and "remote mode works after a restart." (#1218)
+
+- **`hashd admin user add` mints a per-user access token.** Adding a user now
+  returns a single token that carries both the bearer secret and the server's
+  certificate fingerprint, so a teammate pairs with one
+  `hashd server set <url> --token <token>` -- no separate certificate step and
+  no second command. The token is attributed to that user even in solo mode.
+  Full autocomplete and `--help`; the `admin` command group stays hidden. (#1218)
+
+- **Remote and team-server mode are documented.** New `docs/REMOTE.md` covers
+  the trust model (self-signed cert + fingerprint-in-token pinning, off-loopback
+  fails closed), making a server reachable, provisioning users, pairing a
+  client, the optional password-login path, and troubleshooting. README and
+  QUICKSTART gain real onboarding sections for all three shapes -- solo-local, a
+  shared server, and the unmanaged solo-shared-repo layout -- and the E2E plan's
+  remote phase is now an executable mirror of that manual. (#1219)
+
+- Internal: the release tooling's run-finder tolerates a local clock running
+  ahead of GitHub (a WSL2 cut no longer dies waiting for a dispatched run it
+  cannot see), and a comment records why the automatic TLS certificate is reused
+  across listen-host changes rather than regenerated -- regenerating would change
+  the pinned fingerprint and break every already-paired client. (#1220)
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.9...v0.9.10
+
 ## v0.9.9 - 2026-07-05
 
 The butter release: a day of hunting operator-experience bugs end to end.

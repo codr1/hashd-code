@@ -58,6 +58,7 @@ Start here to learn the system, then dive into the reference docs:
 - [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - agent switching, auth configuration, prompt overrides.
 - [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - code intelligence operator commands and troubleshooting.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - client/server boundaries, state, events, and diagnostics.
+- [docs/REMOTE.md](docs/REMOTE.md) - running a remote or team server: TLS trust model, account setup, tokens, pairing, troubleshooting.
 - [WF.md](WF.md) - the canonical lifecycle documentation, state machines, and command reference.
 - [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) - version-by-version release notes.
 
@@ -86,9 +87,24 @@ file -> git log -> commit message (COMMIT-XX-NNN)
 
 **Keeps you in the loop where it matters.** Three autonomy modes -- supervised, gatekeeper, and autonomous -- with confidence-threshold gating. A clarification queue holds work until you answer agent questions. Structured approve and reject flows.
 
+## Running hashd: local, server, and shared-repo
+
+Hashd is a client (`hashd`, `hashd watch`) talking to a server (`hashd-server`). How you deploy that pair is a choice, and all three shapes are supported:
+
+**Solo, local (the default).** Client and server run on your machine as one implicit user, no auth ceremony. This is what [QUICKSTART.md](QUICKSTART.md) sets up and what most single developers use -- if that's you, nothing below is required.
+
+**Server-backed (local or remote clients).** Run `hashd-server` on a box and point clients at it -- your laptop driving a server in the closet, or a shared team server. Off-loopback the server serves TLS with an auto-generated certificate and every request needs a bearer token, and a client pairs in one command:
+
+- **You own the server** -- mint a token with `hashd auth create`, then `hashd server set <url> --token <token>`.
+- **Your admin runs the server** -- they run `hashd admin user add you@co.com`, which prints a one-time access token; you run `hashd server set <url> --token <token>` and you're connected, attributed as yourself.
+
+Either way the token carries the server's certificate fingerprint, so pairing needs no separate trust step. Full walkthrough, trust model, and troubleshooting: **[docs/REMOTE.md](docs/REMOTE.md)**.
+
+**Solo shared-repo (advanced, not recommended).** Several developers each run their own solo hashd against the same git repository, their per-project state living side by side under `.hashd`, with no server coordinating them. Git is the only shared substrate. It works, but there is no shared workstream registry or multi-user gate -- prefer a server for real collaboration.
+
 ## What's coming
 
-**Team server.** A multi-user team server is in active development. It will let engineering teams coordinate humans and agent fleets on the same project -- shared workstream registry, multi-user gates, attestations exported per merge.
+**Team coordination.** Multi-user servers work today -- per-user identity, tokens, and request attribution (see [Running hashd](#running-hashd-local-server-and-shared-repo) above). What's still landing is the coordination layer on top: a shared workstream registry, multi-user gates, and attestations exported per merge.
 
 **Web dashboard.** A browser-based interface for monitoring and controlling workstreams.
 
@@ -423,7 +439,7 @@ save prompt. `hashd project show`, `hashd project describe`, `hashd project tech
 current `reqs_path` or fallback source files.
 
 `hashd project reqs` and `hashd project spec` read the configured artifacts through
-hashd-server, so remote CLI clients do not need local filesystem access to the
+hashd-server, so [remote CLI clients](docs/REMOTE.md) do not need local filesystem access to the
 repository. Their `edit` subcommands open the current artifact in `$EDITOR`, send
 the replacement back with a compare-and-swap head SHA, and let the server commit
 and push exactly that artifact change. The server rejects stale edits, dirty
