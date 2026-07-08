@@ -6,13 +6,13 @@
 
 ## Install
 
-One paste on a fresh box -- no Python setup required:
+One paste on a fresh box:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `hashd` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `hashd doctor` to confirm the setup. `wf` remains a permanent alias for the same CLI, and installs also include the short `ha` alias.
+The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `hashd` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `hashd doctor` to confirm the setup. `wf` and `ha` are aliases for the same CLI.
 
 **System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `hashd doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
 
@@ -315,7 +315,7 @@ Directives are automatically included in implementation prompts.
 | `hashd pr feedback <ws>` | View PR/MR review comments |
 | `hashd merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge) |
 | `hashd close <id>` | Close story or workstream (abandon) |
-| `hashd watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx) |
+| `hashd watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx). A pure viewer: connects to running services, never starts them -- if the stack is down it says what to run |
 
 ### Watch UI Keybindings
 
@@ -360,7 +360,7 @@ The Telegram bot covers the full workflow from mobile. Send `/` for the button m
    hashd telegram start
    ```
 
-The bot also auto-starts when you run `hashd run` or `hashd watch`.
+The bot also auto-starts when you run `hashd run`.
 
 ### Supporting Commands
 

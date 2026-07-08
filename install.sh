@@ -188,6 +188,7 @@ bootstrap_uv() {
 install_via_uv() {
     step "Installing hashd via uv (Python 3.11+ managed by uv)"
     "$UV_BIN" tool install --force --python 3.11 \
+        --with "$CLIENT_WHEEL" \
         --with "$BOT_WHEEL" \
         --with "$FIGMA_WHEEL" \
         --with "$GITHUB_CONNECTOR_WHEEL" \
@@ -203,7 +204,8 @@ install_via_uv() {
 # pipx owns the primary wheel, runpip injects the extras.
 install_via_pipx() {
     step "Installing hashd via pipx"
-    pipx install --force "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx install --force --pip-args "--find-links $WORK_DIR" "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$CLIENT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$BOT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$FIGMA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$GITHUB_CONNECTOR_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
@@ -481,6 +483,18 @@ verify_forge_checksum() {
     fi
 }
 
+warn_forge_install_failed() {
+    local name="$1"
+    local display="$2"
+    FORGE_INSTALL_FAILURES="${FORGE_INSTALL_FAILURES} $name"
+    echo ""
+    echo "!! ${display} CLI (${name}) FAILED to install."
+    echo "!! ${display} features will not work until this is fixed:"
+    echo "!!   - re-run this installer (or scripts/install-tools.sh from a checkout), or"
+    echo "!!   - place a ${name} binary at ${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}/${name} yourself."
+    echo ""
+}
+
 install_forge_cli() {
     local name="$1"
     local display="$2"
@@ -517,28 +531,28 @@ install_forge_cli() {
     extract_dir="$forge_dir/extract"
 
     mkdir -p "$extract_dir"
-    curl -fsSL -o "$asset_path" "$base_url/$asset_name"
-    curl -fsSL -o "$checksums_path" "$base_url/$checksums_name"
-    verify_forge_checksum "$asset_path" "$checksums_path"
+    curl -fsSL -o "$asset_path" "$base_url/$asset_name" || return 1
+    curl -fsSL -o "$checksums_path" "$base_url/$checksums_name" || return 1
+    verify_forge_checksum "$asset_path" "$checksums_path" || return 1
     verified "$display CLI ($name $version)"
 
     case "$asset_name" in
         *.tar.gz)
-            tar -xzf "$asset_path" -C "$extract_dir"
+            tar -xzf "$asset_path" -C "$extract_dir" || return 1
             ;;
         *.zip)
             if ! command -v unzip &>/dev/null; then
                 echo "ERROR: unzip is required to extract $asset_name"
-                exit 1
+                return 1
             fi
-            unzip -q "$asset_path" -d "$extract_dir"
+            unzip -q "$asset_path" -d "$extract_dir" || return 1
             ;;
         tea-*)
-            install -m 755 "$asset_path" "$extract_dir/$name"
+            install -m 755 "$asset_path" "$extract_dir/$name" || return 1
             ;;
         *)
             echo "ERROR: Unsupported forge CLI archive: $asset_name"
-            exit 1
+            return 1
             ;;
     esac
 
@@ -548,7 +562,7 @@ install_forge_cli() {
     fi
     if [ -z "$found_binary" ]; then
         echo "ERROR: Could not find $name inside $asset_name"
-        exit 1
+        return 1
     fi
 
     mkdir -p "$bin_dir"
@@ -556,7 +570,7 @@ install_forge_cli() {
     installed_version="$("$bin_dir/$name" --version 2>/dev/null | extract_semver || true)"
     if [ "$installed_version" != "$version" ]; then
         echo "ERROR: Installed $name but version check returned '${installed_version:-unknown}', expected $version"
-        exit 1
+        return 1
     fi
     ok "$name $version" "$bin_dir/$name"
 }
@@ -699,6 +713,7 @@ FIGMA_WHEEL="hashd_connector_figma-${VERSION}-py3-none-any.whl"
 GITHUB_CONNECTOR_WHEEL="hashd_connector_github-${VERSION}-py3-none-any.whl"
 JIRA_WHEEL="hashd_connector_jira-${VERSION}-py3-none-any.whl"
 TUI_WHEEL="hashd_tui-${VERSION}-py3-none-any.whl"
+CLIENT_WHEEL="hashd_client-${VERSION}-py3-none-any.whl"
 
 # Download via direct release-asset CDN URLs -- no api.github.com, so immune to
 # the unauthenticated 60/hr limit that fresh boxes (no `gh` yet) used to hit.
@@ -716,7 +731,7 @@ else
     _curl_dl=(-sS)
 fi
 DL_BASE="https://github.com/$REPO/releases/download/$RELEASE_TAG"
-for _wheel in "$WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$TUI_WHEEL"; do
+for _wheel in "$WHEEL" "$CLIENT_WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$TUI_WHEEL"; do
     printf '  %s\n' "$_wheel"
     if ! curl -fL --connect-timeout 20 --retry 3 --retry-delay 2 \
             "${_curl_dl[@]}" -o "$WORK_DIR/$_wheel" "$DL_BASE/$_wheel"; then
@@ -735,16 +750,26 @@ FIGMA_WHEEL="$WORK_DIR/$FIGMA_WHEEL"
 GITHUB_CONNECTOR_WHEEL="$WORK_DIR/$GITHUB_CONNECTOR_WHEEL"
 JIRA_WHEEL="$WORK_DIR/$JIRA_WHEEL"
 TUI_WHEEL="$WORK_DIR/$TUI_WHEEL"
+CLIENT_WHEEL="$WORK_DIR/$CLIENT_WHEEL"
 
-ok "Downloaded wheels" "CLI + server + bot + figma/github/jira connectors + TUI"
+ok "Downloaded wheels" "CLI + server + client SDK + bot + figma/github/jira connectors + TUI"
 
 # --- Install forge CLIs ---
 # All supported forge CLIs, always: prebuilt binaries, SHA-256 verified, no prompts.
 step "Installing forge CLIs (gh, glab, bkt, tea)"
-install_forge_cli gh "GitHub" "$GH_VERSION"
-install_forge_cli glab "GitLab" "$GLAB_VERSION"
-install_forge_cli bkt "Bitbucket" "$BKT_VERSION"
-install_forge_cli tea "Gitea" "$TEA_VERSION"
+# Forge CLI install failures are loud but never abort the install: a
+# project only needs its own forge's CLI, so a glab asset outage must
+# not block a GitHub user. hashd resolves these from its tools dir
+# ONLY -- the failed feature stays broken until one of the fixes below
+# is applied, and `hashd doctor` reports the same state.
+FORGE_INSTALL_FAILURES=""
+install_forge_cli gh "GitHub" "$GH_VERSION" || warn_forge_install_failed gh "GitHub"
+install_forge_cli glab "GitLab" "$GLAB_VERSION" || warn_forge_install_failed glab "GitLab"
+install_forge_cli bkt "Bitbucket" "$BKT_VERSION" || warn_forge_install_failed bkt "Bitbucket"
+install_forge_cli tea "Gitea" "$TEA_VERSION" || warn_forge_install_failed tea "Gitea"
+if [ -n "$FORGE_INSTALL_FAILURES" ]; then
+    echo "NOTE: some forge CLIs failed to install:${FORGE_INSTALL_FAILURES}. See the blocks above; \`hashd doctor\` tracks this."
+fi
 
 # --- Install hashd wheels ---
 # Either pipx (healthy existing toolchain) or uv (provides Python 3.11+ and the

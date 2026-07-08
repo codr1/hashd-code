@@ -4,6 +4,60 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.11 - 2026-07-09
+
+The plumbing release. The Go server becomes the single writer of record for
+workstream state; the CLI, TUI, bot, and connectors move onto a shared
+hashd-client SDK with the watch TUI as a pure viewer; migrations run through a
+Go runner; and Telegram gains self-service per-user pairing. Mostly invisible
+from the outside, but it is the foundation the team-server story stands on.
+
+### What's Changed
+
+- **One writer of record: the Go server owns every state mutation.** Commit
+  hash-chains and run records (#1225), then clarifications, story transcripts,
+  and workstream-id allocation (#1226), then the clarification / plan-split /
+  run-transcript writes (#1227) all move behind the server -- no process other
+  than the server writes the database. The events schema is synced and a
+  generate-drift gate plus clarification-flip events close the residue (#1228,
+  #1229), and the dead Python review parser is deleted. This shuts the last
+  split-brain window where a Python helper and the server could both touch the
+  same rows.
+
+- **A shared `hashd-client` SDK; the watch TUI is a pure viewer.** The client
+  logic is extracted into a reusable SDK (#1234); the TUI (#1235) and the
+  Telegram bot plus connectors (#1236) cut over to it, and every transitional
+  shim is deleted. The TUI now renders server state and dispatches through the
+  SDK with no authority of its own, so local and remote mode share one client
+  path.
+
+- **Migrations run through a Go runner.** Schema and runtime migrations move to
+  a Go migration runner with M000-M017 frozen as the baseline, and the old
+  Python migration framework is deleted (#1237). Migrations apply the same way
+  whether the trigger is a database open or a restart.
+
+- **Telegram: self-service per-user pairing.** A user pairs their own Telegram
+  account to the server and receives a per-user scoped token minted at
+  provisioning, with a two-sided bind -- no operator hand-holding, and every
+  action is attributed to the user who took it (#1232).
+
+- **Client/server hardening.** A wire-contract handshake refuses a connection
+  when the client and server disagree on the event contract (with a Diagnostic
+  that points at the upgrade command), `hashd doctor` checks the contract before
+  the version, the request header carries the build version, and agent
+  retry-budget caps are pinned in lockstep with the retry logic (#1230).
+
+- **Reliability and infra.** Fixed three live bugs -- a housekeeping cancel
+  path, worker liveness, and the remote agent check (#1222). The ZMQ event-bus
+  forwarder is reimplemented in Go with structured subprocess diagnostics
+  (#1224). `hashd` now runs the tool copy it installed or fails loudly instead
+  of silently falling back to `PATH` (#1233). The two cross-language
+  review-prompt seams are pinned against drift (#1223).
+
+- Internal: tombstone phrasing swept out of the user-facing docs (#1231).
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.10...v0.9.11
+
 ## v0.9.10 - 2026-07-06
 
 Remote and team-server mode, made real. Driving a hashd-server from another

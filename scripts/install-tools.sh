@@ -44,6 +44,10 @@ RAW_ARCH="${HASHD_TOOLS_ARCH:-$(uname -m)}"
 # can read them as the single source of truth.
 GITLEAKS_VERSION="8.30.1"
 DELTA_VERSION="0.19.2"
+# Temporal is DARK infrastructure: vendored and smoke-tested, booted by
+# nothing in production until the engine flip. Version pinned; bumps go
+# in a dedicated PR alongside the Go-side pin (server/internal/temporal).
+TEMPORAL_VERSION="1.31.1"
 
 log() {
     # Single-line status prefix so source and wheel flows render consistently.
@@ -53,13 +57,23 @@ log() {
 warn_gitleaks_install_failed() {
     local reason="$1"
     echo "WARN: gitleaks install failed ($reason). Pre-commit secret-scanning will be skipped."
-    echo "      Install manually from https://github.com/gitleaks/gitleaks/releases if needed."
+    echo "      Fix: re-run this script, or place a gitleaks binary at $TOOLS_DIR/gitleaks"
+    echo "      (hashd only runs the copy in its tools dir; a system install is not used)."
+}
+
+warn_temporal_install_failed() {
+    local reason="$1"
+    echo "WARN: temporal install failed ($reason). Dark-engine development and CI"
+    echo "      workflow tests will skip; nothing user-facing is affected."
+    echo "      Fix: re-run this script, or place temporal-server/temporal-sql-tool"
+    echo "      in $TOOLS_DIR (hashd only runs the copies in its tools dir)."
 }
 
 warn_delta_install_failed() {
     local reason="$1"
     echo "WARN: git-delta install failed ($reason). TUI diffs will use the built-in renderer."
-    echo "      Install manually from https://github.com/dandavison/delta/releases if needed."
+    echo "      Fix: re-run this script, or place a delta binary at $TOOLS_DIR/delta"
+    echo "      (hashd only runs the copy in its tools dir; a system install is not used)."
 }
 
 # First semver in the input. Anchored to the FIRST match: a tool prints its own
@@ -108,6 +122,98 @@ warm_tool() {
 # gitleaks -- secret scanner used by `hashd project add` and the pre-commit
 # hook. Version pinned; bumps go in a dedicated PR.
 # ---------------------------------------------------------------------
+install_temporal() {
+    local version="$TEMPORAL_VERSION"
+    local server_bin="$TOOLS_DIR/temporal-server"
+    local sql_bin="$TOOLS_DIR/temporal-sql-tool"
+
+    local target
+    local expected_sha
+    case "$OS/$RAW_ARCH" in
+        linux/x86_64|linux/amd64)
+            target=linux_amd64
+            expected_sha="6d68bea8783046c4e48e595798365df7c325cda65001ee744d35cb5b67f7ba63"
+            ;;
+        linux/aarch64|linux/arm64)
+            target=linux_arm64
+            expected_sha="ba055fbb0796d972e213538598ffdc761d06d710b6734afbed243e2f06a12f6c"
+            ;;
+        darwin/x86_64|darwin/amd64)
+            target=darwin_amd64
+            expected_sha="468b8cd61985858a276993c75ddc7cb27cc49a45b4fd0d2505c3257e4a78d217"
+            ;;
+        darwin/aarch64|darwin/arm64)
+            target=darwin_arm64
+            expected_sha="daebfc97c93ebb809be95464fe7c09f493f2e0d04c5c135dd7f82d60907132fb"
+            ;;
+        *)
+            warn_temporal_install_failed "unsupported platform: $OS/$RAW_ARCH"
+            return 0
+            ;;
+    esac
+
+    if [ -x "$server_bin" ] && [ -x "$sql_bin" ]; then
+        local installed
+        installed="$("$server_bin" --version 2>/dev/null | extract_semver || true)"
+        if [ "$installed" = "$version" ]; then
+            log "temporal" "$version (ok)"
+            return 0
+        fi
+        log "temporal" "replacing stale ${installed:-unknown} with $version"
+        if ! rm -f "$server_bin" "$sql_bin"; then
+            warn_temporal_install_failed "could not remove stale binaries"
+            return 0
+        fi
+    fi
+
+    local asset="temporal_${version}_${target}.tar.gz"
+    local url="https://github.com/temporalio/temporal/releases/download/v${version}/${asset}"
+    local tmp
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    if ! curl --fail --silent --location \
+        --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        "$url" -o "$tmp/$asset" 2>/dev/null; then
+        warn_temporal_install_failed "download failed"
+        return 0
+    fi
+
+    local actual_sha
+    if ! actual_sha="$(sha256_file "$tmp/$asset")"; then
+        warn_temporal_install_failed "no SHA256 tool available"
+        return 0
+    fi
+    if [ "$actual_sha" != "$expected_sha" ]; then
+        warn_temporal_install_failed "checksum mismatch for $asset"
+        return 0
+    fi
+
+    if ! tar -xzf "$tmp/$asset" -C "$tmp"; then
+        warn_temporal_install_failed "archive extraction failed"
+        return 0
+    fi
+
+    mkdir -p "$TOOLS_DIR"
+    local name
+    for name in temporal-server temporal-sql-tool; do
+        local extracted
+        extracted="$(find "$tmp" -name "$name" -type f | head -1)"
+        if [ -z "$extracted" ]; then
+            warn_temporal_install_failed "$name missing from $asset"
+            return 0
+        fi
+        if ! install -m 755 "$extracted" "$TOOLS_DIR/$name"; then
+            warn_temporal_install_failed "could not install $name"
+            return 0
+        fi
+        harden_darwin_binary "$TOOLS_DIR/$name"
+    done
+    log "temporal" "$version -> $server_bin"
+}
+
 install_gitleaks() {
     local version="$GITLEAKS_VERSION"
     local bin="$TOOLS_DIR/gitleaks"
@@ -288,4 +394,5 @@ install_delta() {
 echo "Installing external tools into $TOOLS_DIR"
 install_gitleaks
 install_delta
+install_temporal
 echo "Tool install complete."

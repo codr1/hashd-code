@@ -74,8 +74,8 @@ jira = "hashd_connector_jira"
 
 There are two resolver implementations sharing the same connector-host surface:
 
-- **Python harness** (`lib/ref_resolver.py`) -- used by the planner, tool dispatch, and the legacy Python chat path. Connector dispatch only; built-in artifacts (`@diff`, `@story`, ...) are handled separately by `lib/chat_context.py`.
-- **Go server** (`server/internal/refs/`) -- used by the server-side chat generation path (`POST /chat/messages`). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home as the Python chat path is retired.
+- **Python harness** (`lib/ref_resolver.py`) -- used by the planner, tool dispatch, and the Python chat path. Connector dispatch only; built-in artifacts (`@diff`, `@story`, ...) are handled separately by `lib/chat_context.py`.
+- **Go server** (`server/internal/refs/`) -- used by the server-side chat generation path (`POST /chat/messages`). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home for server-side chat `@`-reference resolution.
 
 Both call the identical connector-host verbs (`capabilities`, `resolve_artifacts`), so connectors plug into either resolver unchanged.
 
@@ -433,7 +433,7 @@ def _autocomplete(project_dir, partial):
 AUTOCOMPLETE = _autocomplete
 ```
 
-The `AUTOCOMPLETE` function is called server-side by Python (Prefect flows, MCP server). The TUI gets autocomplete via a separate REST endpoint (`GET /connectors/autocomplete`) that reads the connector's cache directory on the server. Your `AUTOCOMPLETE` function still works — the REST endpoint provides an equivalent for remote clients.
+The `AUTOCOMPLETE` function is called server-side by Python (Prefect flows, MCP server). The TUI and other remote clients get the equivalent via a separate REST endpoint (`GET /connectors/autocomplete`) that reads the connector's cache directory on the server.
 
 ### Step 9: Register as entry point
 
