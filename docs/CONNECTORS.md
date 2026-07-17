@@ -4,7 +4,7 @@
 
 Connectors extend hashd with external integrations (Figma, GitHub, Bitbucket, Jira). They're auto-discovered at startup through the `hashd.connectors` entry point group. Core never references a specific connector.
 
-See [Building Connectors](orchestrator/connectors/README.md) for the developer guide.
+See [Building Connectors](packages/hashd-client/src/hashd_client/README.md) for the developer guide.
 
 ---
 
@@ -59,9 +59,7 @@ jira = "hashd_connector_jira"
 | `cli.py` | Registers CLI commands from `CLI_COMMANDS` |
 | `commands/doctor.py` | Runs `DOCTOR_CHECKS` for configured connectors |
 | `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
-| `lib/tool_dispatch.py` | Loads `TOOLS` when `@connector` detected in prompt |
 | `lib/agents_config.py` | Injects MCP config for `TOOLS` into agent commands |
-| `lib/chat_context.py` | Yields `AUTOCOMPLETE` completions for @ popup (server-side Python) |
 | `server/api/autocomplete.go` | REST endpoint for TUI autocomplete (reads connector caches) |
 
 ---
@@ -74,8 +72,8 @@ jira = "hashd_connector_jira"
 
 There are two resolver implementations sharing the same connector-host surface:
 
-- **Python harness** (`lib/ref_resolver.py`) -- used by the planner, tool dispatch, and the Python chat path. Connector dispatch only; built-in artifacts (`@diff`, `@story`, ...) are handled separately by `lib/chat_context.py`.
-- **Go server** (`server/internal/refs/`) -- used by the server-side chat generation path (`POST /chat/messages`). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home for server-side chat `@`-reference resolution.
+- **Python harness** (`lib/ref_resolver.py`) -- used by the planner and runner prompt assembly. Connector dispatch only; built-in artifact names in `BUILTIN_REFS` are skipped and resolve elsewhere.
+- **Go server** (`server/internal/refs/`) -- used by the chat generation path (`POST /chat/messages`, serving both `hashd chat` and the TUI). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home for server-side chat `@`-reference resolution.
 
 Both call the identical connector-host verbs (`capabilities`, `resolve_artifacts`), so connectors plug into either resolver unchanged.
 
@@ -217,7 +215,7 @@ Snapshot is copied by `snapshot_connector_caches()` during `provision_workstream
 
 ## 5. MCP Server
 
-`orchestrator/mcp_server.py` -- FastMCP stdio server that exposes connector tools to AI agents.
+`packages/hashd-client/src/hashd_client/mcp_server.py` -- FastMCP stdio server that exposes connector tools to AI agents.
 
 ### How it works
 
@@ -344,7 +342,7 @@ IS_CONFIGURED = is_configured
 ```python
 # __init__.py (add)
 def _check_health(project_dir):
-    from orchestrator.connectors._base import DiagnosticResult
+    from hashd_client.connectors import DiagnosticResult
     from hashd_connector_linear.config import load_linear_config
 
     config = load_linear_config(project_dir)
@@ -368,8 +366,8 @@ DOCTOR_CHECKS = [_check_health]
 ```python
 # __init__.py (add)
 def _resolve(project_dir, refs, fetch):
-    from orchestrator.connectors._base import ResolvedArtifact, ArtifactRef
-    from orchestrator.connectors import get_connector_cache_dir
+    from hashd_client.connectors import ResolvedArtifact, ArtifactRef
+    from hashd_client.connectors import get_connector_cache_dir
 
     cache_dir = get_connector_cache_dir(project_dir, "linear")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -410,7 +408,7 @@ CLI_COMMANDS = {"linear": (register_linear_subcommands, cmd_linear_dispatch)}
 ### Step 7: Add tools (optional)
 
 ```python
-from orchestrator.connectors._base import ToolSpec
+from hashd_client.connectors import ToolSpec
 
 TOOLS = [
     ToolSpec(

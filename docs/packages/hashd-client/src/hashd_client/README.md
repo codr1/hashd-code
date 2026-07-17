@@ -1,7 +1,7 @@
 # Building Connectors
 
 Connectors are hashd's plugin system for external integrations.
-`orchestrator/connectors/` is the core framework: discovery, shared contracts,
+`hashd_client/` is the core framework: discovery, shared contracts,
 and cache helpers. Connector implementations live in installable packages and
 are auto-discovered through the `hashd.connectors` entry point group.
 
@@ -97,11 +97,11 @@ Core interacts with connectors only through `discover_connectors()`. The five ho
 | `cli.py` | Registers CLI commands from `CLI_COMMANDS` |
 | `commands/doctor.py` | Runs `DOCTOR_CHECKS` for configured connectors |
 | `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
-| `commands/chat.py`, `pm/planner.py`, `runner/impl/prompt_context.py` | Call `resolve_refs()` before agent invocation |
+| `pm/planner.py`, `runner/impl/prompt_context.py` | Call `resolve_refs()` before agent invocation |
 
 ## Base types
 
-`orchestrator/connectors/_base.py` provides shared types:
+`hashd_client/connectors.py` provides shared types:
 
 - `ToolSpec` -- tool exposed to agents (name, description, handler, stage scoping)
 - `ResolvedArtifact` -- result of artifact resolution (file refs, source, error)

@@ -4,6 +4,57 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.12 - 2026-07-17
+
+The Temporal release. Prefect is gone: hashd's entire execution engine -- the
+workstream runner, planning, merge, discovery -- is reimplemented as Temporal
+workflows and activities, and with execution off Python, the orchestration layer
+is demolished. Work now survives Ctrl-C and full-stack restarts by construction.
+Alongside the engine swap: per-user story and workstream ownership, and a round
+of install and diagnostic hardening.
+
+### What's Changed
+
+- **Temporal replaces Prefect as the execution engine.** The runner is rebuilt
+  as Temporal workflows + activities and cut over incrementally -- activities and
+  the inner/outer cycle (#1254 onward), reads, wiring, and engine-gating flipped
+  behind it (#1266, #1268), native retry and the tier-B heartbeat model, then the
+  engine flipped Temporal-only (#1282). Pinned to temporal-server 1.31.2 (#1287),
+  with a workflow janitor + retention sweep (#1288), a schema-compatibility guard
+  (#1290), and the payload/transport ceilings raised to the real limit (#1286).
+  Work survives disconnect and restart because the sidecar persists it.
+
+- **The Python orchestrator is demolished.** With Temporal owning execution, the
+  Prefect/Python orchestration layer is deleted (#1284); the connector host and
+  chat surface move to Go, and path validation goes Go-native (#1283). No PR
+  increases net Python.
+
+- **Per-user story and workstream ownership.** Stories and workstreams carry an
+  owner; a guard stops one user acting on another's work, assignment is explicit,
+  and the owner shows through the CLI and the watch TUI (#1277, #1278, #1280).
+
+- **Source install works end to end.** A from-scratch source install was broken
+  by ordering (tools installed after the step that needed them) and a dead
+  first-install path; both fixed, plus the forge CLIs (gh/glab/bkt/tea) are now
+  vendored by the shared installer so source installs get them too (#1291, #1292).
+
+- **add-commit and first-run onboarding.** add-commit no longer strands or drops
+  work (a refused commit is surfaced, not appended; one added at ready_to_merge
+  returns the workstream to active), clarification answers are attributed
+  honestly, `project add` reminds you to set a setup hook, and a missing agent
+  warns instead of failing the install (#1293).
+
+- **`hashd show` renders the detail it already had.** Provisioning diagnostics,
+  pending clarifications, and error detail now show in the plain view instead of
+  only in `--json`; a merged workstream stops flagging its removed worktree
+  (#1294).
+
+- **Reliability and fixes.** AI merge-conflict resolution legs (#1281),
+  tech-tree resume fallback (#1276), petshop-validation fixes (#1279),
+  release-surface cleanup (#1285), and a bot-view prompt-lint pass (#1289).
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.11...v0.9.12
+
 ## v0.9.11 - 2026-07-09
 
 The plumbing release. The Go server becomes the single writer of record for

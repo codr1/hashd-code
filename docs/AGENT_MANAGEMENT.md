@@ -301,8 +301,7 @@ prompt = render_prompt('review_contextual', commit_title='Add auth', diff='...')
 | `breakdown.md` | breakdown | Break story into 2-5 micro-commits |
 | `fix_generation.md` | fix_generation | Generate FIX commits for merge gate failures |
 | `conflict_resolution.md` | merge (resolve) | Resolve git rebase conflicts |
-| `directives_edit.md` | directives | AI-assisted editing of directives files |
-| `pair_programmer.md` | chat | System prompt for pair programmer chat |
+| `chat_general.md` | chat | System prompt for chat (CLI `hashd chat` and the TUI chat panel) |
 
 ### Viewing and managing prompts
 

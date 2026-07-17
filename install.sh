@@ -9,12 +9,6 @@ set -e
 REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
 
-# Forge CLI pinned versions. Bump in lockstep with hashd release cuts.
-GH_VERSION="2.93.0"
-GLAB_VERSION="1.101.0"
-BKT_VERSION="0.28.1"
-TEA_VERSION="0.14.1"
-
 # --- Output: restrained color + step markers ---
 #
 # Quiet by default: one line per real step. Color is used sparingly and only
@@ -350,235 +344,11 @@ extract_semver() {
     grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
 
-sha256_file() {
-    local path="$1"
-    if command -v sha256sum &>/dev/null; then
-        sha256sum "$path" | cut -d' ' -f1
-        return 0
-    fi
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$path" | cut -d' ' -f1
-        return 0
-    fi
-    echo "ERROR: sha256sum or shasum is required to verify downloaded forge CLI archives."
-    exit 1
-}
-
-forge_binary_version() {
-    local binary="$1"
-    "$binary" --version 2>/dev/null | extract_semver || true
-}
-
-forge_asset_name() {
-    local name="$1"
-    local version="$2"
-    local os="$3"
-    local machine="$4"
-    local arch
-
-    case "$name" in
-        gh)
-            case "$machine" in
-                x86_64) arch="amd64" ;;
-                aarch64) arch="arm64" ;;
-                *) return 1 ;;
-            esac
-            if [ "$os" = "macosx" ]; then
-                echo "gh_${version}_macOS_${arch}.zip"
-            else
-                echo "gh_${version}_linux_${arch}.tar.gz"
-            fi
-            ;;
-        glab)
-            case "$machine" in
-                x86_64) arch="amd64" ;;
-                aarch64) arch="arm64" ;;
-                *) return 1 ;;
-            esac
-            if [ "$os" = "macosx" ]; then
-                echo "glab_${version}_darwin_${arch}.tar.gz"
-            else
-                echo "glab_${version}_linux_${arch}.tar.gz"
-            fi
-            ;;
-        bkt)
-            case "$machine" in
-                x86_64) arch="x86_64" ;;
-                aarch64) arch="arm64" ;;
-                *) return 1 ;;
-            esac
-            if [ "$os" = "macosx" ]; then
-                echo "bkt_${version}_darwin_${arch}.tar.gz"
-            else
-                echo "bkt_${version}_linux_${arch}.tar.gz"
-            fi
-            ;;
-        tea)
-            case "$machine" in
-                x86_64) arch="amd64" ;;
-                aarch64) arch="arm64" ;;
-                *) return 1 ;;
-            esac
-            if [ "$os" = "macosx" ]; then
-                echo "tea-${version}-darwin-${arch}"
-            else
-                echo "tea-${version}-linux-${arch}"
-            fi
-            ;;
-        *) return 1 ;;
-    esac
-}
-
-forge_download_base_url() {
-    local name="$1"
-    local version="$2"
-    case "$name" in
-        gh) echo "https://github.com/cli/cli/releases/download/v${version}" ;;
-        glab) echo "https://gitlab.com/gitlab-org/cli/-/releases/v${version}/downloads" ;;
-        bkt) echo "https://github.com/avivsinai/bitbucket-cli/releases/download/v${version}" ;;
-        tea) echo "https://dl.gitea.com/tea/${version}" ;;
-        *) return 1 ;;
-    esac
-}
-
-forge_checksums_name() {
-    local name="$1"
-    local version="$2"
-    case "$name" in
-        gh) echo "gh_${version}_checksums.txt" ;;
-        glab|bkt|tea) echo "checksums.txt" ;;
-        *) return 1 ;;
-    esac
-}
-
-verify_forge_checksum() {
-    local asset="$1"
-    local checksums="$2"
-    local asset_name
-    local expected
-    local actual
-    local line_sum line_file
-
-    asset_name="$(basename "$asset")"
-    # Look up the expected hash without awk (minimal images may lack gawk). The
-    # checksums file is `<sha>  <filename>` per line; match the filename exactly.
-    expected=""
-    while read -r line_sum line_file; do
-        if [ "$line_file" = "$asset_name" ]; then
-            expected="$line_sum"
-            break
-        fi
-    done < "$checksums"
-    if [ -z "$expected" ]; then
-        echo "ERROR: No checksum entry found for $asset_name"
-        exit 1
-    fi
-
-    actual="$(sha256_file "$asset")"
-    if [ "$actual" != "$expected" ]; then
-        echo "ERROR: SHA256 mismatch for $asset_name"
-        echo "  expected: $expected"
-        echo "  actual:   $actual"
-        exit 1
-    fi
-}
-
-warn_forge_install_failed() {
-    local name="$1"
-    local display="$2"
-    FORGE_INSTALL_FAILURES="${FORGE_INSTALL_FAILURES} $name"
-    echo ""
-    echo "!! ${display} CLI (${name}) FAILED to install."
-    echo "!! ${display} features will not work until this is fixed:"
-    echo "!!   - re-run this installer (or scripts/install-tools.sh from a checkout), or"
-    echo "!!   - place a ${name} binary at ${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}/${name} yourself."
-    echo ""
-}
-
-install_forge_cli() {
-    local name="$1"
-    local display="$2"
-    local version="$3"
-    # hashd vendors forge CLIs into its OWN tools dir (alongside gitleaks/delta)
-    # and invokes them by absolute path -- never from the system PATH -- so a
-    # user upgrading or removing their own gh/tea can't shadow or break hashd.
-    local bin_dir="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}"
-    local asset_name
-    local base_url
-    local checksums_name
-    local forge_dir
-    local asset_path
-    local checksums_path
-    local extract_dir
-    local found_binary
-    local installed_version
-
-    # Always vendor our own pinned copy. We deliberately do NOT consult the
-    # system (PATH) -- a system install is irrelevant since hashd invokes the
-    # absolute bundled path. Skip the download only when OUR copy already
-    # matches the pin.
-    if [ -x "$bin_dir/$name" ] && [ "$(forge_binary_version "$bin_dir/$name")" = "$version" ]; then
-        ok "$name $version already vendored"
-        return 0
-    fi
-
-    asset_name="$(forge_asset_name "$name" "$version" "$PLATFORM" "$MACHINE")"
-    base_url="$(forge_download_base_url "$name" "$version")"
-    checksums_name="$(forge_checksums_name "$name" "$version")"
-    forge_dir="$WORK_DIR/forge-$name"
-    asset_path="$forge_dir/$asset_name"
-    checksums_path="$forge_dir/$checksums_name"
-    extract_dir="$forge_dir/extract"
-
-    mkdir -p "$extract_dir"
-    curl -fsSL -o "$asset_path" "$base_url/$asset_name" || return 1
-    curl -fsSL -o "$checksums_path" "$base_url/$checksums_name" || return 1
-    verify_forge_checksum "$asset_path" "$checksums_path" || return 1
-    verified "$display CLI ($name $version)"
-
-    case "$asset_name" in
-        *.tar.gz)
-            tar -xzf "$asset_path" -C "$extract_dir" || return 1
-            ;;
-        *.zip)
-            if ! command -v unzip &>/dev/null; then
-                echo "ERROR: unzip is required to extract $asset_name"
-                return 1
-            fi
-            unzip -q "$asset_path" -d "$extract_dir" || return 1
-            ;;
-        tea-*)
-            install -m 755 "$asset_path" "$extract_dir/$name" || return 1
-            ;;
-        *)
-            echo "ERROR: Unsupported forge CLI archive: $asset_name"
-            return 1
-            ;;
-    esac
-
-    found_binary="$(find "$extract_dir" -name "$name" -type f -perm -u+x | head -1)"
-    if [ -z "$found_binary" ]; then
-        found_binary="$(find "$extract_dir" -name "$name" -type f | head -1)"
-    fi
-    if [ -z "$found_binary" ]; then
-        echo "ERROR: Could not find $name inside $asset_name"
-        return 1
-    fi
-
-    mkdir -p "$bin_dir"
-    install -m 755 "$found_binary" "$bin_dir/$name"
-    installed_version="$("$bin_dir/$name" --version 2>/dev/null | extract_semver || true)"
-    if [ "$installed_version" != "$version" ]; then
-        echo "ERROR: Installed $name but version check returned '${installed_version:-unknown}', expected $version"
-        return 1
-    fi
-    ok "$name $version" "$bin_dir/$name"
-}
-
 warn_external_tools() {
     echo "WARN: external tool install skipped ($1)."
-    echo "      gitleaks can be installed manually from https://github.com/gitleaks/gitleaks/releases if needed."
-    echo "      git-delta can be installed manually from https://github.com/dandavison/delta/releases if needed."
+    echo "      This step vendors gitleaks, git-delta, and the forge CLIs (gh, glab, bkt, tea)."
+    echo "      Without them: the merge secret-scan and your forge's features will not work."
+    echo "      Fix: re-run this installer once the fetch succeeds."
 }
 
 # --- Detect platform ---
@@ -695,14 +465,15 @@ fi
 ok "Latest release" "$RELEASE_TAG"
 
 # --- Resolve wheel names (downloaded via direct release-asset CDN URLs) ---
-# Wheels use abi3 stable ABI (cp311-abi3): works with any Python 3.11+. If the
-# minimum Python changes, update this tag AND pyproject.toml requires-python.
-# macOS ships one universal2 wheel; Linux is arch-tagged. Names are constructed
-# from the version + platform so downloads use direct CDN URLs (no GitHub API).
-ABI_TAG="cp311-abi3"
+# The core wheel is a pure-Python carrier for per-platform Go binaries:
+# python tag py3-none, platform tag set explicitly by the release build
+# (HASHD_WHEEL_PLAT). macOS ships an arm64 wheel (Apple Silicon; the Go
+# binaries are single-arch). Names are constructed from the version +
+# platform so downloads use direct CDN URLs (no GitHub API).
+ABI_TAG="py3-none"
 VERSION="${RELEASE_TAG#v}"
 if [ "$PLATFORM" = "macosx" ]; then
-    WHEEL_PLATFORM="macosx_10_9_universal2"
+    WHEEL_PLATFORM="macosx_11_0_arm64"
 else
     WHEEL_PLATFORM="${PLATFORM}_${MACHINE}"
 fi
@@ -754,22 +525,9 @@ CLIENT_WHEEL="$WORK_DIR/$CLIENT_WHEEL"
 
 ok "Downloaded wheels" "CLI + server + client SDK + bot + figma/github/jira connectors + TUI"
 
-# --- Install forge CLIs ---
-# All supported forge CLIs, always: prebuilt binaries, SHA-256 verified, no prompts.
-step "Installing forge CLIs (gh, glab, bkt, tea)"
-# Forge CLI install failures are loud but never abort the install: a
-# project only needs its own forge's CLI, so a glab asset outage must
-# not block a GitHub user. hashd resolves these from its tools dir
-# ONLY -- the failed feature stays broken until one of the fixes below
-# is applied, and `hashd doctor` reports the same state.
-FORGE_INSTALL_FAILURES=""
-install_forge_cli gh "GitHub" "$GH_VERSION" || warn_forge_install_failed gh "GitHub"
-install_forge_cli glab "GitLab" "$GLAB_VERSION" || warn_forge_install_failed glab "GitLab"
-install_forge_cli bkt "Bitbucket" "$BKT_VERSION" || warn_forge_install_failed bkt "Bitbucket"
-install_forge_cli tea "Gitea" "$TEA_VERSION" || warn_forge_install_failed tea "Gitea"
-if [ -n "$FORGE_INSTALL_FAILURES" ]; then
-    echo "NOTE: some forge CLIs failed to install:${FORGE_INSTALL_FAILURES}. See the blocks above; \`hashd doctor\` tracks this."
-fi
+# Forge CLIs (gh, glab, bkt, tea) are installed further down by
+# scripts/install-tools.sh, which owns every vendored tool and its pin.
+# Nothing between here and there needs one.
 
 # --- Install hashd wheels ---
 # Either pipx (healthy existing toolchain) or uv (provides Python 3.11+ and the
@@ -848,7 +606,7 @@ case "$TOOLS_ARCH" in
     x86_64) TOOLS_ARCH="amd64" ;;
     aarch64) TOOLS_ARCH="arm64" ;;
 esac
-step "Installing external tools (gitleaks, git-delta)"
+step "Installing external tools (gitleaks, git-delta, forge CLIs)"
 # Wire the bundled-tools dir onto PATH before the install runs, so the freshly
 # dropped gitleaks/delta binaries resolve as bare commands everywhere (the
 # user's shell and any subprocess), not just via hashd's tools-dir-aware code.

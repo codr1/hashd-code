@@ -185,7 +185,7 @@ project's active Workstreams (selectable `1-9`) and Stories (selectable `a-i`),
 and is the jumping-off point to the Plan screen (`p`), the autonomy-mode switch
 (`m`), the command palette (`/`), and context-aware help (`?`). From the Dashboard
 you drill into a Workstream Detail or Story Detail view and back. See
-[navigation.md](navigation.md).
+[watch.md](watch.md).
 
 ### Workstream Detail / Story Detail
 
@@ -194,4 +194,4 @@ operator cockpit for a single in-flight Workstream — diff, log, review, timeli
 and the state-aware action keys (run, approve, reject, reset, replan, merge).
 Story Detail is for shaping a Story before and during planning — approve, edit,
 reshape acceptance criteria, and launch the Workstream. See
-[navigation.md](navigation.md).
+[watch.md](watch.md).

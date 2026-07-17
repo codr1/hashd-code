@@ -157,7 +157,7 @@ Every prompt that receives context sections gains an optional design_section:
 | implement.md | commit details, tech stack, directives | `## Design Reference` -- frames referenced in current micro-commit |
 | review_contextual.md | story context, ACs, diff | `## Design Compliance` -- referenced frames for design checking |
 | final_review.md | full diff, ACs, review notes | `## Design Specs` -- all frames referenced across the story |
-| pair_programmer.md | story/workstream context | `## Design Artifacts` -- loaded via @figma: in chat |
+| chat_general.md | story/workstream context | inline in the message -- @figma: refs unfold server-side in chat |
 
 ## Reference Resolution
 

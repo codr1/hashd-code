@@ -6,15 +6,20 @@
 
 ## Install
 
-One paste on a fresh box:
+**Requirements**
+
+- **git**
+- **A working AI agent** — Claude Code by default, or Codex, Gemini, OpenCode, Kimi, Qwen, or Copilot. [Install and authenticate an agent →](QUICKSTART.md#ai-coding-agents), you can also [set different agents for different stages](docs/AGENT_MANAGEMENT.md).
+
+hashd installs everything else — Python, the forge CLIs (`gh`/`glab`/`bkt`/`tea`), diff tools — on its own.
+
+**Install**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
-The installer provides a Python 3.11+ runtime (via [uv](https://github.com/astral-sh/uv) when your system has none), installs the `hashd` CLI and server, fetches SHA-verified forge CLIs (gh, glab, bkt, tea), then runs `hashd doctor` to confirm the setup. `wf` and `ha` are aliases for the same CLI.
-
-**System requirements:** `git`, and one authenticated AI coding agent CLI ([Claude Code](https://docs.claude.com/en/docs/claude-code) by default). The agent CLIs are npm packages, so installing one needs Node.js -- `hashd doctor` prints the exact commands for your OS. See [QUICKSTART.md](QUICKSTART.md#ai-coding-agents) for the agent on-ramp.
+New to hashd? **[QUICKSTART](QUICKSTART.md)** takes you from here to your first merged change. (`wf` and `ha` are aliases for `hashd`.)
 
 ## What hashd is
 
@@ -47,20 +52,32 @@ The bottleneck in shipping AI-written code is not typing speed -- it is **trust*
 
 ## Documentation
 
-Start here to learn the system, then dive into the reference docs:
+**Start here**
 
-- **[docs/how-hashd-works.md](docs/how-hashd-works.md)** - the mental model: entities, the governed gates, the event log, and the provenance chain, as concepts.
-- **[docs/walkthrough.md](docs/walkthrough.md)** - one feature start-to-finish, from spec to a merged commit with a full audit trail.
-- **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage, gates, lineage.
-- **[docs/navigation.md](docs/navigation.md)** - the `hashd watch` TUI: Dashboard, Story Detail, Workstream Detail, and when to use each.
-- **[docs/provenance.md](docs/provenance.md)** - the audit/lineage story: `hashd lineage`, SLSA/in-toto export, hash-chain verify, the durable event log.
-- [QUICKSTART.md](QUICKSTART.md) - installation, first project setup, basic workflows.
-- [docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md) - agent switching, auth configuration, prompt overrides.
-- [docs/CODE_TOOLS.md](docs/CODE_TOOLS.md) - code intelligence operator commands and troubleshooting.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - client/server boundaries, state, events, and diagnostics.
-- [docs/REMOTE.md](docs/REMOTE.md) - running a remote or team server: TLS trust model, account setup, tokens, pairing, troubleshooting.
-- [WF.md](WF.md) - the canonical lifecycle documentation, state machines, and command reference.
-- [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) - version-by-version release notes.
+- **[QUICKSTART.md](QUICKSTART.md)** - install to your first merged change.
+- **[docs/how-hashd-works.md](docs/how-hashd-works.md)** - the mental model: entities, the governed gates, the event log, and the provenance chain.
+- **[docs/walkthrough.md](docs/walkthrough.md)** - one feature start-to-finish, from spec to a merged commit.
+
+**Everyday use**
+
+- **[docs/watch.md](docs/watch.md)** - the `hashd watch` terminal UI: the three views and the keys that move between them.
+- **[docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md)** - choose and switch AI agents, including per stage.
+- **[docs/CODE_TOOLS.md](docs/CODE_TOOLS.md)** - the `hashd code` intelligence commands.
+- **[docs/HOOKS.md](docs/HOOKS.md)** - workspace lifecycle hooks.
+- **[docs/CONNECTORS.md](docs/CONNECTORS.md)** - external integrations (GitHub Issues, Figma).
+- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - when something breaks.
+
+**Running a server**
+
+- **[docs/REMOTE.md](docs/REMOTE.md)** - remote and team servers: TLS trust, account setup, tokens, pairing.
+
+**Reference**
+
+- **[WF.md](WF.md)** - the canonical command and lifecycle reference: state machines, transitions, keybindings.
+- **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage.
+- **[docs/provenance.md](docs/provenance.md)** - the audit story: `hashd lineage`, SLSA/in-toto export, hash-chain verify.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - client/server boundaries, state, events, diagnostics.
+- **[RELEASE_NOTES.md](docs/RELEASE_NOTES.md)** - version-by-version release notes.
 
 ## What hashd does
 
@@ -456,7 +473,7 @@ repos, symlink artifact paths, and any REQS edit that changes text between
 | `hashd prompts edit <name>` | Edit prompt override |
 | `hashd agents` | Show installed AI agents and stage assignments |
 | `hashd doctor` | Validate setup and diagnose issues |
-| `hashd restart [component] [-y]` | Restart infrastructure (Prefect, ZMQ, messengers) |
+| `hashd restart [component] [-y]` | Restart infrastructure (server, Temporal sidecar, ZMQ forwarder, messengers) |
 | `hashd search <query> [--kind kind] [-n limit]` | Full-text search across stories, events, reviews, chat (default limit: 20) |
 
 ### Smart ID Routing
@@ -523,34 +540,26 @@ For PR states (`pr_open`, `pr_approved`):
 
 ## Workflow Execution
 
-Hashd uses [Prefect](https://www.prefect.io/) for workflow orchestration. The Prefect server and worker are started automatically when needed:
+Hashd uses [Temporal](https://temporal.io/) for workflow orchestration. The Temporal sidecar and the in-server worker start automatically when needed:
 
 ```bash
-# Run a workstream (Prefect starts automatically)
-hashd run my_feature  # Submits to Prefect, returns immediately
+# Run a workstream (Temporal starts automatically)
+hashd run my_feature  # Dispatches the run workflow, returns immediately
 
 # Monitor progress
 hashd watch my_feature  # Interactive TUI
 hashd show my_feature   # Status snapshot
 ```
 
-The `hashd run` command submits work to the Prefect worker and returns immediately. Use `hashd watch` or `hashd show` to monitor execution.
+The `hashd run` command dispatches a Temporal workflow and returns immediately. Use `hashd watch` or `hashd show` to monitor execution.
 
 ### Automatic Retries
 
-Prefect automatically retries transient failures:
-
-| Stage | Retries | Delay | Handles |
-|-------|---------|-------|---------|
-| implement | 2 | 10s | Agent timeouts, API errors |
-| test | 2 | 5s | Subprocess timeouts |
-| review | 1 | 30s | Claude rate limits |
-| qa_gate | 1 | 5s | Validation errors |
-| update_state | 2 | 5s | Git push failures |
+Transient failures are retried automatically in two layers: the agent runner retries classified-`transient` agent failures (API timeouts, rate limits) within an attempt, and each agent stage runs as a Temporal activity whose retry policy retries infrastructure failures (worker death, DB faults) across attempts. Agent outcomes -- review verdicts, failing tests -- are data, never auto-retried as errors.
 
 ## Requirements
 
-See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions including platform-specific commands.
+See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions including platform-specific commands. Building from source instead? See **[DEVELOPMENT.md](DEVELOPMENT.md)**.
 
 - **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
 - **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `hashd doctor` prints the exact OS-correct install commands.
@@ -717,7 +726,7 @@ Build command (optional, press Enter to skip) [task build]:
 Merge gate test command [task test]:
 ```
 
-The orchestrator runs exactly what you configure:
+The server runs exactly what you configure:
 
 1. **BUILD_CMD** (if set) - runs before tests
 2. **TEST_CMD** - runs the test suite

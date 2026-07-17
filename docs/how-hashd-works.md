@@ -27,10 +27,13 @@ merged, attested commit.
 
 Work flows through four entities, each with a validated state machine:
 
-```text
-Requirement (REQS.md)  ->  Suggestion  ->  Story  ->  Workstream  ->  micro-commits  ->  merged commit
-                           (discovered)    (planned)   (a branch +     (one change       (with full
-                                           with ACs)    a worktree)     per cycle)         lineage)
+```mermaid
+flowchart LR
+    R["Requirement<br/>(REQS.md)"] --> Su["Suggestion<br/>discovered"]
+    Su --> St["Story<br/>planned, with ACs"]
+    St --> W["Workstream<br/>a branch + a worktree"]
+    W --> M["micro-commits<br/>one change per cycle"]
+    M --> C["merged commit<br/>with full lineage"]
 ```
 
 - A **Suggestion** is a discovered planning candidate. Discovery reads your
@@ -61,14 +64,16 @@ transitions are legal next — and so does every interface.
 Inside a Workstream, every micro-commit runs the same loop, and every arrow in it
 is a **gate**:
 
-```text
-select next micro-commit
-   -> implement   (agent writes code)
-   -> test        (gate: configured tests must pass, else back to implement)
-   -> review      (gate: AI reviewer approves, or requests changes -> back to implement)
-   -> human gate  (gate: approve / reject / reset — governed by autonomy mode)
-   -> commit      (record the commit + its lineage)
-   -> select next ...
+```mermaid
+flowchart TD
+    Sel["select next micro-commit"] --> Impl["implement<br/>(agent writes code)"]
+    Impl --> Test{"test<br/>configured tests pass?"}
+    Test -- no --> Impl
+    Test -- yes --> Rev{"review<br/>AI reviewer approves?"}
+    Rev -- "requests changes" --> Impl
+    Rev -- yes --> Human["human gate<br/>approve / reject / reset<br/>(per autonomy mode)"]
+    Human --> Commit["commit<br/>(record commit + lineage)"]
+    Commit --> Sel
 ```
 
 When all micro-commits are done, two more gates run at the branch level:
@@ -129,9 +134,10 @@ Because hashd owns the whole pipeline, it does not have to *infer* why a line of
 code exists — it *recorded* the answer as the code was produced. Every commit
 traces back through:
 
-```text
-line of code -> git commit -> micro-commit -> run -> prompt + agent call
-  -> workstream -> story -> requirement -> reviews + human decisions
+```mermaid
+flowchart LR
+    L["line of code"] --> GC["git commit"] --> MC["micro-commit"] --> Run["run"] --> P["prompt +<br/>agent call"]
+    P --> W["workstream"] --> St["story"] --> Req["requirement"] --> Rev["reviews +<br/>human decisions"]
 ```
 
 This is the sharpest thing hashd does that a generation-only tool cannot. Capture
@@ -169,7 +175,7 @@ trustworthy enough to ship.
 ## Where to go next
 
 - [walkthrough.md](walkthrough.md) — take one feature start-to-finish.
-- [navigation.md](navigation.md) — the TUI navigation journey.
+- [watch.md](watch.md) — the watch TUI: the three views and the keys that move between them.
 - [provenance.md](provenance.md) — the audit/lineage story in depth.
 - [glossary.md](glossary.md) — every term defined.
 - **[WF.md](../WF.md)** — the canonical state machines, transitions, and command reference.
