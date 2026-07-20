@@ -599,6 +599,53 @@ Keybindings change based on which type is selected:
 
 ---
 
+## Artifact Edit Locks (REQS / SPEC)
+
+REQS.md and SPEC.md have independent per-project edit locks so a human editor and
+the automated PM writers never mutate the same document at once. Each lock is a
+workflow-ID singleton (`reqs-lock:{project}` / `spec-lock:{project}`) --
+`ArtifactLockWorkflow` -- the same primitive family as `pm:{project}` and
+`mergelock:{project}`. Whoever's holder currently runs under that ID holds the
+lock; the lock's state (holder, FIFO queue, lease) is durable across restarts.
+
+Waiting is **event-driven, never polled**. Two acquire paths feed one FIFO queue:
+
+- **Clients** (TUI editor, CLI) acquire via a blocking Update -- it parks in the
+  workflow until granted, then returns a lease token. The TUI drives a **10-min
+  idle lease** reset on keystrokes (2-min warning, then drop-to-read-only); the
+  CLI is identity-keyed (the holder is the calling user, no token threaded).
+- **Automated writers** (planning, story-edit, docs) acquire via a signal and
+  are **signaled back** on grant, so a waiting plan costs O(1) history, not one
+  event per poll. Planning/edit take `reqs-lock` **inside** their pm section (pm
+  stays the automated-vs-automated mutex; the artifact lock is purely the human
+  boundary); docs takes `spec-lock` for its run. A 2-min heartbeat holds the
+  lease; release is explicit, and the writer's body deadline + lease are the
+  crash backstop.
+
+```mermaid
+sequenceDiagram
+    participant H as Human editor (TUI/CLI)
+    participant L as reqs-lock:{project}
+    participant P as Planning (pm section)
+    H->>L: acquire (Update) -> holds, 10-min idle lease
+    P->>L: acquire (signal) -> queued behind H
+    Note over H: edits REQS, heartbeats on keystroke
+    H->>L: release (or lease lapses after 10-min idle)
+    L-->>P: granted (signal back) -> planning proceeds
+    P->>L: release when the section completes
+```
+
+**Save guard:** a write is rejected if its token / caller-identity no longer
+holds the lock (a lapsed lease). A write while an **automated** writer holds the
+lock is always rejected (its edit must not interleave); while another **human**
+holds it, a tokenless write falls back to the base-SHA CAS. **Break-glass steal**
+exists server-side but is unpublished (no CLI verb, no TUI key) and refuses to
+steal from a system process -- yanking a live planning run would corrupt its
+in-flight REQS write. When Temporal is absent the whole mechanism degrades to
+CAS-only writes.
+
+---
+
 ## Phase 2: Implementation
 
 ```mermaid
@@ -896,9 +943,11 @@ answer; the run itself is already in flight.
 | `hashd project describe` | Show current project description |
 | `hashd project describe --suggest` | AI-generate a description suggestion |
 | `hashd project reqs [show]` | Show configured REQS artifact content through hashd-server |
-| `hashd project reqs edit` | Edit configured REQS in `$EDITOR`; active-story WIP sections are protected |
+| `hashd project reqs set [--file F]` | Overwrite REQS from a file or stdin, atomically under the edit lock; active-story WIP sections are protected |
+| `hashd project reqs {lock,refresh,unlock}` | Hold / renew / release the REQS edit lock across a multi-step script (identity-keyed, 10-min lease) |
 | `hashd project spec [show]` | Show configured SPEC artifact content through hashd-server |
-| `hashd project spec edit` | Edit configured SPEC in `$EDITOR` through the server-side commit flow |
+| `hashd project spec set [--file F]` | Overwrite SPEC from a file or stdin, atomically under the edit lock |
+| `hashd project spec {lock,refresh,unlock}` | Hold / renew / release the SPEC edit lock across a multi-step script |
 
 ### System Config Commands
 
@@ -1762,16 +1811,29 @@ hashd project reqs       # same as hashd project reqs show
 hashd project spec       # same as hashd project spec show
 ```
 
-Manual edits go through the same server-side ownership boundary:
+Manual edits go through the same server-side ownership boundary. The CLI is batch
+only -- there is no interactive `$EDITOR` session holding a lock open (that is the
+TUI editor's job). Overwrite in one shot from a file or stdin:
 
 ```bash
-hashd project reqs edit
-hashd project spec edit
+hashd project reqs set --file new-reqs.md
+hashd project spec set < new-spec.md
 ```
 
-The CLI fetches the artifact from hashd-server, opens it in `$EDITOR`, then sends
-the replacement back with the document `head_sha` it originally read. The server
-does the write, commit, and push. It rejects:
+`set` fetches the current `head_sha`, then the server acquires the document's edit
+lock, writes, commits, pushes, and releases -- atomically, mutually exclusive with
+planning and other editors. To fence the document across several manual steps,
+hold the lock explicitly (identity-keyed, 10-minute lease, renew before it lapses):
+
+```bash
+hashd project reqs lock       # hold it
+hashd project reqs set --file draft.md
+hashd project reqs refresh    # extend the lease if the work runs long
+hashd project reqs unlock     # release
+```
+
+A `set` records the document `head_sha` it read for the CAS check. The server
+rejects:
 
 - stale edits where the artifact changed after the editor opened
 - dirty repos, because manual artifact edits must commit exactly one document change

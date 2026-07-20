@@ -4,6 +4,39 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.13 - 2026-07-20
+
+Soak-hardening on top of the Temporal engine: a batch of fixes for issues the
+v0.9.12 petshop soak surfaced -- broken operator-recovery paths, silent async
+failures, and lingering one-off HTTP clients -- plus the ZMQ retirement and
+per-project artifact edit locks.
+
+### What's Changed
+
+- **Runner-wedge recovery.** `hashd close --force` no longer returns 422, `hashd
+  skip` works on real (heading-format) plans instead of 409ing every time, `hashd
+  skip -m` records a durable reason, and `replan -> run` regenerates the plan
+  instead of dead-ending at preflight.
+- **Workstream/story lifecycle fixes.** `hashd run` on a concerns-flagged
+  workstream points at `hashd reject` instead of dead-ending at the merge gate;
+  closing a workstream now releases its linked story instead of stranding it at
+  `implementing`; and WIP-marker cleanup on abandon no longer strands markers
+  under concurrent REQS writes.
+- **Team-mode TLS + telemetry.** The teardown-hook and grep-redirect calls now go
+  through the standard fingerprint-pinned, authenticated client instead of bare
+  HTTP clients that failed strict TLS against the LAN certificate in team mode.
+- **Async operation surfacing.** Add-commit declines and other async operation
+  outcomes now surface on the story detail and workstream list via a reusable
+  `operation_result` event, and the agent-driven `plan split` render bug is fixed.
+- **ZMQ retired.** The ZMQ forwarder is replaced by an in-process event broker;
+  hashd-server is the sole publisher and bridges directly to SSE.
+- **Per-project REQS/SPEC edit locks.** Editing REQS or SPEC takes a Temporal,
+  event-driven FIFO lock so concurrent writers (planning, story-edit, docs, the
+  TUI editor) don't clobber each other, with a read-only SPEC viewer in the TUI
+  artifacts menu.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.12...v0.9.13
+
 ## v0.9.12 - 2026-07-17
 
 The Temporal release. Prefect is gone: hashd's entire execution engine -- the

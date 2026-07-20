@@ -44,7 +44,7 @@ blocked, or waiting on you. Use it to triage: scan for anything `blocked` or
 | `p` | open the **Plan** screen |
 | `m` | change **autonomy mode** |
 | `j` | switch project |
-| `C` · `R` · `/` · `?` | chat · edit REQS · command palette · help |
+| `A` · `C` · `/` · `?` | artifacts (view SPEC, view/edit REQS) · chat · command palette · help |
 | `q` | quit |
 
 ## Story Detail — shape the work
