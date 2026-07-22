@@ -4,6 +4,41 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.14 - 2026-07-22
+
+Remote project add lands: you can bring a project onto a hashd server you don't
+share a filesystem with, pull it back down, and promote a no-remote project to a
+real git remote. Plus a round of Temporal soak-reliability fixes and the Sonnet
+5 model default.
+
+### What's Changed
+
+- **Remote project add (`hashd project add` against a remote server).** Land a
+  repo on the server three ways -- `--clone <https-url>` (server-side clone with
+  an encrypted per-user forge token), `--bundle` (upload a local repo), or
+  `--create` (start empty) -- plus `hashd project download` to pull a
+  server-owned repo back, and `hashd project set-remote` to promote a no-remote
+  project onto a real git remote. Every server-side git network op is
+  SSRF-guarded (public-host-only, DNS-rebind- and redirect-proof), and forge
+  tokens are encrypted at rest (AES-256-GCM).
+- **Encrypted forge token store.** Per-user forge tokens are sealed at rest and
+  resolved CLI-first for single-user / token-based for teams, via `hashd forge`.
+- **Soak-reliability fixes.** A hung git or test subprocess during merge can no
+  longer stall a substage past its timeout; a crashed run no longer pins
+  `runtime_status` at `running` (the stale-invocation reaper is now actually
+  scheduled); merge no longer strands WIP markers when an annotation block is
+  empty; and the `loop_triggered` transcript line now names its real trigger.
+- **Agent auth failures are classified, not retried.** An agent that fails
+  authentication surfaces an actionable diagnostic instead of being retried as a
+  transient error.
+- **Sonnet 5 for review stages.** The review / adjudicate / concern-triage
+  stages default to `claude-sonnet-5`.
+- **Login robustness.** Shell-completion sourcing is guarded so a missing binary
+  can't break `hashd` login; the forge-aware `merge_mode` default no longer omits
+  the mode for multi-repo doctor.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.13...v0.9.14
+
 ## v0.9.13 - 2026-07-20
 
 Soak-hardening on top of the Temporal engine: a batch of fixes for issues the

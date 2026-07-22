@@ -273,6 +273,9 @@ ensure_tools_dir_on_path() {
 # cobra emits as a compdef script, so it needs compinit first). Idempotent: the
 # prior managed block and any legacy hand-written wf-completion lines are
 # stripped before the current block is appended, so re-runs don't stack.
+# Each source line is guarded by `command -v` so a login shell never errors when
+# the binary is transiently absent (mid-upgrade, cleaned build, moved checkout):
+# the completion is skipped, not shouted about on every prompt.
 install_completions() {
     local rc tmp block
 
@@ -292,6 +295,7 @@ install_completions() {
             -e '^[[:space:]]*\[\[[^]]*wf-completion\.bash[^]]*\]\][[:space:]]*&&[[:space:]]*source[[:space:]]+["]?[^"]*wf-completion\.bash["]?[[:space:]]*$' \
             -e '^[[:space:]]*autoload -Uz compinit && compinit -u[[:space:]]*$' \
             -e '^[[:space:]]*source[[:space:]]+<\((hashd|wf|ha) completion (bash|zsh)\)[[:space:]]*$' \
+            -e '^[[:space:]]*command -v (hashd|wf|ha) >/dev/null 2>&1 && source[[:space:]]+<\((hashd|wf|ha) completion (bash|zsh)\)[[:space:]]*$' \
             "$rc" > "$tmp" || true
         mv "$tmp" "$rc"
 
@@ -303,10 +307,10 @@ install_completions() {
                 # cobra's zsh completion is a compdef script; compinit must have
                 # run for it to register. compinit is safe to re-run (-u skips
                 # the insecure-directory prompt in a non-interactive rc).
-                block=$'autoload -Uz compinit && compinit -u\nsource <(hashd completion zsh)\nsource <(wf completion zsh)\nsource <(ha completion zsh)'
+                block=$'autoload -Uz compinit && compinit -u\ncommand -v hashd >/dev/null 2>&1 && source <(hashd completion zsh)\ncommand -v wf >/dev/null 2>&1 && source <(wf completion zsh)\ncommand -v ha >/dev/null 2>&1 && source <(ha completion zsh)'
                 ;;
             *)
-                block=$'source <(hashd completion bash)\nsource <(wf completion bash)\nsource <(ha completion bash)'
+                block=$'command -v hashd >/dev/null 2>&1 && source <(hashd completion bash)\ncommand -v wf >/dev/null 2>&1 && source <(wf completion bash)\ncommand -v ha >/dev/null 2>&1 && source <(ha completion bash)'
                 ;;
         esac
         printf '%s\n%s\n' "$COMPLETION_MARKER" "$block" >> "$rc"
