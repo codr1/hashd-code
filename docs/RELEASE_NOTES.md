@@ -4,6 +4,30 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.16 - 2026-07-23
+
+Three reliability fixes from the v0.9.15 petshop soak: a crashed story now
+surfaces an actionable error, a killed server no longer leaves an agent running
+loose, and add-commit tells you how to build the commit it queued.
+
+### What's Changed
+
+- **A crashed story now shows an actionable error, not a blank "crashed".** When
+  planning or an edit fails a story into `draft_failed` (for example a git push
+  to an unreachable remote), the reason -- including the retry command -- now
+  appears in `hashd show STORY-x`. Previously it read `FAILED (crashed)` with no
+  error, while the real diagnostic sat only in a stage-log file.
+- **A killed server no longer leaves an agent running unsupervised.** Agent
+  subprocesses now die with the server (`Pdeathsig`, held reliable across the
+  fork), and a startup sweep SIGKILLs any agent orphaned by a hard crash before
+  resuming work -- so a resumed run can't race a leftover agent over the same
+  worktree.
+- **`add-commit` points you at the next step.** The confirmation now says to run
+  `hashd run <ws>` to build the queued commit, instead of looking like a stuck
+  workstream (add-commit plans the commit; you run to implement it).
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.15...v0.9.16
+
 ## v0.9.15 - 2026-07-23
 
 A soak-reliability patch: a leaked subprocess can no longer wedge a run, a story
