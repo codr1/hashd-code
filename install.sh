@@ -219,6 +219,29 @@ node_install_hint() {
     fi
 }
 
+# git_install_hint: the ONE OS-correct command to install git. git is a system
+# prerequisite hashd shells out to for every project op (worktrees, commits,
+# merges) -- the installer checks for it but, like a C library or coreutils,
+# never bundles or installs it. Detect the platform's package manager so the
+# suggestion is a single copy-paste line, not a multi-distro menu.
+git_install_hint() {
+    if [ "$PLATFORM" = "macosx" ]; then
+        echo "xcode-select --install"
+    elif command -v apt-get &>/dev/null; then
+        echo "sudo apt-get install -y git"
+    elif command -v dnf &>/dev/null; then
+        echo "sudo dnf install -y git"
+    elif command -v pacman &>/dev/null; then
+        echo "sudo pacman -S --noconfirm git"
+    elif command -v zypper &>/dev/null; then
+        echo "sudo zypper install -y git"
+    elif command -v apk &>/dev/null; then
+        echo "sudo apk add git"
+    else
+        echo "install git with your system package manager"
+    fi
+}
+
 # rc_targets: the shell rc files the installer manages (PATH + completions).
 # Always ~/.bashrc (bash). macOS Terminal runs zsh and never sources ~/.bashrc,
 # so include ~/.zshrc on macOS -- and on Linux too when the login shell is zsh.
@@ -378,6 +401,20 @@ case "$ARCH" in
 esac
 
 printf '%shashd installer%s  %s%s (%s)%s\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$PLATFORM" "$MACHINE" "$C_RESET"
+
+# --- Preflight: git is a hard prerequisite ---
+#
+# hashd shells out to the system git for every project op (worktrees, commits,
+# merges). Unlike the specialty tools this installer vendors (gitleaks,
+# git-delta, the forge CLIs), git is a base system dependency -- like a C
+# library -- that hashd requires but never installs. Fail here, before any
+# download or toolchain work, with the one command that fixes it.
+if ! command -v git &>/dev/null; then
+    die "git is required but was not found on PATH" \
+        "install.preflight" \
+        "hashd drives every project through git -- creating worktrees, committing micro-commits, and merging -- by shelling out to your system git.\nIt is a base system prerequisite the installer checks for but does not provide." \
+        "Install git, then re-run this installer:  $(git_install_hint)"
+fi
 
 # --- Resolve the Python toolchain ---
 #

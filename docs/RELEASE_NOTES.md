@@ -4,6 +4,31 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.15 - 2026-07-23
+
+A soak-reliability patch: a leaked subprocess can no longer wedge a run, a story
+being edited can no longer be approved out from under the edit, and a bare-box
+install fails fast when git is missing.
+
+### What's Changed
+
+- **A leaked test or agent subprocess can no longer wedge a run.** Every runner,
+  agent, hook, forge, and network-git command now bounds how long it waits on
+  its output pipe after the deadline (`cmd.WaitDelay`). A project test command
+  that leaves a background listener holding the pipe -- or an agent that spawns a
+  surviving MCP or credential-helper child -- returns within seconds of the
+  timeout instead of blocking the substage until the housekeeping sweep reaps it.
+- **Approving a story mid-edit is rejected, not silently reverted.** Answering
+  clarifications dispatches an edit; approving while that edit is still in flight
+  now fails fast with an actionable diagnostic instead of "succeeding" and then
+  being undone when the edit lands the story back at draft.
+- **`install.sh` fails fast when git is missing.** git is a system prerequisite
+  hashd shells out to (and never bundles); on a bare box the installer now stops
+  up front with the OS-correct install command instead of running to completion
+  and surfacing the gap only at first `doctor`.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.14...v0.9.15
+
 ## v0.9.14 - 2026-07-22
 
 Remote project add lands: you can bring a project onto a hashd server you don't
