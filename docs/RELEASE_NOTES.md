@@ -4,6 +4,34 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.17 - 2026-07-24
+
+hashd gets a web UI. Install hashd and it's there -- after `hashd restart` it's
+served at http://localhost:8099/ui, started and supervised alongside the server
+with no separate process to run. Server-side-rendered views of your projects,
+plans, stories, and workstreams with the same operator actions as the CLI,
+curl-drivable end to end and keyboard-accessible.
+
+### What's Changed
+
+- **A web UI, shipped and auto-launched.** hashd-web ships inside the hashd
+  install (binary and source) and comes up with `hashd restart` / `hashd start`,
+  health-checked and reaped like every other hashd service -- you never launch or
+  manage a separate binary. It prints its URL on start.
+- **Dashboard, plan, stories, and workstreams in the browser.** Server-side-
+  rendered pages mirroring the TUI/CLI: suggestions plus REQS/SPEC editing on the
+  plan page, the stories and workstreams lists and their detail pages, with the
+  human-gate verbs (approve / reject / run / merge) wired in.
+- **Single-user and team, both supported.** Solo mode needs no login; team mode
+  adds per-user sign-in with a session cookie, and the live event stream is fanned
+  out per user.
+- **Accessible and curl-drivable.** WAI-ARIA tabs, menus, and fields with keyboard
+  operation, and every page and action is reachable by curl via structural hooks
+  (no reliance on JavaScript) -- the same surface the operator smoke and the
+  petshop soak drive.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.16...v0.9.17
+
 ## v0.9.16 - 2026-07-23
 
 Three reliability fixes from the v0.9.15 petshop soak: a crashed story now
