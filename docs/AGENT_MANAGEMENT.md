@@ -324,9 +324,16 @@ Override resolution: project `prompts/<name>.md` > built-in `prompts/<name>.md`.
 
 Overrides are by **prompt template name**, not stage name. Some stages compose multiple templates (e.g., implement uses 6), so overriding at the template level gives fine-grained control.
 
+The server owns the override files; the CLI reads and writes them over the REST
+API, so these commands work the same in single-user and team/remote mode.
+
 ```bash
-# Create an override (copies default, opens $EDITOR)
+# Edit an override in $EDITOR (starts from the current override, or the default)
 hashd prompts edit breakdown
+
+# Set an override non-interactively (for scripts / CI)
+hashd prompts edit breakdown --file new_breakdown.md
+cat new_breakdown.md | hashd prompts edit breakdown --file -
 
 # See what changed
 hashd prompts diff breakdown

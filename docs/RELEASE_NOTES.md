@@ -4,6 +4,39 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.18 - 2026-07-27
+
+The hashd CLI becomes a pure REST client. The server now owns all project state
+-- repositories, config, prompts, and every AI agent run -- so the CLI never
+touches SQLite, Temporal, or the filesystem directly, and every command works
+identically whether the server is local or a remote team host.
+
+### What's Changed
+
+- **The server owns each project's repo.** `hashd project add` registers a
+  project's repository at a canonical server-side path (a symlink for a local
+  add, a clone for a remote one), and every agent run and git operation resolves
+  through it. `hashd project remove` unlinks the server's own link but preserves
+  a pre-existing clone or ingested repo -- it never deletes your working tree.
+- **AI agent runs moved server-side.** describe/tech suggestion, the multi-repo
+  project-add describe map-reduce, and `hashd project repo edit --suggest` now
+  run as server-orchestrated Temporal workflows; the CLI dispatches and awaits
+  the result over the event stream instead of invoking an agent itself -- so they
+  work unchanged in team mode.
+- **Prompts, doctor, cost, and completions are server-backed.** `hashd prompts`
+  reads and edits prompts through the server, `hashd doctor` runs its checks
+  server-side, `hashd cost` accepts a git ref the server resolves, and
+  project-name tab completion lists projects over REST -- the last client-side
+  ops-directory reads are gone.
+- **Unified abandon/close teardown.** Abandoning or closing a story or workstream
+  now cascades cleanup through one server-side path, fixing an orphaned-worktree
+  case for in-flight stories.
+- **Team-mode and petshop-soak reliability fixes.** A batch of fixes surfaced by
+  the multi-user petshop soak, including team-mode edge cases in planning and
+  merge.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.17...v0.9.18
+
 ## v0.9.17 - 2026-07-24
 
 hashd gets a web UI. Install hashd and it's there -- after `hashd restart` it's

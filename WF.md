@@ -16,6 +16,22 @@ Monitor via `hashd watch` (TUI) or `hashd show`.
 
 For the canonical model of how a workstream's runtime position is described — stage, status, substage, operator verbs, and recovery from crashes — see **Workstream State Model** below.
 
+### Repo Ownership
+
+The server owns each project's repository at a canonical in-tree path
+(`<ops>/repos/<name>`): `hashd project add` on a local path creates a **symlink**
+to the operator's repo, while a remote add (`--clone`/`--bundle`/`--create`)
+produces a server-side **clone**. Every agent run and git operation resolves
+through this canonical path, so the CLI never needs to know a repo's real
+location — the same reason repo-scoped agent flows (`repo edit --suggest`) pass a
+repo **name**, not a client-computed path, and work identically in local and
+team mode.
+
+`hashd project remove` unlinks the server's own symlink but **preserves** a
+pre-existing clone or ingested repo — it never deletes the operator's actual
+working tree. (`repo_origin` on the project config records `linked` / `ingested`
+/ `adopted` so remove knows what it may and may not delete.)
+
 ---
 
 ## Server Security Model
@@ -1516,7 +1532,7 @@ Substage timeouts have one effective settings source. Stages with an in-process 
 
 **Auto-cancel beyond the engine-state janitor is future work.** The janitor (below) cancels drifted executions and prunes closed histories, but does not auto-rewind the workstream's macro FSM, free the worktree, or close the workstream. The operator drives the recovery decision via `hashd run --retry`, `hashd reset`, or `hashd close`.
 
-**Engine-state janitor.** The FSM is the source of truth; `temporal.db` is re-derivable, so the housekeeping sweep (every 5 minutes, per project) reconciles drift between them in `sweepZombieWorkflows` (`server/internal/api/dispatch_engine.go`). It walks the workflow-ID families — `run`/`merge`/`resolve`/`addcommit` (scope: workstream), `plan`/`edit`/`plansplit` (scope: story), `docs`/`discovery`/`detect` (scope: project-transient); the `pm:`/`mergelock:` singletons are excluded because cancelling the parent workflows covers them. Two passes per family: an OPEN pass cancels a still-running execution whose entity is FSM-terminal or absent, and a CLOSED pass deletes the history of a closed execution for a terminal/absent entity the way a merged PR's branch is pruned — leaving the 7-day namespace retention as the backstop for everything else (failed runs an operator may still inspect). Project-transient families carry no per-entity FSM row, so they cancel only past a 72h age floor and skip the closed pass entirely; `docs`/`discovery` are singleton IDs matched exactly (not by prefix) so a sweep of `proj` cannot reach `proj-staging`. A non-`sql.ErrNoRows` lookup error fails safe (entity treated as live). Every action writes a durable `engine_cleanup` events-table row. Cancel/abandon/remove are themselves recorded operator intent, so terminal status is the authorization; workstream removal additionally cancels its own open executions inline and, when a PR is attached, closes it on the forge and deletes the remote branch (idempotent when the ref is already gone), with the janitor as the backstop for anything missed.
+**Engine-state janitor.** The FSM is the source of truth; `temporal.db` is re-derivable, so the housekeeping sweep (every 5 minutes, per project) reconciles drift between them in `sweepZombieWorkflows` (`server/internal/api/dispatch_engine.go`). It walks the workflow-ID families — `run`/`merge`/`resolve`/`addcommit` (scope: workstream), `plan`/`edit`/`plansplit` (scope: story), `docs`/`discovery`/`detect`/`pmdescribe` (scope: project-transient); the `pm:`/`mergelock:` singletons are excluded because cancelling the parent workflows covers them. Two passes per family: an OPEN pass cancels a still-running execution whose entity is FSM-terminal or absent, and a CLOSED pass deletes the history of a closed execution for a terminal/absent entity the way a merged PR's branch is pruned — leaving the 7-day namespace retention as the backstop for everything else (failed runs an operator may still inspect). Project-transient families carry no per-entity FSM row, so they cancel only past a 72h age floor and skip the closed pass entirely; `docs`/`discovery` are singleton IDs matched exactly (not by prefix) so a sweep of `proj` cannot reach `proj-staging`. A non-`sql.ErrNoRows` lookup error fails safe (entity treated as live). Every action writes a durable `engine_cleanup` events-table row. Cancel/abandon/remove are themselves recorded operator intent, so terminal status is the authorization; workstream removal additionally cancels its own open executions inline and, when a PR is attached, closes it on the forge and deletes the remote branch (idempotent when the ref is already gone), with the janitor as the backstop for anything missed.
 
 ### Operator Verbs
 
@@ -1885,7 +1901,46 @@ Each long-running operation runs as a Temporal workflow under a singleton workfl
 | `plan:{project}:{story}` | Create story from suggestion | Plan screen suggestion claim, `hashd plan story`, or `hashd plan bug` |
 | `merge:{project}:{ws}` | Merge to main and archive | `hashd merge` |
 
-The other operations (resolve, edit, docs, discovery, detect, plan-split, add-commit) follow the same singleton-ID pattern; PM-artifact mutations additionally serialize through the `pm:{project}` section, and the `housekeeping` sweep fires from a Temporal Schedule every 5 minutes.
+The other operations (resolve, edit, docs, discovery, detect, plan-split, add-commit) follow the same singleton-ID pattern; PM-artifact mutations additionally serialize through the `pm:{project}` section, and the `housekeeping` sweep fires from a Temporal Schedule every 5 minutes. `hashd project describe --suggest` and `hashd project tech --suggest` dispatch the same way under `pmdescribe:{project}:{target}` (target `description` or `tech`): the CLI POSTs `/projects/{name}/describe` or `/tech`, the server runs the `pm_describe` agent stage server-side, and the CLI renders the result from the `pm_describe_completed` event -- so the agent runs on the server in both local and team mode and the CLI never invokes an agent itself.
+
+#### Project-describe map-reduce (project add)
+
+`hashd project add --suggest` describes a whole project -- for a multi-repo
+project, every repo -- as one server-orchestrated map-reduce, so the CLI stays a
+thin dispatch+await client instead of running N describe agents itself. The CLI
+POSTs `/projects/describe` (config-load-free, because the project does not exist
+yet; every sub-repo path must resolve under `root_path`) and awaits a single
+aggregate `pm_describe_project_completed` event under
+`pmdescribeproject:{project}`. The workflow runs `RunProjectDescribe`, which
+describes the primary repo first (its summary frames the others), fans the rest
+out in parallel, reduces them into the project description via a synthesis pass,
+then analyzes tech. Per-step failures become warnings and never abort the run.
+
+```mermaid
+flowchart TD
+    add["hashd project add --suggest"] -->|POST /projects/describe| wf["PMDescribeProjectWorkflow<br/>pmdescribeproject:{project}"]
+    wf --> primary["describe primary repo"]
+    primary -->|primary_context| fan{"fan out<br/>(errgroup, cap 8)"}
+    fan --> r1["describe repo A"]
+    fan --> r2["describe repo B"]
+    fan --> rN["describe repo N"]
+    r1 & r2 & rN --> synth["synthesis reduce<br/>-> project description"]
+    synth --> tech["analyze tech"]
+    tech --> done["emit pm_describe_project_completed<br/>(repo descriptions + project description + tech + warnings)"]
+    done -->|SSE| add
+```
+
+Single-repo projects skip the map-reduce: one `description` pass plus tech. The
+per-repo describe/synthesis prompts and the `describe_repo`/`synthesis` stage
+targets are the same `pm_describe` stage parameterized -- see the Agent Contract
+retry table for its crash-safety tier.
+
+`hashd project repo edit <name> --suggest` (an existing project) rides the same
+agent surfaces, but the CLI sends the repo **name** rather than a path: both
+`POST /projects/detect` and `POST /projects/describe` accept an optional
+`repo_name` that makes the server resolve the repo's working path from the repo
+it owns (`reqs.ResolveTargetRepoPath`). So the suggest flow needs no
+client-computed path and works unchanged in remote mode.
 
 Workflows execute asynchronously on the in-server Temporal worker.
 Human gates park the run workflow on the `human-gate` signal channel until the operator's decision arrives via API.
