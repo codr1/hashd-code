@@ -583,8 +583,8 @@ Minimum agent/tool versions verified for this release:
 
 | Tool | Minimum | Notes |
 |------|---------|-------|
-| Claude Code | 2.1.154 | required - the default agent for every stage |
-| Codex CLI | 0.130.0 | optional - swap in per stage if you want it |
+| Claude Code | 2.1.220 | required - the default agent for every stage |
+| Codex CLI | 0.145.0 | optional - swap in per stage if you want it |
 | uv | 0.11+ | |
 | Go | 1.26+ | |
 

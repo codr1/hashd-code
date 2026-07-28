@@ -4,6 +4,21 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.19 - 2026-07-28
+
+v0.9.19 is a reliability and internals release. A batch of fixes surfaced by the multi-user petshop soak hardens the runner, merge, and human-gate paths, and stage-timeout handling is consolidated into a single authority so operator timeout overrides -- including for the PM and discovery workflows -- take effect consistently.
+
+### What's Changed
+
+- **Stage-timeout handling consolidated.** The five separate resolvers for a stage's effective timeout collapse into one authority, and the single-shot PM/discovery workflows (planning, discovery, add-commit, detect, describe, edit) now derive their activity timeouts from project config -- so raising a stage timeout past the old hardcoded value takes effect instead of being silently capped.
+- **Soak-surfaced reliability fixes.** Stage sub-processes are reaped by process group, a killed worker is caught via restart 401-liveness, the read-only review/judge stages retry infra blips (Tier A), `already_done` is handled for the plain-format claude agent, and abandoning a story releases its claimed suggestion.
+- **Human gate and story-run gating.** Review-loop exhaustion parks at the human gate instead of failing the run, the park reason is surfaced on the operator surfaces, and the web/TUI story-run offer is gated on `runtime_status` and run-eligible workstream stages.
+- **`project remove` cleans up its artifacts.** Removing a project now hard-deletes its orphaned workstream and run log trees, so the filesystem parallels the database removal instead of stranding unreferenced trees.
+- **Side-by-side diffs.** New server `/diff/changes` and `/diff/blob` endpoints back side-by-side diff views.
+- **Model and agent version bumps.** The Codex default model moves to gpt-5.6-sol (GPT-5.6 flagship), and the documented agent minimums update to Claude Code 2.1.220 and Codex CLI 0.145.0.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.18...v0.9.19
+
 ## v0.9.18 - 2026-07-27
 
 The hashd CLI becomes a pure REST client. The server now owns all project state

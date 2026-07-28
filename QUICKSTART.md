@@ -83,10 +83,10 @@ brew install node
 Then install an agent:
 
 ```bash
-# Claude Code >= 2.1.137 (required - the default agent for every stage)
+# Claude Code >= 2.1.220 (required - the default agent for every stage)
 npm i -g @anthropic-ai/claude-code
 
-# Codex CLI >= 0.130.0 (optional - swap in per stage if you want it)
+# Codex CLI >= 0.145.0 (optional - swap in per stage if you want it)
 npm i -g @openai/codex
 ```
 
