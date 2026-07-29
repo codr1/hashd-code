@@ -4,6 +4,16 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.20 - 2026-07-29
+
+v0.9.20 is a single-fix patch release for team-mode operators: `hashd restart` no longer breaks a box that is paired to a hashd-server running on another machine.
+
+### What's Changed
+
+- **`hashd restart` works on a box paired to a remote server.** On a client paired to a team server, restart derived its *listen* address from the configured *server* URL and tried to bind the server box's IP, failing with `bind: cannot assign requested address`. Because that aborted the start phase, it also left hashd-web stopped -- so the documented recovery command left the box with neither a local server nor a web UI, and the per-user web on a client box could never reach the team server. Restart now asks whether the configured endpoint is an address this machine can actually bind. When it is not, it skips Temporal, the local server and the project migrations, and restarts only what a thin client owns: hashd-web (pointed at the remote, carrying the server's cert pin) and the Telegram daemons. A box that hosts its own server -- including one deliberately bound to its external IP for team mode -- is unaffected.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.19...v0.9.20
+
 ## v0.9.19 - 2026-07-28
 
 v0.9.19 is a reliability and internals release. A batch of fixes surfaced by the multi-user petshop soak hardens the runner, merge, and human-gate paths, and stage-timeout handling is consolidated into a single authority so operator timeout overrides -- including for the PM and discovery workflows -- take effect consistently.
