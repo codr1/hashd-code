@@ -321,8 +321,8 @@ Directives are automatically included in implementation prompts.
 | `hashd plan list` | View current suggestions |
 | `hashd plan story "title"` | Quick feature story (skips REQS discovery) |
 | `hashd plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
-| `hashd plan clone STORY-xxx` | Clone a locked story to edit |
-| `hashd plan edit STORY-xxx` | Edit existing story (if unlocked) |
+| `hashd story clone STORY-xxx` | Clone a locked story to edit |
+| `hashd story edit STORY-xxx` | Edit existing story (if unlocked) |
 | `hashd plan reset` | Reclaim suggestions stranded by a dead flow or deleted story (unblocks discovery) |
 | `hashd run [id]` | Run workstream or create from story |
 | `hashd list` | List all stories and workstreams |
@@ -411,8 +411,7 @@ The bot also auto-starts when you run `hashd run`.
 | `hashd workstream edit-commit <ws> <id>` | Edit a micro-commit's title/description |
 | `hashd workstream feedback <ws> "text"` | Add feedback to workstream |
 | `hashd workstream remove <ws>` | Remove orphaned workstream |
-| `hashd plan retry STORY-xxx` | Retry failed planning run |
-| `hashd plan resurrect STORY-xxx` | Resurrect abandoned story |
+| `hashd story retry STORY-xxx` | Retry failed planning run |
 
 ### Project Commands
 

@@ -75,9 +75,10 @@ hashd show STORY-0001     # read the problem statement and acceptance criteria
 ```
 
 If the acceptance criteria need work, reshape them — edit, delete, descope, or
-rescope individual criteria (`hashd plan edit-ac` / `delete-ac` / `descope-ac` /
-`rescope-ac`), or hand the whole story to the AI editor (`hashd plan edit STORY-0001
--f "also handle the mobile nav"`). When it reads right, accept it:
+rescope individual criteria (`hashd story edit-ac` / `delete-ac` / `descope-ac` /
+`rescope-ac`), or hand the whole story to the AI editor
+(`hashd story edit STORY-0001 -f "also handle the mobile nav"`). When it reads
+right, accept it:
 
 ```bash
 hashd approve STORY-0001  # draft -> accepted

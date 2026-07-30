@@ -38,6 +38,38 @@ no separate certificate exchange.
 applies and no fingerprint pin is used. The managed `hashd restart` path always
 uses the automatic self-signed certificate.)
 
+## Scripting hashd over SSH: use a login shell
+
+The installer wires `PATH` from `~/.bashrc` / `~/.zshrc`. Those are **interactive**
+shell files: a stock Debian/Ubuntu `~/.bashrc` opens with a guard that returns
+immediately when the shell is not interactive, so anything appended below it never
+runs — and that guard fires under `bash -lc` too, because a login shell is still
+not an *interactive* one.
+
+**Use absolute paths in scripts.** That is the only form that holds regardless of
+distro or shell:
+
+```bash
+ssh box 'hashd list'                      # hashd: command not found
+ssh box '~/.local/bin/hashd list'         # reliable
+ssh box '~/.hashd/tools/bin/gh pr list'   # reliable
+```
+
+`bash -lc` is not a portable substitute, and the two directories behave
+differently under it:
+
+- `~/.local/bin` (where `hashd`, `wf`, `ha` live) is added by *many* distros'
+  stock `~/.profile`, which a login shell does read — so `ssh box 'bash -lc "hashd
+  list"'` often works, but because of the distro's profile, not because of
+  anything hashd installed. On an image whose `~/.profile` lacks that stanza it
+  fails.
+- `~/.hashd/tools/bin` (the bundled `gh`, `gitleaks`, `delta`, Temporal binaries)
+  is wired **only** from the interactive rc files, so it is absent under `bash -lc`
+  on every distro.
+
+If you want `bash -lc` to work uniformly, add the PATH entries to a login profile
+(`~/.profile`) yourself; the installer deliberately does not edit login profiles.
+
 ## Server operator: make the server reachable
 
 Run these on the **server host**. A fresh install already runs on loopback
@@ -156,8 +188,30 @@ with a password than carry a token, use the setup-key path instead:
   `hashd server set <url> --token <token>`.
 - **`server certificate fingerprint mismatch`.** The token you paired with was
   minted for a different certificate than the server now serves (for example the
-  ops dir's `tls/` was regenerated). Ask the operator for a fresh token and
-  re-pair.
+  ops dir's `tls/` was regenerated). You need a token minted against the *current*
+  certificate.
+
+  If someone else runs the server, ask them for a fresh token and re-pair with
+  `hashd server set <url> --token <token>`.
+
+  **If you are the operator on that host, you have to break a chicken-and-egg:**
+  every command goes through the pinned client, including `hashd auth create` --
+  so you cannot mint the token that would restore trust, and even
+  `hashd server unset` is refused. Clear the stale pin *first*, then mint against
+  the live certificate:
+
+  ```bash
+  hashd server unset          # drop the stale pin; run on the server host
+  hashd restart --yes         # ensure the server is up on its current cert
+  hashd auth create           # now reachable: mints a token carrying the CURRENT pin
+  hashd server set https://<host>:1337 --token <that token>
+  hashd restart --yes
+  ```
+
+  `hashd admin user add <email>` is the other way out, and the better one when
+  the client cannot reach the server at all: it is host-local, writes directly to
+  the ops DB, and its token carries the current pin -- so it works even when
+  every pinned path is refused.
 - **`cannot connect to hashd-server`.** The server is not reachable at that
   address -- check the URL, that `hashd restart server` succeeded on the host,
   and that the LAN address and port are open.

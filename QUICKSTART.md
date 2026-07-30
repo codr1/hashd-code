@@ -8,9 +8,11 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 The installer provides a Python 3.11+ runtime (bootstrapping [uv](https://github.com/astral-sh/uv) when your system has none, so PEP-668 "externally-managed-environment" boxes like fresh Arch and Homebrew Python just work), puts `hashd` on your PATH, fetches SHA-verified forge CLIs, and starts the local hashd services. It finishes by running `hashd doctor`.
 
-> **Working on hashd itself?** This page is the user install. To build from
-> source, see **[DEVELOPMENT.md](DEVELOPMENT.md)** -- it covers the Go/Task/sqlc
-> toolchain and `setup.sh`.
+> **Working on hashd itself?** This page is the user install. Building from
+> source is a contributor path that needs access to the hashd source repository;
+> its `DEVELOPMENT.md` covers the Go/Task/sqlc toolchain and `setup.sh`.
+> (No link here on purpose: QUICKSTART ships in the public hashd-code release,
+> while the source repo is private, so a relative link would 404 for readers.)
 
 ### Requirements
 

@@ -343,6 +343,40 @@ on resume attempts, it is never retried as transient, and each caller falls
 back cold exactly once (implement, fix_from_review, tech_tree, review, chat
 all implement this convention).
 
+### Agent retry ladder & backoff
+
+One ladder owns transient retries: `runStageAttempts` in
+`server/internal/agents/retry.go`, inside a single `RunStageWithOptions`
+call. Stage-level loops (the review semantic retry) retry only semantic
+failures -- schema mismatch, format redrafts -- and treat a transient or
+upstream exhaustion from the inner ladder as terminal for the stage, so the
+two ladders never multiply.
+
+The backoff mirrors the Anthropic SDK transport that Claude Code ships:
+delays of `min(0.5 * 2^n, 8)` seconds scaled by a one-sided random factor in
+`[0.75, 1.0)` (jitter only ever shortens the wait), default budget 8
+attempts. A server-supplied `Retry-After` (`retry-after-ms` wins over
+`retry-after`, seconds-float or HTTP-date) is honored verbatim upward,
+clamped only by a 300s sanity cap -- the one deliberate deviation from the
+reference, so a broken header cannot wedge a stage until its StartToClose. An
+`x-should-retry` marker overrides classification in both directions. A
+deadline guard stops the ladder when the remaining activity deadline cannot
+fit the wait plus another attempt. Overrides: `stages.<name>.retries` per
+stage, `HASHD_AGENT_RETRY_MAX_ATTEMPTS` / `_BASE_SECONDS` / `_MAX_SECONDS`
+globally.
+
+The upstream-capacity family (HTTP 429/503/529, `overloaded_error`,
+`rate_limit_error`) classifies as `upstream_overloaded` -- retryable on the
+same ladder, but carrying the parsed HTTP status and Retry-After so failure
+surfaces say "the upstream API is having an incident, not your code" with
+real numbers. Each retry wait is announced as an `agent_retry` event (durable
+row + bus frame) with attempt/budget/status/wait, every subprocess attempt
+streams to its own log file (`<stage>.log`, `<stage>.attempt2.log`, ...), and
+an upstream exhaustion fails the run with `failure_kind:
+"upstream_overloaded"` on the run row, the `run_failed` event, and
+`current_errors` -- which the CLI Diagnostic, TUI status panel, and web story
+page all render as a distinct calm treatment.
+
 ### Session persistence rules
 
 - A session id that must survive process death is persisted **durably** and
@@ -462,7 +496,7 @@ The main planner stays conservative: never surfaces work that depends on in-flig
         $ hashd approve STORY-xxxx     # draft -> accepted
 
 [Human] Edit story if needed
-        $ hashd plan edit STORY-xxxx [-f "feedback"]
+        $ hashd story edit STORY-xxxx [-f "feedback"]
 
 [Human] Set context (optional)
         $ hashd use <workstream_id>
@@ -488,7 +522,7 @@ Created by the **planning agent** during story drafting (or re-drafting via edit
 
 | Aspect | Detail |
 |---|---|
-| Created by | Planning agent (during suggestion-backed planning or `hashd plan edit`) |
+| Created by | Planning agent (during suggestion-backed planning or `hashd story edit`) |
 | Stored in | `clarifications` table, `story_id` set, `workstream_id` null |
 | Emission shape | Bundle — planner emits all open questions at once in its structured output |
 | Operator UX | Bundle answer — operator reads all pending story open questions for the story, submits one combined answer string covering all of them |
@@ -543,9 +577,9 @@ At merge time, descoped criteria are written back to REQS.md with provenance so 
 requirement survives the WIP marker deletion.
 
 ```
-$ hashd plan descope-ac STORY-0054 5         # Move criterion #5 to descoped
-$ hashd plan rescope-ac STORY-0054 1         # Bring descoped #1 back to AC
-$ hashd show STORY-0054                      # Shows both lists
+hashd story descope-ac STORY-0054 5           # Move criterion #5 to descoped
+hashd story rescope-ac STORY-0054 1           # Bring descoped #1 back to AC
+hashd show STORY-0054                         # Shows both lists
 ```
 
 **Split** -- "this story is too large." There are two modes:
@@ -559,10 +593,10 @@ $ hashd show STORY-0054                      # Shows both lists
   applied directly.
 
 ```bash
-$ hashd plan split STORY-0054
-$ hashd plan split STORY-0054 --feedback "split out recurring events"
-$ hashd plan split STORY-0054 3,5,7 -t "Referral Reward Configuration"
-$ hashd plan split STORY-0054 3,5,7 -t "Referral Reward Configuration" -y
+hashd story split STORY-0054
+hashd story split STORY-0054 --feedback "split out recurring events"
+hashd story split STORY-0054 3,5,7 -t "Referral Reward Configuration"
+hashd story split STORY-0054 3,5,7 -t "Referral Reward Configuration" -y
 # Creates STORY-0055 with criteria 3, 5, 7 removed from STORY-0054
 ```
 
@@ -809,15 +843,14 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 | `hashd plan list` | View current suggestions |
 | `hashd plan story "title" [-f ctx]` | Quick feature (skips REQS discovery) |
 | `hashd plan bug "title" [-f ctx]` | Quick bug fix (conditional SPEC update) |
-| `hashd plan edit STORY-xxx [-f "feedback"]` | Edit existing story |
-| `hashd plan clone STORY-xxx` | Clone a locked story |
-| `hashd plan resurrect STORY-xxx` | Resurrect abandoned story |
-| `hashd plan retry STORY-xxx` | Retry failed planning run |
+| `hashd story edit STORY-xxx [-f "feedback"]` | Edit existing story |
+| `hashd story clone STORY-xxx` | Clone a locked story |
+| `hashd story retry STORY-xxx` | Retry failed planning run |
 | `hashd plan reset` | Reclaim claimed suggestions whose story is gone (dead flow / out-of-band delete) so discovery is unblocked |
-| `hashd plan descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
-| `hashd plan rescope-ac STORY-xxx N` | Move descoped criterion N back to acceptance criteria |
-| `hashd plan split STORY-xxx [--feedback ".."]` | Request an agent breakdown proposal for a large story |
-| `hashd plan split STORY-xxx 3,5,7 -t "title" [-y]` | Split criteria into one new draft sibling story |
+| `hashd story descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
+| `hashd story rescope-ac STORY-xxx N` | Move descoped criterion N back to acceptance criteria |
+| `hashd story split STORY-xxx [--feedback ".."]` | Request an agent breakdown proposal for a large story |
+| `hashd story split STORY-xxx 3,5,7 -t "title" [-y]` | Split criteria into one new draft sibling story |
 | `hashd run [id] [--once\|--loop] [--gatekeeper\|--supervised\|--autonomous] [-f ".."] [-y]` | Dispatch the workstream run workflow (-f: guidance, -y: skip prompts) |
 | `hashd list` | List stories and workstreams |
 | `hashd show <id>` | Show story or workstream details |
@@ -895,7 +928,7 @@ stories, start_impl/resume_impl for workstreams) so a single operator action
 moves the entity forward.
 
 Story clarifications can also carry `breakdown_proposal` payloads from
-`hashd plan split STORY-xxx`. Answer `yes` to apply the parent revision and create
+`hashd story split STORY-xxx`. Answer `yes` to apply the parent revision and create
 sub-stories transactionally, `no` to reject without changes, or any non-yes/no
 feedback to request a revised proposal.
 
@@ -1431,6 +1464,59 @@ loop and routes to the human gate; (2) the identity excludes the failure
 *message*, so "same test, different assertion" counts as oscillation (the
 observed livelock was the identical failure every iteration).
 
+#### Scope Adjudication (operator-invoked, advisory)
+
+The review loop has two moves — retry or park — and it deadlocks when the
+reviewer's objection is something the implementer structurally cannot fix: a
+plan-scoping dispute over *where* work belongs, which neither party has the
+authority to settle. `hashd workstream adjudicate <ws> [--commit <mc>]
+[--wait] [--wait-timeout <dur>]` runs a read-only scope judge over the stuck
+review and reports.
+It is **not** wired into the runner loop, not auto-invoked, and mutates no
+workstream state; the operator runs it, reads the briefing, and decides.
+
+```mermaid
+flowchart LR
+    OP[operator: hashd workstream adjudicate] --> API[POST /workstreams/id/adjudicate]
+    API --> WF["adjudicate:{project}:{ws} workflow"]
+    WF --> ACT[RunnerScopeAdjudicate activity]
+    ACT --> CTX[assemble dispute record:\nplan block, latest review,\nimplementer summary, guidance, diff]
+    CTX --> J[scope judge agent\nprompts/scope_adjudicate.md]
+    J --> N[normalize: cite-to-rule,\nconfidence floor, briefing guarantee]
+    N --> ROW[(reviews row\nreview_type=scope_adjudication)]
+    ROW --> SHOW[hashd show / --wait briefing]
+    ROW -. never read by .-> LOOP[review loop / triage / lineage]
+```
+
+The judge rules on **where work belongs**, never on **what the software
+should do**: if resolving the dispute requires changing or interpreting an
+authored artifact (requirements, spec, an AC, a human-written prompt), it has
+no jurisdiction and returns `CANT_TELL`. Rulings must cite to rule — a
+`file:line`, AC id, plan block, or prior operator ruling — an `OUT_OF_SCOPE`
+ruling must additionally name a target micro-commit that exists in the plan,
+and every ruling must clear the active autonomy mode's commit-confidence
+threshold; the normalize layer downgrades anything else (missing citation,
+missing or phantom target commit, sub-threshold confidence) to `CANT_TELL`.
+Every outcome, `CANT_TELL` included,
+carries a six-section briefing (dispute, reviewer position, implementer
+position, artifacts marked authored/derived, the single question the dispute
+hinges on, and concrete operator options).
+
+The ruling persists as a `reviews` row with
+`review_type = 'scope_adjudication'`. The review-list queries
+(`ListReviewsByMicrocommit`, `ListReviewsByWorkstream`,
+`ListLatestReviewsByProject`) exclude that type, so the ruling never enters
+review history, the review prompt, oscillation triage, runtime status, or
+lineage surfaces — advisory means the loop cannot see it. `hashd show <ws>`
+surfaces the latest ruling's verdict and hinge question.
+
+Advisory is precise, not absolute silence: the judge runs through
+`agents.RunStageWithOptions` like every agent stage, so the standard
+agent-stage envelope still rides — active-invocation registration (an
+in-flight judge honestly shows as agent activity), agent-stage event rows,
+agent_calls, and transcripts. What never happens is an FSM transition, a
+workstream-row write, or any consumption of the ruling by the runner loop.
+
 **Partial breakdown (Tier 2):** the "architect" *is* the `breakdown` engine
 re-invoked in **partial** scope — `RunPartialBreakdownStage`
 (`server/internal/runflow/partialbreakdown.go`), the breakdown
@@ -1696,10 +1782,10 @@ stateDiagram-v2
     drafting --> draft_failed : AI generation failed
     pending --> drafting : dependencies implemented
     pending --> abandoned : hashd close
-    draft_failed --> drafting : hashd plan retry
-    draft_failed --> editing : hashd plan edit
+    draft_failed --> drafting : hashd story retry
+    draft_failed --> editing : hashd story edit
     draft_failed --> abandoned : hashd close
-    draft --> editing : hashd plan edit
+    draft --> editing : hashd story edit
     editing --> draft : AI edit complete
     editing --> draft_failed : AI edit refused
     editing --> draft : timeout 15 min
@@ -1708,7 +1794,6 @@ stateDiagram-v2
     implementing --> implemented : hashd merge (LOCKED)
     draft --> abandoned : hashd close
     accepted --> abandoned : hashd close
-    abandoned --> drafting : hashd plan resurrect
 ```
 
 **Stages:**
@@ -1717,7 +1802,7 @@ stateDiagram-v2
 |-------|-------------|----------|
 | `drafting` | AI generating story (in progress) | No |
 | `pending` | Split sub-story waiting for parent/sibling dependencies before redraft | No |
-| `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `hashd plan edit`; retry with `hashd plan retry`) |
+| `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `hashd story edit`; retry with `hashd story retry`) |
 | `draft` | Generated, awaiting approval | Yes |
 | `editing` | AI edit in progress (auto-reverts after 15 min) | No |
 | `accepted` | Ready for implementation | Yes |
@@ -1728,15 +1813,15 @@ stateDiagram-v2
 **Transitions:**
 
 - `hashd approve STORY-xxx` moves draft -> accepted
-- `hashd plan split STORY-xxx` can create dependent sub-stories in pending
+- `hashd story split STORY-xxx` can create dependent sub-stories in pending
 - dependency completion moves pending -> drafting for a fresh plan against current code
-- `hashd plan edit STORY-xxx` moves draft -> editing -> draft
+- `hashd story edit STORY-xxx` moves draft -> editing -> draft
 - `hashd run STORY-xxx` moves accepted -> implementing (LOCKS story)
 - `hashd merge <ws>` moves implementing -> implemented
 - `hashd close <ws>` unlocks story (returns to accepted)
-- `hashd plan clone STORY-xxx` creates editable copy of locked story
+- `hashd story clone STORY-xxx` creates editable copy of locked story
 
-**Editing timeout recovery:** If a story gets stuck in `editing` state (e.g., process killed, network failure), it auto-recovers to `draft` after 15 minutes. Recovery triggers on the next `hashd plan edit` or TUI refresh.
+**Editing timeout recovery:** If a story gets stuck in `editing` state (e.g., process killed, network failure), it auto-recovers to `draft` after 15 minutes. Recovery triggers on the next `hashd story edit` or TUI refresh.
 
 ---
 
@@ -2111,6 +2196,10 @@ The rejection path (`hashd reject`) and micro-commit planning path (`hashd works
 
 `run_final_review()` tags `save_review()` and `record_agent_call()` with the real `run_id` when called from the engine. This is for bookkeeping and traceability, not for read-side filtering.
 
+### Operator Guidance (workstream_guidance)
+
+Operator guidance -- rejection feedback and replan instructions -- is an append-only record in the `workstream_guidance` table, sharing the reviews identity convention (`project`, `run_id`, `workstream_id`, `story_id`, `microcommit_id`). The same scoping rule applies: `run_id` is write-side provenance only, never a read filter. `story_id` is the durable anchor (guidance survives workstream removal and re-creation); `microcommit_id` NULL means workstream-wide. All rows are standing: the per-commit review loader pulls every row scoped to the commit or the whole workstream, newest first, and the newest one renders as the prompt's HUMAN GUIDANCE section. There is no consumed/applied lifecycle -- introducing one is a deliberate future change, pinned by tests.
+
 #### PR Review Finding Ledger
 
 PR/MR review threads from the forge are durable external findings. They are not the same thing as the single-shot per-commit concern pool above.
@@ -2149,7 +2238,7 @@ Different surfaces have different audiences and different needs:
 - **Agent surfaces** (reviewer/implementer prompts in the per-commit loop): ephemeral, fresh per cycle. The reviewer sees only the current diff plus story/AC context. The implementer sees only the just-completed review's feedback. Prior cycles are not carried in the prompt -- each cycle is an independent evaluation.
 - **Operator surfaces** (TUI detail, `hashd show`, CLI summaries, review history inspection): cumulative across attempts. Humans need to see the workstream's history; agents don't.
 - **Concern lifecycle**: concerns flagged in per-commit reviews persist at workstream level until the first final review, then drop. Concerns do not flow to next per-commit implementers.
-- **Operator guidance** (`hashd reject <id> -f "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section. Per-cycle, not persistent across the workstream. At review gates, `-f` is optional and additive: hashd folds the gate findings into the FIX commit by default, while human guidance appears first and takes precedence.
+- **Operator guidance** (`hashd reject <id> -f "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section -- per-cycle on that implementer surface (signal-borne, cleared after first use). A reject that lands on a closed run (orphan recovery) and a replan additionally record the guidance as a standing `workstream_guidance` row, which keeps informing every subsequent review of its scope (see Operator Guidance under Review Scoping Rules). At review gates, `-f` is optional and additive: hashd folds the gate findings into the FIX commit by default, while human guidance appears first and takes precedence.
 - **Per-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-run historical context. It runs once a selected micro-commit has at least two prior stage reviews, whether the commit is a regular `COMMIT-...-001` or a `COMMIT-...-FIX-001`. It detects "going in circles" on the same finding, including A -> B -> A and persistent identical reviews. It does not treat partial progress as oscillation: if `(A, B)` becomes `A`, the workstream is still converging. Pure `A -> A` needs three consecutive identical reviews before escalation. FIX commits continue to use their structured fix history and oscillation-resolution records.
 
 Principle: artifacts visible to agents are ephemeral and current; artifacts visible to humans are cumulative.

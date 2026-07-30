@@ -4,6 +4,44 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.21 - 2026-07-30
+
+v0.9.21 reorganizes the story-facing CLI -- a breaking change -- and carries a batch of install/upgrade and diagnostics fixes surfaced by multi-box manual testing and a live production incident.
+
+### BREAKING: story-scoped verbs move from `plan` to `story`
+
+One rule, applied absolutely: if the operation takes a story id, it lives under `story`; if it works the suggestion pool, it lives under `plan`.
+
+| was | is |
+|-----|-----|
+| `hashd plan retry` | `hashd story retry` |
+| `hashd plan edit` | `hashd story edit` |
+| `hashd plan split` | `hashd story split` |
+| `hashd plan clone` | `hashd story clone` |
+| `hashd plan edit-ac` / `delete-ac` / `descope-ac` / `rescope-ac` | `hashd story edit-ac` / `delete-ac` / `descope-ac` / `rescope-ac` |
+| `hashd plan resurrect` | removed (deprecated tombstone) |
+
+`plan` keeps the backlog surface: `discover`, `list`, `show`, `claim`, `status`, `reset`, and the ad-hoc creators `plan story` / `plan bug` (they take a title and create a story -- entry points into planning, not operations on an existing story). Old spellings fail with the standard unknown-command suggestions; scripts using the moved verbs must update.
+
+### What's Changed
+
+- **Story edits get a realistic time budget.** `stages.pm_edit.timeout` default rises 300s -> 900s (`pm_edit_resume` 300s -> 600s), matching `pm_refine`. Folding clarification answers into a large story is refine-class work; the old budget killed real edits mid-flight and parked the story at `draft_failed`.
+- **Upgrades crossing a schema bump no longer deadlock.** `setup.sh` migrates the databases before anything opens them; previously owner provisioning hit the schema check first, setup died after a successful build, and its advice (`hashd restart`) pointed back at `setup.sh` -- a loop whose only exit was buried. Related: `db` open errors now point at `hashd internal migrate-dbs` instead of the loop.
+- **Source builds report their real version.** A build-file scoping bug stamped every source build `dev`, which also made `hashd doctor` warn that a source server and wheel client were "built from different source trees" on matched pairs. Versions now stamp correctly, `task build VERSION=x` is honored, and doctor compares release identity rather than string spelling -- a source build genuinely ahead of the tag still warns.
+- **Remote clients stop consulting local state they don't own.** `hashd project use` validates against the server (it rejected server-known projects from a remote client); a remote client no longer silently adopts a leftover local project as context, no longer deletes a server-validated saved selection, and the no-project diagnostic names the paired server instead of advising `project add`. A moved ops root (wheel install over a source install) now explains itself instead of presenting as total data loss.
+- **Diff reads survive worktree reclaim.** `/diff`, `/diff/changes`, and `/diff/blob` fall back to the project repository once a merged or closed workstream's worktree is gone -- committed history stays readable, working-tree modes are rejected with precise diagnostics, and abbreviated commit SHAs are accepted. An unprovisioned or reclaimed worktree is an honest 400, not a git failure dressed as a 500.
+- **Failure diagnostics carry the actual cause.** Agent-error messages keep their tail instead of being head-truncated (the part that says *why* it died lives at the end of agent output); auth failures lead with their classification (`agent_needs_login` vs a missing or rejected API key); `run_failed` events record the failure reason (`failed at review: <reason>`) instead of just the stage; and a reject that auto-resumes the flow prints exactly one next step instead of two contradictory ones.
+- **A stuck review loop can no longer grind, and an operator ruling now binds.** A workstream rejected the same micro-commit ten times across two loop exhaustions while the convergence guard never fired: it watched only `major` findings, while `major` AND `minor` both reject a review, so a minor-driven reject produced an empty set and the guard skipped itself. It now watches every blocking finding, keyed on text so an objection re-raised at a different severity still counts as a repeat. Separately, a reject delivered at the review gate persisted nothing -- the reviewer's guidance section was empty on every later cycle while the implementer cited that ruling as its authority. Rulings now persist durably, scoped to the commit under review, reach every implement attempt rather than the first, survive the self-heal escalation, and carry standing in the review prompt distinct from an implementer's claim.
+- **The retry budget is visible while it burns.** Loop events carry their position (`review_changes (attempt 2/5)`), the workstream read exposes the attempt in flight beside the after-the-fact exit record, and `hashd show` renders `review (attempt 3/5)`. Previously the numbers existed on the wire at every layer and reached no surface, so a workstream on its last attempt looked identical to one on its first.
+- **`hashd workstream adjudicate`** -- a human-invoked, read-only scope judge for a review that will not converge. When a reviewer and an implementer deadlock over *where* work belongs rather than what it should do, the judge rules `IN_SCOPE` / `OUT_OF_SCOPE` with a citation, or returns `CANT_TELL` with a briefing. It never rules on functionality, never mutates the workstream, and is not wired into the runner: the operator runs it, reads it, and decides.
+- **Agent retries emulate Claude Code's backoff.** The retry delay was a flat 5 seconds three times -- exponential in shape only, since the multiplier was 1 -- and a `Retry-After` from the server was clamped *down* to 5s. Backoff is now genuinely exponential with jitter, `Retry-After` is honored, and nested retry ladders no longer multiply into nine agent launches for a three-attempt policy. Upstream capacity failures (429/503/529) are classified as such and surfaced as an upstream incident rather than an unexplained stage failure.
+- **Operator guidance is a durable record, not a file.** Rejection and replan guidance move from a JSON file in the ops tree into the database, attributable to a user and scopable to a story or commit. The file was invisible to a remote client and could not survive a workstream being recreated; existing files are migrated forward.
+- **TUI:** story-detail and dashboard layout fixes, and the workstream timeline is coloured again -- its palette had been styling an event vocabulary the server stopped emitting, leaving a failure, a retry and a routine state change rendered identically.
+- **The pre-commit secret scanner actually scans.** The private-key patterns begin with `-----BEGIN`, which grep parsed as options; every scan silently passed. Also: the hashd-web Go module is now linted by both the commit hook and the push gate.
+- **Web:** the story page shows the workstream run's health; remote docs cover fingerprint-mismatch recovery on a single host and scripting over non-interactive SSH.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.20...v0.9.21
+
 ## v0.9.20 - 2026-07-29
 
 v0.9.20 is a single-fix patch release for team-mode operators: `hashd restart` no longer breaks a box that is paired to a hashd-server running on another machine.
