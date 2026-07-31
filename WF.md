@@ -1031,7 +1031,7 @@ answer; the run itself is already in flight.
 | `hashd chat [id]` | Pair programmer chat with AI |
 | `hashd agents` | Show installed AI agents and stage assignments |
 | `hashd doctor` | Validate setup and diagnose issues |
-| `hashd restart [component] [-y]` | Restart infrastructure (server, Temporal sidecar, ZMQ forwarder, messengers) |
+| `hashd restart [component] [-y]` | Restart infrastructure (server, Temporal sidecar, event forwarder, messengers) |
 | `hashd lineage <target> [--line N] [--lines N-M] [--format table\|json\|markdown]` | Trace code lineage (auto-detects file/SHA/STORY/BUG) |
 | `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--format slsa\|in-toto]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story |
 | `hashd lineage verify` | Validate hash chain integrity for project commits |

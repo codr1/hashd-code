@@ -110,15 +110,15 @@ why "autonomous" is safe: it changes the merge gate, not the failure handling.
 Every state change is written **twice** — this is the dual-write contract, and it
 is the backbone of both real-time observability and the durable audit trail:
 
-- Published to **ZMQ** for instant push to connected subscribers — the TUI, the
+- Published to the **event bus** for instant push to connected subscribers — the TUI, the
   Telegram bot, and web/SSE consumers update live.
 - Logged to the **SQLite events table** as a durable record, so a subscriber that
   was offline when an event fired can catch up.
 
-ZMQ is ephemeral; SQLite is the durable source of truth. If ZMQ is down, the event
-is still in SQLite. If SQLite somehow failed, ZMQ already delivered. Publishing is
+the bus is ephemeral; SQLite is the durable source of truth. If the bus is down, the event
+is still in SQLite. If SQLite somehow failed, the bus already delivered. Publishing is
 non-blocking and fire-and-forget — a slow or absent subscriber never stalls a state
-transition. The TUI is ZMQ-driven (no polling fallback): if the bus is down it
+transition. The TUI is event-driven (no polling fallback): if the bus is down it
 shows an error state rather than masking the failure with degraded polling.
 
 Two choke points cover all state changes: the FSM `transition()` functions, and

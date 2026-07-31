@@ -247,12 +247,25 @@ git_install_hint() {
 # so include ~/.zshrc on macOS -- and on Linux too when the login shell is zsh.
 # Without this the freshly installed hashd/wf entry points and the bundled tools
 # never land on the zsh PATH, and `hashd`/`wf` read as command-not-found.
+# rc_targets: every file that should carry the PATH snippet.
+#
+# ~/.bashrc covers interactive shells, and most distro bashrc files return
+# early for non-interactive ones -- so a plain `ssh host 'hashd ...'` sees
+# none of it. ~/.profile / ~/.zprofile cover LOGIN shells, which is what
+# `ssh host bash -lc '...'` and desktop sessions get. Between them the
+# remaining gap is a non-login non-interactive shell, which no file can
+# reach portably; the closing note tells the operator what to do there
+# instead of pretending it is covered.
 rc_targets() {
     printf '%s\n' "$HOME/.bashrc"
+    printf '%s\n' "$HOME/.profile"
     case "${SHELL:-}" in
-        *zsh*) printf '%s\n' "$HOME/.zshrc"; return ;;
+        *zsh*) printf '%s\n' "$HOME/.zshrc"; printf '%s\n' "$HOME/.zprofile"; return ;;
     esac
-    [ "${PLATFORM:-}" = "macosx" ] && printf '%s\n' "$HOME/.zshrc"
+    if [ "${PLATFORM:-}" = "macosx" ]; then
+        printf '%s\n' "$HOME/.zshrc"
+        printf '%s\n' "$HOME/.zprofile"
+    fi
 }
 
 # ensure_dir_on_path: put DIR on PATH for the rest of this run and persist it
@@ -278,7 +291,10 @@ ensure_dir_on_path() {
         if [[ -s "$rc" ]]; then
             printf '\n' >> "$rc"
         fi
-        printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$dir" >> "$rc"
+        # Guarded rather than a bare export: the snippet now lives in both
+        # an rc and a profile, and an interactive login shell sources both.
+        printf '%s\ncase ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' \
+            "$marker" "$dir" "$dir" >> "$rc"
     done < <(rc_targets)
 }
 
@@ -581,6 +597,30 @@ fi
 ok "hashd installed"
 
 OPS_ROOT="${HASHD_OPS_ROOT:-$HOME/.hashd}"
+
+# A source install keeps its ops root inside the checkout and puts a symlink
+# to it on PATH. Installing the wheel over that silently replaces the symlink
+# and switches the ops root, so every project vanishes from `hashd project
+# list` and the failure reads as total data loss -- which invites destructive
+# "recovery" on a tree where nothing was actually lost. Say where the projects
+# went before replacing anything.
+PRIOR_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
+if [ -L "$PRIOR_BIN" ]; then
+    PRIOR_TARGET="$(readlink -f "$PRIOR_BIN" 2>/dev/null || true)"
+    # bin/hashd inside a checkout -> the checkout root is that ops root.
+    PRIOR_OPS="$(dirname "$(dirname "$PRIOR_TARGET" 2>/dev/null)" 2>/dev/null || true)"
+    if [ -n "$PRIOR_OPS" ] && [ "$PRIOR_OPS" != "$OPS_ROOT" ] && [ -d "$PRIOR_OPS/projects" ]; then
+        PRIOR_PROJECTS="$(find "$PRIOR_OPS/projects" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "${PRIOR_PROJECTS:-0}" -gt 0 ]; then
+            warn "Replacing an existing install that uses a different ops root."
+            warn "  existing: $PRIOR_OPS  ($PRIOR_PROJECTS project(s))"
+            warn "  this install: $OPS_ROOT"
+            warn "Nothing is deleted, but those projects will not appear until you point at them:"
+            warn "  export HASHD_OPS_ROOT=$PRIOR_OPS"
+        fi
+    fi
+fi
+
 mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
 HASHD_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
 if [ "$INSTALL_VIA" = "pipx" ]; then
@@ -663,13 +703,34 @@ else
     warn_external_tools "could not download installer script"
 fi
 
+step "Migrating local databases"
+# Before anything opens a database. A checkout upgraded across a schema bump
+# has databases at the old version, and every command that opens one --
+# starting with the owner check below -- fails closed on the mismatch. Its
+# advice then points at a command that cannot run until this has, so the
+# install dies with the real fix buried inside a nested error.
+if "$HASHD_BIN" internal migrate-dbs >/dev/null 2>&1; then
+    ok "Databases migrated"
+else
+    # Non-fatal: a fresh install has nothing to migrate, and a genuine
+    # failure surfaces with its own diagnostic at the next open.
+    ok "No databases to migrate"
+fi
+
 step "Configuring owner identity"
 # hashd-server fails closed when no user is configured, so the first user -- the
 # active, keyless owner (the solo default identity) -- is created before the
 # server starts. This installer is non-interactive (curl | bash), so the owner is
 # derived from git config, falling back to $USER@host. Idempotent: skip if any
 # user already exists.
-if "$HASHD_BIN" admin user list 2>/dev/null | grep -q '@'; then
+#
+# A machine paired to a REMOTE server has no local server to own: its ops dir
+# is inert, the owner would be created in a database nothing reads, and a
+# failure here would abort an install that is otherwise complete. Skip it and
+# say why.
+if [ -n "${HASHD_SERVER_URL:-}" ] && ! printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; then
+    ok "Paired to a remote server ($HASHD_SERVER_URL) -- no local owner needed"
+elif "$HASHD_BIN" admin user list 2>/dev/null | grep -q '@'; then
     ok "Owner already configured"
 else
     OWNER_NAME="$(git config --global user.name 2>/dev/null || true)"
@@ -686,6 +747,16 @@ else
         # Hard-fail: hashd-server fails closed without an owner, so a swallowed
         # failure here just surfaces later as a dead server. Better to abort the
         # install loudly with the exact recovery command.
+        # A schema-version mismatch is a local checkpoint lagging the build,
+        # not a missing owner -- surface its fix at the top rather than
+        # leaving it nested inside the inner error, and never advise
+        # "run this on the server host" to a client-only machine.
+        if printf '%s' "$OWNER_ERR" | grep -q 'schema version mismatch'; then
+            die "the local databases are behind this build" \
+                "install.schema_behind" \
+                "Owner provisioning opened a database at an older schema version than this build expects.\n${OWNER_ERR}" \
+                "Migrate them, then re-run the installer: $HASHD_BIN internal migrate-dbs"
+        fi
         die "could not provision the hashd owner" \
             "install.owner" \
             "hashd-server fails closed until an active owner exists, so the install is not usable without one.\n${OWNER_ERR}" \
@@ -754,6 +825,10 @@ case "${SHELL:-}" in
 esac
 if [ -n "$RELOAD_RC" ]; then
     printf '%sReload your shell to finish:%s source %s   (or open a new terminal)\n' "$C_BOLD" "$C_RESET" "$RELOAD_RC"
+    printf '%sDriving this box over SSH or from a script?%s A non-interactive shell reads none of\n' "$C_BOLD" "$C_RESET"
+    printf '  those files, so use a login shell or the full path:\n'
+    printf '    ssh HOST bash -lc %shashd status%s      # login shell, picks up PATH\n' "'" "'"
+    printf '    ssh HOST %s status                   # or just call it directly\n' "$HASHD_BIN"
 else
     printf '%sReload your shell to finish:%s open a new terminal so PATH + completions take effect\n' "$C_BOLD" "$C_RESET"
 fi

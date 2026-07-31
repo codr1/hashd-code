@@ -159,9 +159,9 @@ and per-commit gating.
 
 ### Dual-write event
 
-The contract that every state change is written to two places: published to **ZMQ**
+The contract that every state change is written to two places: published to the **event bus**
 for instant push to connected subscribers (TUI, Telegram, web), and logged to the
-durable **SQLite events table** for catch-up by subscribers that were offline. ZMQ
+durable **SQLite events table** for catch-up by subscribers that were offline. the event bus
 is ephemeral; SQLite is the durable source of truth. The events table is also the
 spine of the audit trail. See [provenance.md](provenance.md).
 

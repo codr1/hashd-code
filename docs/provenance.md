@@ -130,7 +130,7 @@ mismatched — i.e. when a record was altered or removed after the fact.
 ## The durable event log underneath it all
 
 Lineage is possible because hashd already records everything as it happens. Every
-state change is **dual-written**: pushed over ZMQ for live consumers and persisted
+state change is **dual-written**: published to the event bus for live consumers and persisted
 to the SQLite **events table** as the durable record. The events table is the spine
 of the audit trail — it captures every prompt, response, stage start/end, and human
 decision, tagged with project, story, workstream, run, micro-commit, stage, and

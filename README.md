@@ -19,6 +19,13 @@ hashd installs everything else — Python, the forge CLIs (`gh`/`glab`/`bkt`/`te
 curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash
 ```
 
+The installer is the supported path. Release wheels are published as GitHub
+assets rather than to PyPI, and `hashd` depends on `hashd-client`, which is
+published the same way -- so `pip install hashd` or `uv tool install hashd`
+cannot resolve and fails inside the resolver rather than with an explanation.
+The installer also brings the Temporal server and the external tools a wheel
+does not carry.
+
 New to hashd? **[QUICKSTART](QUICKSTART.md)** takes you from here to your first merged change. (`wf` and `ha` are aliases for `hashd`.)
 
 ## What hashd is
@@ -44,7 +51,7 @@ Requirement -> Suggestion -> Story (+ acceptance criteria) -> Workstream -> micr
 - Running an accepted Story creates a **Workstream**: one git branch in one isolated worktree, holding a plan of **micro-commits** (the smallest planned units of work).
 - Each micro-commit runs the **governed loop** -- `implement -> test -> review -> human approval -> commit` -- where every arrow is a **gate**. When all micro-commits land, the branch gets a holistic final review and a merge gate (tests, conflict check, secrets scan), then merges.
 - Whether a gate stops for a human is set by the project's **autonomy mode** (supervised / gatekeeper / autonomous). All modes still block to a human on failures.
-- Every state change is **dual-written**: pushed live over ZMQ and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `hashd lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
+- Every state change is **dual-written**: pushed live over the event bus and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `hashd lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
 
 ## Philosophy
 
@@ -472,7 +479,7 @@ repos, symlink artifact paths, and any REQS edit that changes text between
 | `hashd prompts edit <name>` | Edit prompt override |
 | `hashd agents` | Show installed AI agents and stage assignments |
 | `hashd doctor` | Validate setup and diagnose issues |
-| `hashd restart [component] [-y]` | Restart infrastructure (server, Temporal sidecar, ZMQ forwarder, messengers) |
+| `hashd restart [component] [-y]` | Restart infrastructure (server, Temporal sidecar, event forwarder, messengers) |
 | `hashd search <query> [--kind kind] [-n limit]` | Full-text search across stories, events, reviews, chat (default limit: 20) |
 
 ### Smart ID Routing

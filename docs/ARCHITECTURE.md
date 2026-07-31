@@ -27,7 +27,7 @@ for values need flags or arguments that provide those values in scripts.
 ## Event Bus And Durable Events
 
 Every state change is published to the realtime event bus and recorded in
-SQLite. ZMQ is ephemeral; SQLite is durable.
+SQLite. the bus is ephemeral; SQLite is durable.
 
 Two choke points cover state changes:
 
