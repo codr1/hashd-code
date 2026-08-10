@@ -256,9 +256,23 @@ git_install_hint() {
 # remaining gap is a non-login non-interactive shell, which no file can
 # reach portably; the closing note tells the operator what to do there
 # instead of pretending it is covered.
+# bash_login_profile names the file a login bash actually reads: the first
+# existing of ~/.bash_profile, ~/.bash_login, ~/.profile -- bash consults one
+# and stops. Writing ~/.profile unconditionally misses any box that has a
+# ~/.bash_profile which does not source it.
+bash_login_profile() {
+    for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    printf '%s\n' "$HOME/.profile"
+}
+
 rc_targets() {
     printf '%s\n' "$HOME/.bashrc"
-    printf '%s\n' "$HOME/.profile"
+    printf '%s\n' "$(bash_login_profile)"
     case "${SHELL:-}" in
         *zsh*) printf '%s\n' "$HOME/.zshrc"; printf '%s\n' "$HOME/.zprofile"; return ;;
     esac
@@ -299,8 +313,8 @@ ensure_dir_on_path() {
 }
 
 # ensure_tools_dir_on_path: persist the bundled-tools dir (~/.hashd/tools/bin,
-# honoring $HASHD_TOOLS_DIR) onto PATH. install-tools.sh drops gitleaks +
-# git-delta there; without this they resolve for hashd's tools-dir-aware code
+# honoring $HASHD_TOOLS_DIR) onto PATH. install-tools.sh drops gitleaks,
+# git-delta and ripgrep there; without this they resolve for hashd's tools-dir-aware code
 # but not as bare `gitleaks`/`delta` on the user's own PATH.
 ensure_tools_dir_on_path() {
     ensure_dir_on_path "${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}" \
@@ -389,7 +403,7 @@ extract_semver() {
 
 warn_external_tools() {
     echo "WARN: external tool install skipped ($1)."
-    echo "      This step vendors gitleaks, git-delta, and the forge CLIs (gh, glab, bkt, tea)."
+    echo "      This step vendors gitleaks, git-delta, ripgrep, and the forge CLIs (gh, glab, bkt, tea)."
     echo "      Without them: the merge secret-scan and your forge's features will not work."
     echo "      Fix: re-run this installer once the fetch succeeds."
 }
@@ -687,7 +701,7 @@ case "$TOOLS_ARCH" in
     x86_64) TOOLS_ARCH="amd64" ;;
     aarch64) TOOLS_ARCH="arm64" ;;
 esac
-step "Installing external tools (gitleaks, git-delta, forge CLIs)"
+step "Installing external tools (gitleaks, git-delta, ripgrep, forge CLIs)"
 # Wire the bundled-tools dir onto PATH before the install runs, so the freshly
 # dropped gitleaks/delta binaries resolve as bare commands everywhere (the
 # user's shell and any subprocess), not just via hashd's tools-dir-aware code.

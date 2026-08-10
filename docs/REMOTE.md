@@ -158,6 +158,19 @@ To stop talking to the remote server and return to local behavior:
 hashd server unset
 ```
 
+One more step before dispatching runs on a team server: register your agent
+credential, so runs on your workstreams bill your own account instead of the
+server host's:
+
+```bash
+hashd agents login claude      # or codex / gemini / copilot / qwen / kimi
+```
+
+Runs on a workstream you own refuse to dispatch until its owner has a live
+credential for the run's agents; the refusal names the exact command. See
+[AGENT_MANAGEMENT.md](AGENT_MANAGEMENT.md#per-user-credentials-team-servers)
+for what each agent needs and how credential health is tracked.
+
 ## Password login (optional)
 
 The token from `admin user add` is all a user needs. If you would rather log in

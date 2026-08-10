@@ -44,6 +44,7 @@ RAW_ARCH="${HASHD_TOOLS_ARCH:-$(uname -m)}"
 # can read them as the single source of truth.
 GITLEAKS_VERSION="8.30.1"
 DELTA_VERSION="0.19.2"
+RIPGREP_VERSION="14.1.1"
 # Temporal is the execution engine's sidecar. Version pinned; bumps go
 # in a dedicated PR alongside the Go-side pin (server/internal/temporal).
 TEMPORAL_VERSION="1.31.2"
@@ -75,6 +76,14 @@ warn_temporal_install_failed() {
     echo "      in $TOOLS_DIR (hashd only runs the copies in its tools dir)."
 }
 
+warn_ripgrep_install_failed() {
+    local reason="$1"
+    echo "WARN: ripgrep install failed ($reason). The mcp__code__rg search tool will"
+    echo "      fall back to grep, and the grep-hook oracle test will skip its rg rows."
+    echo "      Fix: re-run this script, or place an rg binary at $TOOLS_DIR/rg"
+    echo "      (hashd prefers the copy in its tools dir over any system rg)."
+}
+
 warn_delta_install_failed() {
     local reason="$1"
     echo "WARN: git-delta install failed ($reason). TUI diffs will use the built-in renderer."
@@ -99,6 +108,93 @@ sha256_file() {
     else
         return 1
     fi
+}
+
+install_ripgrep() {
+    local version="$RIPGREP_VERSION"
+    local bin="$TOOLS_DIR/rg"
+
+    local target
+    local expected_sha
+    case "$OS/$RAW_ARCH" in
+        linux/x86_64|linux/amd64)
+            target=x86_64-unknown-linux-musl
+            expected_sha="4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e"
+            ;;
+        linux/aarch64|linux/arm64)
+            target=aarch64-unknown-linux-gnu
+            expected_sha="c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f"
+            ;;
+        darwin/aarch64|darwin/arm64)
+            target=aarch64-apple-darwin
+            expected_sha="24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be"
+            ;;
+        *)
+            warn_ripgrep_install_failed "unsupported platform: $OS/$RAW_ARCH"
+            return 0
+            ;;
+    esac
+
+    if [ -x "$bin" ]; then
+        local installed
+        installed="$("$bin" --version 2>/dev/null | extract_semver || true)"
+        if [ "$installed" = "$version" ]; then
+            log "ripgrep" "$version (ok)"
+            return 0
+        fi
+        log "ripgrep" "replacing stale ${installed:-unknown} with $version"
+        if ! rm -f "$bin"; then
+            warn_ripgrep_install_failed "could not remove stale $bin"
+            return 0
+        fi
+    fi
+
+    local asset="ripgrep-${version}-${target}.tar.gz"
+    local url="https://github.com/BurntSushi/ripgrep/releases/download/${version}/${asset}"
+    local tmp
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    if ! curl --fail --silent --location \
+        --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 120 \
+        "$url" -o "$tmp/$asset" 2>/dev/null; then
+        warn_ripgrep_install_failed "download failed"
+        return 0
+    fi
+
+    local actual_sha
+    if ! actual_sha="$(sha256_file "$tmp/$asset")"; then
+        warn_ripgrep_install_failed "no SHA256 tool available"
+        return 0
+    fi
+    if [ "$actual_sha" != "$expected_sha" ]; then
+        warn_ripgrep_install_failed "checksum mismatch for $asset"
+        return 0
+    fi
+
+    if ! tar -xzf "$tmp/$asset" -C "$tmp"; then
+        warn_ripgrep_install_failed "archive extraction failed"
+        return 0
+    fi
+
+    local extracted
+    extracted="$(find "$tmp" -name rg -type f -perm -u+x | head -1)"
+    if [ -z "$extracted" ]; then
+        extracted="$(find "$tmp" -name rg -type f | head -1)"
+    fi
+    if [ -z "$extracted" ]; then
+        warn_ripgrep_install_failed "archive did not contain rg"
+        return 0
+    fi
+
+    if ! install -m 755 "$extracted" "$bin"; then
+        warn_ripgrep_install_failed "could not install to $bin"
+        return 0
+    fi
+    harden_darwin_binary "$bin"
+    log "ripgrep" "$version (installed)"
 }
 
 # harden_darwin_binary: on macOS a freshly-downloaded binary pays a one-time
@@ -915,6 +1011,7 @@ fi
 echo "Installing external tools into $TOOLS_DIR"
 install_gitleaks
 install_delta
+install_ripgrep
 install_temporal
 install_forge_clis
 install_cbm_if_source_checkout

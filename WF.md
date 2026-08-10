@@ -14,7 +14,7 @@ Hashd uses **Temporal** for workflow orchestration with these components:
 Workflows run asynchronously. `hashd run` dispatches the run workflow and returns immediately.
 Monitor via `hashd watch` (TUI) or `hashd show`.
 
-For the canonical model of how a workstream's runtime position is described — stage, status, substage, operator verbs, and recovery from crashes — see **Workstream State Model** below.
+For the canonical model of how a workstream's runtime position is described — stage, status, substage, operator commands, and recovery from crashes — see **Workstream State Model** below.
 
 ### Repo Ownership
 
@@ -336,6 +336,7 @@ _resume invocation (--resume {session_id}, delta prompt)
    +-- session_not_found -------> ONE fresh fallback (full prompt)
    +-- api_rejection ----------> park (no retry)
    +-- context_exhausted ------> clear saved session, park/fresh per stage
+   +-- auth family / usage_limit -> park (a fresh session hits the same wall)
 ```
 
 `session_not_found` is a first-class classification: the runner tags it only
@@ -376,6 +377,21 @@ an upstream exhaustion fails the run with `failure_kind:
 "upstream_overloaded"` on the run row, the `run_failed` event, and
 `current_errors` -- which the CLI Diagnostic, TUI status panel, and web story
 page all render as a distinct calm treatment.
+
+A 429 whose extracted error message names the ACCOUNT's session/usage limit
+is carved out of the capacity family as `usage_limit`: non-retryable within
+the run (the limit outlasts any backoff the ladder can afford), carrying the
+parsed reset time in `classification_message`. The claude structured error
+envelope (`is_error` or `terminal_reason: "api_error"` plus
+`api_error_status`) routes by status before any prose matching; a structured
+401 lands the agent-auth family (`agent_needs_login` /
+`agent_invalid_api_key` -- non-retryable but resumable after re-auth, and
+the login signal outranks key-shaped tags like `authentication_error`).
+Both park with their `failure_kind` riding the same run-row / `run_failed` /
+`current_errors` channel as the capacity family, and the implement driver
+and review stage render them as the account's condition ("account hit its
+usage limit; resets <time>", with `hashd agents` credential-status help) --
+never as upstream capacity.
 
 ### Session persistence rules
 
@@ -882,7 +898,7 @@ The forge platform is auto-detected from the git remote URL, or set explicitly i
 
 ### Plan regeneration: reset / replan / reject
 
-Three operator verbs touch a workstream's plan + worktree, all backed by the one
+Three operator commands touch a workstream's plan + worktree, all backed by the one
 `breakdown` engine (the same generator as the initial plan -- see "Test-Conflict
 Escalation"). They differ only in scope and whether the plan is kept:
 
@@ -1298,6 +1314,8 @@ A workstream's runtime position is described by two orthogonal fields: **stage**
 > **Note on current implementation**: today's code conflates stage and status into a single field (named `status` in Python, `state` in the Go server's FSM JSON). The model described below is the canonical design; the rename + additive `status` field lands as a post-v0.6.0 migration. Conceptually the system already operates this way — the docs lead the data model.
 >
 > **What's shipped (Brief 99 Phase 1 + Brief 114 Phase 5)**: the derived `runtime_status` field is exposed by the Go workstream serializer (`ComputeRuntimeStatus`, `server/internal/fsm/runtime_status.go`); clients read the derived field from the REST payload. Operator displays (`hashd show`, dashboard, watch detail subtitle) render the `<stage> / <runtime_status>` pair. The macro-state fold for `creation_failed` / `baseline_failed` landed in Brief 114: both states were dropped from the FSM and their incoming/outgoing transitions collapsed into `provisioning` (with `provision_error` / `baseline_failures` columns populated as the failure detail). The FSM rename (Phase 1 of the migration outline) remains future work — see the migration outline at the bottom of this section.
+>
+> **Active-operation stages never read idle**: `resolving`, `merging`, and non-failed `provisioning` mean by definition that an operation is executing, so with no failure/blocked evidence the derivation falls back to `running` — never `idle`, and never `changes_required` (a stale review verdict is not evidence the operation stopped). For these stages the liveness input is the operation's own workflow (`resolve:{project}:{ws}` / `merge:{project}:{ws}`, probed fail-alive at the API read helpers), so a flow that died reads `orphaned` rather than running forever; provisioning is not probed (the run-workflow claim covers it moments after dispatch). The resolve flow also narrates itself: checkpoint `stage_changed` events (rebase attempt, conflicts found + agent, build verification, push) and a completion `operation_result` whose detail names the outcome (commits rebased, files resolved, attempts, build-gate verdict).
 
 ### Stage
 
@@ -1325,12 +1343,12 @@ A **status** is the runtime state at the workstream's current stage. Seven value
 
 | Status | Meaning | Computed from |
 |---|---|---|
-| `running` | Process attached, work in progress at current stage | `runner_pid` alive AND `last_run` incomplete |
+| `running` | Process attached, work in progress at current stage | `runner_pid`/`runner_run_id` alive AND `last_run` incomplete; OR active-operation stage (`resolving`/`merging`/non-failed `provisioning`) with its operation workflow open |
 | `blocked` | Waiting for external input (clarification, human review, conflict resolution, post-rebase merge-test recovery, etc.) | `last_run.status == "blocked"`; `merge_test_failed` with latest run failed |
-| `changes_required` | Reviewer requested changes; approve/reject/reset can decide the current diff. Review-loop exhaustion parks the workstream at `awaiting_human_review` (runtime `blocked`), so this value mostly describes runs recorded before that park existed | Latest review verdict is request changes |
+| `changes_required` | Reviewer requested changes; approve/reject/reset can decide the current diff. Review-loop exhaustion parks the workstream at `awaiting_human_review` (runtime `blocked`), so this value mostly describes runs recorded before that park existed. Never shown for active-operation stages | Latest review verdict is request changes |
 | `failed` | Previous run errored, retryable via re-dispatch | `last_run.status == "failed"` |
-| `idle` | Stage entered, no run has executed yet | No `last_run` record for current stage |
-| `orphaned` | Runner exited without writing a terminal result, unintentionally | `runner_pid` dead AND `last_run` incomplete |
+| `idle` | Stage entered, no run has executed yet. Never shown for active-operation stages | No `last_run` record for current stage |
+| `orphaned` | Runner or operation flow exited without writing a terminal result, unintentionally | `runner_pid`/`runner_run_id` dead AND `last_run` incomplete; OR active-operation stage whose operation workflow is closed |
 | `done` | Terminal stage reached; no further work | Stage in terminal set (`merged`, `closed`, `closed_no_changes`) |
 
 #### Status is derived
@@ -1346,6 +1364,43 @@ Same surface symptom (no live runner, no terminal result), different cause:
 - **`cancelled`**: operator deliberately stopped the runner via a future `hashd cancel` command. No investigation needed; just decide whether to re-dispatch.
 
 Today there's no explicit cancel mechanism; killed runs become `orphaned`. When `hashd cancel` lands, it writes `last_run.status = "cancelled"` cleanly.
+
+### The busy guard (structural-verb lock)
+
+A workstream is **busy** when durable evidence says a live worker stands on it: a stamped `runner_stage` confirmed by run-workflow liveness. Both halves are required — the stamp alone may be a crashed leg's leak (housekeeping's orphan sweep is the expiry), and workflow-openness alone would deadlock the human gates, where workflows stay open for hours parked. Liveness fails **alive**: when it cannot be determined, the workstream reads busy — a spurious refusal costs the operator a retry, a spurious pass is a clobbered plan.
+
+The lock is not a new primitive. It is the `no_active_runner` FSM guard evaluated over existing columns (`server/internal/fsm/guards_runner.go`), attached to the structural commands' contract edges, surfaced through `available_actions` like every other guard.
+
+**Unlocked at the parks** — the states that exist to wait for a human, all evidenced by cleared run markers: `awaiting_human_review`, a CLQ-blocked run, and the `merge_test_failed`-class failure states.
+
+A command is **structural** when it can rewrite what a live worker stands on — the plan document, the worktree, or the run's structure. That one rule sorts every command into four classes:
+
+| Class | Verbs | Rule |
+|---|---|---|
+| Structural | `replan`, `reset`, `edit-commit`, `add-commit`, `skip`, `resolve-oscillation`, plan-carrying `PATCH` | Refused while busy (the shared guard); refused by contract from flow-owned states (`merging`, `resolving`) |
+| Append | `feedback`/guidance, `pr push` | Always allowed — append-only by design, nothing a worker stands on is rewritten |
+| Park | `approve`, `reject`, `answer` | Allowed exactly at their parks — the states those verbs exist for |
+| Terminal-intent | `close`, `cancel`, `remove` | Always allowed; the running flow notices the FSM refusal at its next transition (the planning-section pattern) and stands down |
+
+Machine writers (janitor, housekeeping, runner internals) are a fourth caller class outside the table: liveness-gated with busy-skip — they never queue behind the guard and never fight the operator for it.
+
+```mermaid
+flowchart LR
+    subgraph busy["BUSY -- runner_stage stamped x workflow live"]
+        W[live worker<br/>implement / final_review / merge_gate]
+    end
+    subgraph parked["PARKED -- run markers cleared"]
+        P[awaiting_human_review<br/>CLQ-blocked<br/>merge_test_failed-class]
+    end
+    S[Structural commands<br/>replan, reset, edit-commit,<br/>add-commit, skip, resolve-oscillation,<br/>plan PATCH] -- refused (409, guard reason) --> busy
+    S -- allowed --> parked
+    A[Append commands<br/>feedback, pr push] -- always allowed --> busy
+    A -- always allowed --> parked
+    G[Park commands<br/>approve, reject, answer] -- only here --> parked
+    T[Terminal-intent<br/>close, cancel, remove] -- always allowed;<br/>flow notices and stands down --> busy
+```
+
+Offered and accepted are one computation: the endpoints gate through the same availability rows the UIs render (`requireWorkstreamTrigger`), and the drift test (`command_contract_drift_test.go`) requires every mutating route and every contract trigger to be classified — a command cannot ship half-wired.
 
 ### Substage (sub-FSM)
 
@@ -1375,7 +1430,7 @@ Transitions:
 | `test_conflict` | `test` → `adjudicate` (test failure: judge the conflict) |
 | `adjudicate_resolve` | `adjudicate` → `implement` (REGRESSION/OBSOLETE verdict) |
 | `review_approve` | `review` → `qa_gate` |
-| `review_request_changes` | `review` → `implement` |
+| `review_request_changes` | `review` → `implement` (or `review` → `adjudicate` on divergent-novelty escalation; see Review-Conflict Escalation) |
 | `qa_pass` | `qa_gate` → `commit` |
 | `commit_pass` | `commit` → `select` |
 
@@ -1388,7 +1443,7 @@ Terminal triggers (exit-to-caller; control leaves the sub-FSM):
 | `implement_blocked` | `implement` | agent surfaced clarification or blocked work |
 | `review_human_gate` | `review` | awaiting human review |
 | `qa_fail` | `qa_gate` | qa gate blocked |
-| `adjudicate_blocked` | `adjudicate` | test conflict needs a human decision (Supervised CANT_TELL) |
+| `adjudicate_blocked` | `adjudicate` | test/build/review conflict needs a human decision (Supervised CANT_TELL, or any REQUIREMENTS_CONFLICT / ARCHITECTURAL_DECISION escalation in every mode) |
 
 #### Test-Conflict Escalation (adjudicate → partial breakdown → human)
 
@@ -1421,9 +1476,11 @@ PARTIAL BREAKDOWN  (= the `breakdown` engine re-invoked, scope=partial, 1 try/si
 A red test first routes to a read-only judge substage (`adjudicate`) that
 classifies the conflict **against the story's true requirement** (problem +
 acceptance criteria) — deliberately distinct from the micro-commit task, which
-may have over-specified something the requirement never asked for. Build failures
-skip adjudication (the code simply doesn't compile) and go straight back to
-implement via `test_fail`.
+may have over-specified something the requirement never asked for. A build
+failure with a NEW error signature goes straight back to implement (the code
+simply doesn't compile, and the loop is the right tool for a moving target);
+one that REPEATS with an identical signature escalates through the
+build-conflict ladder below.
 
 Verdicts (`server/internal/fsm/implementing_substages.json`; judge prompt in
 `prompts/adjudicate.md`):
@@ -1463,6 +1520,266 @@ signature and no *early* escalation, but `max_review_attempts` still caps the
 loop and routes to the human gate; (2) the identity excludes the failure
 *message*, so "same test, different assertion" counts as oscillation (the
 observed livelock was the identical failure every iteration).
+
+#### Build-Conflict Escalation (repeat signature → adjudicate → human)
+
+Build failures ride the same escalation *machinery* at a different trigger
+point: the judge runs on **signature repeat**, not per-failure as the test
+path does — most first build failures are trivial implementer slips the loop
+fixes in one pass, and judging every one would burn an invocation per typo.
+The 2026-08-06 incident this ladder exists for: an inherited compile error
+failed the build with byte-identical errors five attempts in a row, and the
+run exited exhausted having re-verified a wall that never moved.
+
+```text
+build red ─► signature (file + normalized message, NO line:col)
+              │
+              ├─ NEW signature ──────────► back to implement (plain retry, as always)
+              │
+              └─ SAME signature as the previous failure
+                    │
+                    ├─ judge already spent for this signature ─► human gate (blocked)
+                    │
+                    └─► adjudicate (build kind, read-only judge)
+                          │
+               verdict ──┼─ FIXABLE ──► ONE directed implement retry
+                          │              (judge's 2-3 sentence direction rides the
+                          │               retry prompt; same signature again ─► human gate)
+                          │
+                          ├─ CANT_TELL, Supervised ─► blocking clarification (human)
+                          │
+                          ├─ CANT_TELL, unattended ─► human gate, judge's DIAGNOSIS
+                          │                            as the blocked reason
+                          │
+                          └─ judge activity error ──► human gate (fail closed: a judge
+                                                       we can't run can't bless a retry)
+```
+
+The build judge (`prompts/build_adjudicate.md`, verdicts `FIXABLE` /
+`CANT_TELL`) diagnoses WHY the error persists rather than classifying a
+change-vs-test contradiction: it gets the compiler errors verbatim, the
+commit task, and the recent-branch context (commits with the files each
+touched, plus the changed-file list vs the default branch) — the evidence
+needed to attribute a structural cause like a shared file clobbered or made
+stale by an earlier branch commit. The test-conflict `adjudicate.md` premise
+and verdict space (`REGRESSION`/`OBSOLETE` with `test_target` routing) do not
+map to compile errors and are never fed them.
+
+The signature (`BuildFailureSignature`, sibling of the test one) is the
+sorted, deduplicated set of **file + normalized message** identities parsed
+from compiler diagnostic lines — deliberately no line:col, since a failed
+fix that shifts the unfixed error a few lines would change a
+position-bearing signature and resume blind retries. Output with no
+recognizable diagnostic lines yields an empty signature and the guard stays
+inert (the plain retry loop and its attempt cap still apply).
+
+There is deliberately **no tier-2 partial-breakdown leg** for builds: a
+repeated identical compile error is structural and plan regeneration is the
+wrong medicine — the ladder goes judge → human, with the judge's diagnosis
+(not just raw compiler output) in the gate reason.
+
+#### Review-Conflict Escalation (divergent novelty → adjudicate → human)
+
+The unresolved-blockers repeats-guard (in the review reject branch) trips
+only when the SAME blocking finding set survives a retry. A reviewer that
+finds DIFFERENT things each round — *divergent novelty*, new nitpicks and
+shifting objections — never trips it, so the loop grinds every attempt to
+exhaustion before parking. Three specimens surfaced in one week (each 5–6
+rounds of shifting findings, all ending 0.80 confidence with zero majors),
+and each was converged by the same manual remedy: an operator reject
+carrying a CLOSED fix list — "fix exactly these, everything else is
+deferred, stop." That remedy is mechanical enough to delegate to a judge.
+
+The escalation runs the same judge machinery at a review trigger point,
+**after** the (untouched) repeats-guard so a genuine repeat still trips
+first:
+
+```text
+review reject
+     │
+     ├─ blocking finding set REPEATS the previous reject ─► repeats-guard: human gate
+     │                                                       (the judge is never consulted)
+     │
+     ├─ judge already spent (reviewJudged) ─► human gate
+     │                                        ("still rejects after the judged retry")
+     │
+     └─ findings DIFFER (repeats-guard did not trip) AND attempt ≥ 3 AND attempt < max
+              │   (rounds 1–2 are the loop's own convergence space; most reviews
+              │    settle there, same judge-at-the-repeat-point placement as builds)
+              │
+              └─► adjudicate (review kind, read-only judge)
+                    │
+         verdict ──┼─ CARRY ──► ONE directed retry against a CLOSED LIST
+                    │            • the list is authoritative implementer guidance
+                    │              (HUMAN GUIDANCE block — the manual-remedy channel)
+                    │            • AND the judged round's reviewer grades EXACTLY that
+                    │              list via the closed-list prompt (reject again ─► human gate)
+                    │
+                    ├─ CANT_TELL, Supervised ─► blocking clarification (human)
+                    │
+                    ├─ CANT_TELL, unattended ─► human gate, judge's DIAGNOSIS as the reason
+                    │
+                    └─ judge activity error ──► human gate (fail closed: a judge
+                                                we can't run can't bless a retry)
+```
+
+The review judge (`prompts/review_adjudicate.md`, verdicts `CARRY` /
+`CANT_TELL` / `REQUIREMENTS_CONFLICT` / `ARCHITECTURAL_DECISION` — the
+last two covered under "Requirements / architectural escalation" below)
+reads the per-round finding history (each round's verdict,
+confidence, and findings with severities) plus the current branch diff and
+the story requirement, and rules which findings a competent reviewer would
+genuinely insist on versus which are churn. `CARRY` returns that closed
+list in `reason`; `CANT_TELL` (same literal as the other spaces, so the
+routing reuses) means the rounds reflect a real product question, not
+distillable churn. The test-conflict `REGRESSION`/`OBSOLETE` and
+build-conflict `FIXABLE` verdicts do not survive in the review space.
+
+The CARRY list threads to the implementer through the same
+`review_feedback` slot the build ladder's FIXABLE direction uses
+(`FormatReviewCarryFeedback`), so the closed list — not the last round's
+raw divergent findings — leads the resume prompt. It is also stacked into
+the HUMAN GUIDANCE block, which covers the fresh and FIX-cycle implement
+prompts (where the retry `review_feedback` slot is not rendered). It
+threads to the reviewer via a dedicated closed-list prompt
+(`prompts/review_closed_list.md`, selected by a code-side mode flag on the
+review stage). The closed-list reviewer's finding space is deliberately
+narrow: (a) whether each carried finding was resolved, and (b) breakage
+this round's own diff introduced — never a fresh audit. That reframe is
+why it is a distinct prompt and not the retry prompt's history threading:
+the fresh review's "surface real bugs" and the retry prompt's "check for
+regressions or new findings" are exactly the novelty hunt that defeats
+convergence. The one-shot budget is a `reviewJudged` bool on the cycle
+state (reviews carry no signature to key on, unlike the build ladder);
+once it is set, a reject OR a sub-threshold (soft-retry) approve on the
+judged round is terminal at the human gate rather than buying more
+rounds.
+
+#### Requirements / architectural escalation (the judge asks the human in plain language)
+
+Some non-convergence is not churn the judge can distill into a CLOSED
+LIST: the reviewer alternates because two standing constraints are
+jointly unsatisfiable (each round's fix IS the next round's finding), or
+because a structural decision has no precedent. Code bugs converge — a
+fixed finding stays fixed; a requirements conflict oscillates. For these
+the review judge has two elective, proof-carrying escalation verdicts on
+top of `CARRY` / `CANT_TELL`:
+
+- **`REQUIREMENTS_CONFLICT`** (operator label: *"insufficient /
+  contradictory requirements"*) — two standing constraints collide.
+- **`ARCHITECTURAL_DECISION`** — a non-obvious structural choice with no
+  clear precedent.
+
+Decision contract, in order (`prompts/review_adjudicate.md`):
+
+1. **Honesty rule** (verbatim in the judge AND all per-commit reviewer
+   prompts): a resolution that lies to the end user — a silent no-op
+   behind a success message, a screen showing state that is not real —
+   is never a valid way to satisfy a finding. If the only reading that
+   closes every finding deceives the user, the findings are unsatisfiable.
+2. First attempt one honest reading that satisfies every standing finding
+   → **`CARRY`**: the judge resolves technical conflicts itself; it does
+   not escalate a disagreement it can settle.
+3. If none exists → an escalation verdict, **proof required**: quote both
+   colliding constraints verbatim and name each source (AC text, commit
+   instruction, template copy, prior ruling). A verdict whose proof is
+   incomplete (fewer than two sourced constraints, fewer than two options,
+   or no question) is downgraded to `CANT_TELL` — the fail-closed net.
+
+On either escalation verdict the run **parks immediately at the human
+gate in every autonomy mode** (no further FIX rounds), via the existing
+`finishBlockedCLQ` path — the driver opens a blocking clarification and
+returns `Blocked`.
+
+The clarification a human sees is **plain product language**: a concrete
+end-user scenario, options as product behaviors with their trade-offs,
+and an optional one-sentence judge *lean* placed after the options. The
+question body carries no file paths, file:line, or symbol names — a
+fencing heuristic rejects them; on a leak the judge gets **one** re-author
+attempt (question only, `prompts/review_adjudicate_reauthor.md`), then a
+safe generic question, never the leaky text. The mechanical findings and
+the colliding-constraint proof ride below as evidence.
+
+```text
+escalation verdict (REQUIREMENTS_CONFLICT | ARCHITECTURAL_DECISION)
+     │
+     ├─ proof incomplete ──────────► downgrade to CANT_TELL (fail-closed net)
+     │
+     └─ proof ok
+          │
+          ├─ question leaks identifiers ─► one re-author ─► still leaks ─► generic question
+          │
+          └─► open blocking clarification (plain-language question + evidence),
+              park at the human gate — ALL autonomy modes, no rounds 4/5
+```
+
+##### The answer amends the acceptance criteria (REQUIREMENTS_CONFLICT only)
+
+A ruling that contradicts the record must become the record: if the story's
+acceptance criteria still say the thing the human just overruled, every
+later prompt carries two contradicting authorities (stale AC + overriding
+ruling) — the exact fuel of the oscillation the judge exists to stop. So
+answering a `REQUIREMENTS_CONFLICT` clarification turns the ruling into the
+minimal acceptance-criteria edits, human-confirmed.
+
+The escalation clarification is stamped kind `requirements_conflict`.
+`ARCHITECTURAL_DECISION` keeps the default `question` kind and never enters
+this path — its answer rides the existing per-run guidance channel
+(`HumanFeedback` → the HUMAN GUIDANCE prompt block), never an AC edit.
+
+The flow rides the `breakdown_proposal` idiom — a clarification KIND that
+selects specialized handling on the existing `/workstreams/{id}/answer`
+endpoint, so no new command and no new REST surface:
+
+1. **Ruling → derive.** Answering the `requirements_conflict` clarification
+   dispatches `AcAmendmentDeriveWorkflow`. A read-only judge-family agent
+   stage (`prompts/ac_amendment_derive.md`, `server/internal/stages/acamend`)
+   reads the question, the ruling, and the story's current acceptance
+   criteria and emits the MINIMAL edits. The run stays parked throughout —
+   never resumed mid-derivation.
+2. **Minimality validator.** The deriver declares the criterion indices it
+   targets; the server applies only those operations to the original list
+   (untouched criteria stay byte-identical by construction) and rejects any
+   operation outside the declaration, a double-touch, or an empty edit. A
+   rejection — or an empty delta (the ruling maps to no AC change) — skips
+   the proposal and resumes guidance-only, with an operator message when it
+   was a validation failure. Authored text is never rewritten on a guess.
+3. **Propose → confirm.** A valid, non-empty amendment posts an
+   `ac_edit_proposal` clarification whose body is the exact per-criterion
+   diff plus the consequence line. The rendering is generic text, so every
+   surface (CLI, TUI, web, Telegram) shows the same informed choice with no
+   new client handling.
+4. **Apply, then resume.** "yes" dispatches `AcAmendmentApplyWorkflow`,
+   which applies the edits under the **`pm:{project}` singleton** (answer-
+   driven story mutation, serialized exactly like an edit — never a raw
+   write) and re-validates against the current story first, so a concurrent
+   edit that invalidated the diff falls back to guidance-only instead of
+   applying a stale delta. No acceptance-criteria write happens under a live
+   worker (the #1408 liveness busy-guard). Then the run resumes with the
+   ruling as guidance. Amend first, resume second — never the reverse. "no"
+   resumes guidance-only with the ruling.
+
+Only story acceptance criteria change; SPEC.md and REQS.md are untouched.
+
+```text
+answer requirements_conflict clarification (the ruling)
+     │
+     ▼  AcAmendmentDeriveWorkflow — run stays parked
+  deriver agent → minimal AC edits → validate (declared indices only)
+     │
+     ├─ empty / invalid ─► resume guidance-only (ruling [+ note]); no proposal
+     │
+     └─ valid ─► post ac_edit_proposal (exact diff + consequence line)
+                     │
+                     ├─ "no"  ─► resume guidance-only (ruling)
+                     │
+                     └─ "yes" ─► AcAmendmentApplyWorkflow
+                                    │ pm:{project} section: re-validate → apply
+                                    ├─ live-worker → close proposal, no write, NO resume
+                                    │                 (the live run is the run)
+                                    ├─ drift/invalid → resume guidance-only (ruling + note)
+                                    └─ applied → resume with the ruling as guidance
+```
 
 #### Scope Adjudication (operator-invoked, advisory)
 
@@ -1729,8 +2046,11 @@ stateDiagram-v2
     merging --> ready_to_merge : merge_aborted
     merging --> pr_open : push_for_pr
 
+    active --> merge_test_failed : post_rebase_test_failed (gate-time semantic break)
+
     merge_test_failed --> active : add_fix_commit
     merge_test_failed --> merging : hashd merge
+    merge_test_failed --> resolving : start_resolve (AI semantic-break fix)
     merge_test_failed --> closed : hashd close
 
     merge_conflicts --> active : resolve_conflicts
@@ -1742,6 +2062,7 @@ stateDiagram-v2
     resolving --> pr_open : resolve_success
     resolving --> ready_to_merge : resolve_success_no_pr
     resolving --> merge_conflicts : resolve_failed
+    resolving --> merge_test_failed : resolve_test_failed (semantic-fix unresolved)
 
     merged --> [*]
 
@@ -1786,6 +2107,7 @@ stateDiagram-v2
     draft_failed --> editing : hashd story edit
     draft_failed --> abandoned : hashd close
     draft --> editing : hashd story edit
+    accepted --> editing : hashd story edit (guard - no workstream rows)
     editing --> draft : AI edit complete
     editing --> draft_failed : AI edit refused
     editing --> draft : timeout 15 min
@@ -1805,7 +2127,7 @@ stateDiagram-v2
 | `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `hashd story edit`; retry with `hashd story retry`) |
 | `draft` | Generated, awaiting approval | Yes |
 | `editing` | AI edit in progress (auto-reverts after 15 min) | No |
-| `accepted` | Ready for implementation | Yes |
+| `accepted` | Ready for implementation | Yes -- until any workstream row exists (`story_has_no_workstreams` guard, any status including closed/merged) |
 | `implementing` | Workstream active | No (use clone) |
 | `implemented` | Workstream merged | No |
 | `abandoned` | Closed without implementation | No |
@@ -1885,7 +2207,7 @@ flowchart TD
         M1[hashd merge] --> M2["_sync_local_main()\ngit checkout main + fetch + pull --ff-only"]
         M2 --> M3[Remove worktree]
         M3 --> M4["Update SPEC.md\nClaude generates from story"]
-        M4 --> M5["delete_reqs_sections()\nremove WIP markers from REQS.md"]
+        M4 --> M5["DeleteReqsSections\nburn the story's marked requirements OUT of REQS.md\n(markers are the burn's index -- preserved at the implemented transition)"]
         M5 --> M5b["append_descoped_to_reqs()\nwrite back descoped criteria"]
         M5b --> M6["git commit 'Update documentation'\nSPEC.md + REQS.md cleanup"]
         M6 --> M7[git push + move to _closed/]
@@ -1898,9 +2220,10 @@ flowchart TD
 
 1. **WIP tags are added to main** during planning and pushed immediately
 2. **Feature branches never touch REQS.md or SPEC.md** - all doc work happens post-merge
-3. **Must sync main before doc updates** - `_sync_local_main()` ensures local main has WIP tags from remote
+3. **Must sync main before doc updates** - the local-main sync ensures local main has WIP tags from remote. The sync never discards local work: local-only commits are rebased over the remote merge, a dirty tree skips the sync, and a conflicted rebase aborts cleanly -- every non-clean outcome lands as a durable `operation_result` event
 4. **SPEC + REQS committed together** - single "Update documentation" commit after merge
 5. **Doc commit pushed to remote** - ensures other machines see the cleanup
+6. **Implemented stories' WIP markers survive until the burn** - the story-transition cleanup and planning's marker reconcile both preserve (or themselves burn) an implemented story's markers; only abandoned/missing stories get markers stripped with prose kept. The merge-archive burn finds the requirement sections by those markers, consumes the prose, and records a `requirement_burned` event; the reconcile sweep performs the same burn as the crash backstop when the archive never ran
 
 ### Manual Artifact Inspection and Edits
 
@@ -2130,6 +2453,72 @@ The merge command respects the forge's review settings:
 - Uses `--force-with-lease` to prevent overwriting others' work
 - Only applies to worktrees managed by hashd
 
+### Rebase Resolution Safeguards
+
+Automated rebases at the merge gate and in AI conflict resolution never
+silently overwrite work. Three rules enforce that:
+
+- **rerere is disabled on every machine git invocation.** git's "reuse
+  recorded resolution" cache is a human convenience; in an automated
+  pipeline it is a contamination channel -- one bad machine resolution is
+  memorized and replayed, unverified, into every later rebase with the same
+  conflict shape. Every merge-core git call (and the baseline-gate recovery
+  rebase) runs with `-c rerere.enabled=false`, a per-invocation flag that
+  never touches the operator's repo config.
+
+- **The regeneration-subsumption leg resolves only what the build
+  regenerates.** When a rebase conflict is generated-artifact noise
+  (lockfiles, codegen output), the gate accepts `theirs` and lets the build
+  re-derive the canonical content. It qualifies a conflicted path *before*
+  overwriting it: it first builds the clean pre-rebase tree and records which
+  paths the build rewrites, and takes `--theirs` only on paths in that set.
+  A conflicted path the build does not regenerate is hand-written code; the
+  whole batch parks for a human and that path is never given `--theirs`.
+
+- **AI conflict resolution verifies the build before it blesses a rebase.**
+  A clean rebase exit is not proof the merged code is correct -- a silent
+  revert or a semantic conflict rebases without a marker yet fails to
+  compile. Every leg that would stamp `ready_to_merge` (the clean-tree fast
+  path, the no-conflict rebase, and the agent-resolved rebase) first runs the
+  configured build gate. Build failure discards the rebase back to the
+  pre-rebase commit and parks with the compiler output -- a *textual*-conflict
+  resolve parks at `merge_conflicts`; a *post-rebase build/test* failure the
+  gate routed to `merge_test_failed` parks there (see below); with no build
+  configured it proceeds with a logged caveat.
+
+### Post-rebase semantic breaks (merge_test_failed)
+
+A rebase can apply cleanly *textually* yet break the branch *semantically*:
+a migration-number collision, a signature that changed on main, a helper that
+moved. The build/test gate catches it, but the fix is usually mechanical when
+the operator (or an agent) has the right evidence.
+
+**One park, two entry points.** The post-rebase build/test failure -- whether
+it surfaces during the runner's merge gate (previously left the workstream
+`active`) or during the merge flow's `post_rebase_test` -- routes to the single
+`merge_test_failed` park. Only the *resolvable* subset lands there: the gate
+emits a typed `verify_failed` outcome for a build/test failure on a cleanly
+rebased tree, distinct from infra/config blockeds (fetch failed, not
+configured, timeouts), which still go to `active`. No reason-string matching.
+
+**Evidence on the park.** The durable failure record carries the first real
+error lines plus a summary of what moved on main (commits since the branch's
+base + the files both sides touched), so `hashd show` and the TUI display WHY,
+untruncated, before anyone acts. `i` (AI-resolve) is the primary recovery from
+`merge_test_failed`, alongside `hashd merge` (retry) and `add-commit`.
+
+**The AI-resolve semantic-break leg.** Dispatched from `merge_test_failed`
+(the source state is threaded server-side; no new verb), AI-resolve rebases
+onto current main. If that now conflicts, it falls through to the textual
+conflict legs. If it is clean, it runs the merge-gate test; on a surviving
+break it runs a **mechanical** fix agent (renumber/rename/caller reconciliation
+only -- never weakens a test, blocks-with-evidence on a genuine product
+decision), then **re-verifies the gate** before committing -- the agent's word
+is never trusted alone. On success it proceeds like a normal resolve; on
+failure it discards the rebase and parks back at `merge_test_failed`
+(`resolve_test_failed`) with the agent's diagnosis appended -- strictly more
+evidence than before, never less.
+
 ---
 
 ## Files
@@ -2204,18 +2593,27 @@ Operator guidance -- rejection feedback and replan instructions -- is an append-
 
 PR/MR review threads from the forge are durable external findings. They are not the same thing as the single-shot per-commit concern pool above.
 
-When final review completes for a workstream that already has a PR, the engine asks the server to reconcile forge review threads. The server calls `forge.ListReviewThreads`, dedupes by the forge-stable thread ID, and upserts into `pr_review_findings`. The forge owns resolution: hashd writes `resolved_by_forge` only when the forge reports `IsResolved`, and writes `outdated` only when the forge reports `IsOutdated`. Hashd does not close or self-resolve review findings.
+`GET /workstreams/{id}/pr/threads` calls `forge.ListReviewThreads`, serves the threads to its caller, and folds the same fetch into `pr_review_findings`, deduped by the forge-stable thread ID. The forge owns resolution: hashd writes `resolved_by_forge` only when the forge reports `IsResolved`, and writes `outdated` only when the forge reports `IsOutdated`. Hashd does not close or self-resolve review findings -- an operator deleting a prefilled line from the reject box edits that one FIX's guidance, it does not settle the thread.
+
+Reconciliation rides the read rather than owning a trigger of its own, because the read is the operator action that needs the data: the TUI's PR reject modal fetches threads to prefill the FIX guidance box, and that is precisely the moment the ledger should be current. Upserts preserve `first_seen_sha` / `first_seen_at`, so a finding keeps the commit it first appeared at even as GitHub re-anchors the underlying comment to each new head on push. A ledger write never costs the caller its threads: the forge round-trip has already succeeded, so a failed reconcile is logged and the threads are served anyway.
+
+Reconciliation is two-sided. A thread can stop being reported without ever being resolved -- its author deletes the comment, or a rebase destroys the anchor it hung on -- so each pass also stamps `absent_at` on every finding for that PR it did not touch (the upsert refreshes `last_seen_at`, making an older stamp exactly the set that went missing). Absence is recorded *beside* `status`, not over it: `status` remains whatever the forge last said, `absent_at` is what hashd observed. A thread the forge reports again has its `absent_at` cleared, because absence describes the last pass rather than a terminal state. The row itself is never deleted -- an absent finding is still part of the PR's history.
 
 ```mermaid
 flowchart LR
-    F[Forge PR/MR review threads] --> R[Go reconciliation]
-    R --> L[(pr_review_findings)]
-    L --> O[Open actionable set<br/>status = open]
-    O --> UI[Future implementer / TUI reads]
+    P[Operator: P -- push branch to PR] --> RV[Coworker / automated review]
+    RV --> F[Forge PR/MR review threads]
+    F --> T["GET /pr/threads"]
+    T --> L[(pr_review_findings)]
+    T --> M[Reject modal prefill<br/>open threads only]
+    M --> FIX[FIX commit guidance]
+    FIX --> P
 
     C[Per-commit concern pool] --> FR[First final review only]
     FR --> X[Consumed once]
 ```
+
+The loop is operator-paced. `P` publishes the branch to the long-lived PR -- the whole point of pushing is to solicit review, so it is a deliberate keystroke rather than an automatic consequence of committing, and it moves no FSM state. The publish is a force-with-lease, because the merge flow's rebase legs legitimately rewrite this branch's history and a plain push can never publish a rebased branch; the lease refuses if the remote gained commits the worktree has never seen, so a colleague's concurrent push cannot be overwritten. `r` then folds whatever came back into the next FIX, showing only threads the forge still reports as open: resolved and outdated ones are filtered out, since re-prefilling them asks the implementer to redo work it already did.
 
 The ledger is durable and reconciled across review cycles. The concern pool is internal review context consumed once by the first final review. Keeping them separate prevents stale per-commit notes from leaking into later prompts while preserving forge-owned review threads until the forge itself says they are resolved or outdated.
 

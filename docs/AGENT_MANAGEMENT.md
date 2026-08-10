@@ -169,7 +169,7 @@ Each agent handles the OAuth/API-key conflict differently:
 | **Gemini** | Yes (`GEMINI_API_KEY` wins) | Keeps key in `auto`; strips key in `oauth` | Not declared; no verified non-interactive status command |
 | **Codex** | No (OAuth wins) | Nothing to strip | `codex login status` |
 | **Kimi** | No (OAuth wins) | Nothing to strip | Not declared; no verified non-interactive status command |
-| **Qwen** | Mutually exclusive | Nothing to strip | `qwen auth status` |
+| **Qwen** | Mutually exclusive | Nothing to strip | Not declared; `qwen auth status` always exits 0 since qwen-code v0.15.11 |
 | **OpenCode** | Provider-specific | Nothing to strip | Not declared; no single status command covers every provider |
 | **Copilot** | N/A (token hierarchy) | Nothing to strip | `gh auth status` |
 
@@ -184,6 +184,39 @@ Each agent handles the OAuth/API-key conflict differently:
 | Qwen | `qwen auth` | `qwen auth` (select different method) |
 | OpenCode | N/A (set env vars) | N/A |
 | Copilot | `copilot login` | `copilot logout` |
+
+### Per-user credentials (team servers)
+
+On a team server, agents run on the server but the work belongs to individual users -- so runs act as the **workstream owner**, using a credential that user registered:
+
+```bash
+hashd agents login <agent>     # register your credential with the server
+hashd agents logout <agent>    # remove it
+hashd agents                   # shows your registered credentials and their health
+```
+
+Login harvests the credential from your own machine where the agent has a sanctioned artifact, and prompts for a paste otherwise. Secrets are read hidden on a TTY or piped on stdin -- never passed as flags. The server validates the credential shape at registration (a wrong paste fails immediately with the fix named), stores it encrypted at rest, and never returns it.
+
+The TUI has the same surface: press `s` on the dashboard for Settings -- view credential health, register or replace a credential (paste into a masked field, or Lift to pull it from this machine's env vars / agent credential files / the gh CLI), remove one, and change the autonomy mode.
+
+| Agent | What you register | Subscription supported? |
+|-------|-------------------|------------------------|
+| **Claude** | `claude setup-token` output (or an API key with `--method api-key`) | Yes; tokens last about a year |
+| **Codex** | Your `~/.codex/auth.json` (run `codex login` first), or `--method api-key` | Yes. After uploading, run `codex login` again locally -- the server's copy becomes the live one, and sharing one login between laptop and server breaks both |
+| **Gemini** | Your `~/.gemini/oauth_creds.json`, or `--method api-key`. Workspace accounts add `--project <id>` | Yes; agent runs burn quota fast, so expect a paid tier |
+| **Copilot** | `gh auth token` output (harvested automatically), or a fine-grained PAT with the "Copilot Requests" permission | Yes; classic `ghp_` tokens are rejected -- the Copilot CLI silently ignores them |
+| **Qwen** | An API key plus `--base-url` (Coding Plan or any OpenAI-compatible endpoint) | Key-based only; the free OAuth tier was discontinued upstream |
+| **Kimi** | A Moonshot platform API key plus `--model` | Key-based only today |
+| **OpenCode** | Not supported | OpenCode is a multi-provider harness with its own auth store, and Anthropic prohibits Claude subscription OAuth in third-party tools |
+
+Behavior at run time (registered-credential-wins):
+
+- A registered credential is always injected for your runs, in both deployment modes, and overrides the server host's own environment.
+- Single-user mode with nothing registered keeps today's behavior: the host's own agent auth.
+- Team-server runs on an owned workstream **refuse to dispatch** when the owner has no live credential for the run's agents. The refusal names the exact command to fix it.
+- When a run proves a credential dead (expired, revoked, or a token-rotation conflict), the server records it: the next dispatch fails instantly with the recovery steps instead of burning another run. Re-registering clears the state.
+
+The server never installs, pins, or updates agent binaries -- installing agents on the server is the operator's job, and a dispatch whose agent is missing is refused with the install command.
 
 ### Diagnostics
 
