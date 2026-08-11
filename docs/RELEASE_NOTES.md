@@ -4,6 +4,32 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.24 - 2026-08-11
+
+v0.9.24 is the release where an infrastructure brownout stops costing a workday. A live incident -- the engine's store starved for 78 seconds behind a saturated disk, two mid-flight agents killed, a fix cycle silently abandoned under a stale status -- was root-caused end to end, and every layer of the response ships here: the engine absorbs the blip, tells the operator it happened, and explains itself in plain evidence when it still has to park. Alongside it, reviewers can no longer hold a commit under the confidence line without naming a finding, planning prompts stop hauling the whole SPEC into every run, and the README finally says out loud what a team server does.
+
+### What's Changed
+
+- **A reviewer's doubt must have a name.** An approve carrying only nits and suggestions but graded below the commit-confidence threshold is a contradiction -- the verdict says ship, the number says do not, and nothing explains the gap. That shape used to grind soft retries into a park with nothing actionable. The reviewer contract now says it directly in all five prompt copies: nits are, by the reviewer's own classification, not reasons to hold a commit, and a systemic problem must be a named finding, not a quiet number. The verifier enforces it at authoring time against the loaded threshold (#1416), so the reviewer reconciles in-session instead of starving the loop.
+
+- **Janitor cancels that land, and only one of each notification.** A run parked at the human gate waited in a signal that could not be cancelled, so a workstream closed while parked left a zombie the janitor "cancelled" every five minutes, forever -- 2,776 times on one live box (#1417). Parks now wait cancellably, the janitor escalates to terminate when its cancel is already pending, cleanup rows carry the run id and reason, and existing zombies self-clean on the first sweep after upgrade. The same PR ends the TUI writing every notification to the events table twice.
+
+- **Human-gate questions carry their evidence** (#1418). Every runner escalation clarification now names the failing test and its first real error line, the micro-commit, the run id, and what each escalation tier actually concluded -- including "did not run" and "timed out unruled" as their own truthful states. A judge that never got to rule renders as "could not run (reason)", never as part of a reasoned chain.
+
+- **Infrastructure failures reach the operator** (#1419). Engine degradation debounces into incident events (onset and recovery with duration), an agent killed by the runner emits an event naming the workstream, stage and cause, and a housekeeping action hitting the same target sweep after sweep warns instead of quietly writing row 2,730. The TUI footer shows engine state, `hashd status` lists recent incidents, and doctor joins in -- what used to die in log files is now on the surfaces you actually look at.
+
+- **An agent killed by infrastructure is not "interrupted"** (#1422). When activity cancellation -- a heartbeat timeout, an engine brownout, a worker shutdown -- killed a live agent, the death was classified as a deliberate interruption and never retried, silently abandoning the work. One boundary helper now propagates cancellation for every agent stage: infrastructure deaths retry and resume the session, judges get to actually rule on the next attempt instead of parking a human on a question no one asked, and genuine agent self-exits still never auto-retry. A run that ends interrupted mid-attempt now says so on the workstream instead of hiding behind a stale review status.
+
+- **Planning prompts reference the SPEC instead of swallowing it** (#1423). Edit and refine runs were rendering the entire SPEC.md into the prompt -- 671KB observed live -- on every planning cycle. Prompts now name the file and the agent reads the parts it needs; flows that mutate the SPEC make targeted edits instead of rewriting the document.
+
+- **Planners name migrations by intent, never by ordinal** (#1421). Two parallel stories claiming the same migration number is a collision baked in at planning time. Plans now describe the migration; the implementer numbers it against the tree at hand, and a collision after a rebase is an ordinary semantic conflict the merge gate already renumbers mechanically.
+
+- **Chat moves into the browser** (#1420): the web dashboard gains chat sessions.
+
+- **The README says the team part out loud** (#1424). Working together on one server -- per-request attribution, workstream ownership, per-user agent credentials, team mode, the browser dashboard -- is shipped capability, and the README now leads with it: the first coding platform designed to enhance the team.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.23...v0.9.24
+
 ## v0.9.23 - 2026-08-10
 
 v0.9.23 is the release where the review loop learns to tell a code bug from a product decision, and where a week of live multi-project driving hardened every path that had been quietly lying about state. The escalation ladder gains a judge that can rule "insufficient / contradictory requirements" and ask the operator the actual product question in plain language -- then amend the story's acceptance criteria (with the operator's approval) so the record stops contradicting the answer. Underneath it, AI conflict resolution can no longer destroy its own success, the FSM refuses structural mutations under a live worker, team servers get per-user agent credentials across all three surfaces, and clients survive restarts they used to sit out forever.

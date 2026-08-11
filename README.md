@@ -32,6 +32,8 @@ New to hashd? **[QUICKSTART](QUICKSTART.md)** takes you from here to your first 
 
 Hashd is an orchestration system for AI coding agents. It plans the work, runs agents in isolated worktrees, grounds them in verified code structure, gates each change through review, and records the full lineage of every commit.
 
+**Hashd is the first coding platform designed to enhance the team.** Everyone else is going after individual developers. We recognize that the AI era changes the way teams build software -- so hashd is built to run as a shared server where different people work together: every request attributed to a person, every workstream owned by one, every member running agents on their own credentials, and every merge governed by the same gates. Solo use is the default and stays first-class; the team is the point.
+
 **10x developer throughput. 10x fewer tokens spent on exploration. 15%+ accuracy improvement from grounded context.**
 
 AI coding agents are powerful but unaccountable. They generate code without explaining why, re-discover the codebase on every run, and make decisions you can't trace later. Hashd adds the structure that makes AI-generated code trustworthy enough to ship -- and fast enough to change how much you ship in a day.
@@ -124,13 +126,13 @@ Hashd is a client (`hashd`, `hashd watch`) talking to a server (`hashd-server`).
 
 Either way the token carries the server's certificate fingerprint, so pairing needs no separate trust step. Full walkthrough, trust model, and troubleshooting: **[docs/REMOTE.md](docs/REMOTE.md)**.
 
+**Working together on one server.** A shared server is multi-user for real: every request is attributed to the person who made it, and a workstream belongs to the user who started it. Agent credentials are per-user too -- each member registers their own agent login (`hashd agents login claude`, or the web dashboard's Settings -> Agent logins panel), stored encrypted at rest and injected only into runs that member owns; a run whose owner has no live credential refuses to start rather than borrowing someone else's account. Team mode (`hashd config set deployment_mode team`) makes per-user identity mandatory on every request. The server also serves a browser dashboard alongside the TUI -- workstream monitoring, change review, chat, and settings -- so teammates can observe and act without a terminal.
+
 **Solo shared-repo (advanced, not recommended).** Several developers each run their own solo hashd against the same git repository, their per-project state living side by side under `.hashd`, with no server coordinating them. Git is the only shared substrate. It works, but there is no shared workstream registry or multi-user gate -- prefer a server for real collaboration.
 
 ## What's coming
 
-**Team coordination.** Multi-user servers work today -- per-user identity, tokens, and request attribution (see [Running hashd](#running-hashd-local-server-and-shared-repo) above). What's still landing is the coordination layer on top: a shared workstream registry, multi-user gates, and attestations exported per merge.
-
-**Web dashboard.** A browser-based interface for monitoring and controlling workstreams.
+**Team coordination extras.** Working together on one server ships today -- identity, tokens, attribution, workstream ownership, and per-user agent credentials (see [Running hashd](#running-hashd-local-server-and-shared-repo) above). Still landing on top: attestations exported per merge.
 
 **Desktop app.** A native Electron client for users who prefer a windowed UI over the terminal.
 
