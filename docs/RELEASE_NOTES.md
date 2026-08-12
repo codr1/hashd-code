@@ -4,6 +4,24 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.25 - 2026-08-12
+
+v0.9.25 makes the PR loop tell the truth about heads. Gatekeeper PR mode deliberately made publishing a keystroke -- but the surfaces never learned about the state that gate created, so finished fixes sat invisibly unpushed while the forge reviewed stale code and the reject box re-fed findings that were already addressed. One comparison -- the worktree's HEAD against the PR head hashd last pushed -- now feeds every surface in the loop. Alongside it, planners can no longer promise commit topology the pipeline itself breaks.
+
+### What's Changed
+
+- **The board says when the PR is behind your work.** At pr_open the workstream detail carries the head comparison and `hashd show` renders it in git's own words: `ahead of PR #440 by 1 commit -- push to publish` (behind and diverged read analogously). The run-complete notification appends the same sentence the moment a fix cycle lands push-ready, so the operator is told instead of polling (#1426).
+
+- **The reject box never re-feeds a stale review.** When local work is ahead of the PR, forge findings are withheld entirely -- no per-finding staleness guessing, human reviews included -- and the box explains itself with a warning: the last forge review was of the old head; push to solicit the latest. Heads match: threads fold exactly as before. The threads read freshens the tracking ref first, since it already paid a forge round-trip (#1426). The TUI renders the withheld notice in the warning color, wrapped and capitalized, instead of an ambiguous empty box.
+
+- **Merging locally past an open PR requires saying so.** The local-merge leg used to land the branch and strand the forge PR forever. It now refuses with the PR named unless acknowledged (`-y`), and after landing it closes the PR with a "merged locally as <sha>" comment -- a failed close degrades to a durable event, never a broken merge (#1426).
+
+- **`hashd pr push --sync` recovers from a moved remote.** A lease refusal now names its remedy: --sync fetches, rebases onto the remote branch, and retries the push; conflicts abort cleanly with the files listed. The sync leg takes the structural-verb busy guard -- a rebase under a live agent is the worktree-clobber class -- re-checked immediately before the rebase, with a preempted refusal that reads as busy, never as an infrastructure error (#1426).
+
+- **Planners stop promising what the pipeline breaks.** A story question offered "one commit or three?", the answer became a per-commit revertability criterion, and the review cycle's own appended FIX commits made it unsatisfiable -- a fix loop that could never converge. Story refinement and editing no longer ask about or encode commit counts, boundaries, or per-commit revertability (sequencing excepted); breakdown refuses such criteria before any code exists, naming the criterion for amendment. For independent revertability the honest unit is a workstream split, and the planner now says so.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.24...v0.9.25
+
 ## v0.9.24 - 2026-08-11
 
 v0.9.24 is the release where an infrastructure brownout stops costing a workday. A live incident -- the engine's store starved for 78 seconds behind a saturated disk, two mid-flight agents killed, a fix cycle silently abandoned under a stale status -- was root-caused end to end, and every layer of the response ships here: the engine absorbs the blip, tells the operator it happened, and explains itself in plain evidence when it still has to park. Alongside it, reviewers can no longer hold a commit under the confidence line without naming a finding, planning prompts stop hauling the whole SPEC into every run, and the README finally says out loud what a team server does.
