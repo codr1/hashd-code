@@ -56,6 +56,13 @@ GLAB_VERSION="1.101.0"
 BKT_VERSION="0.28.1"
 TEA_VERSION="0.14.1"
 
+# Refreshed together with vendor/playwright by refresh-browser-deps.py before
+# minor/major release candidates. Installers never resolve a floating latest.
+BROWSER_NODE_VERSION="24.21.0"
+BROWSER_NODE_SHA_LINUX_X64="6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff"
+BROWSER_NODE_SHA_LINUX_ARM64="724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5"
+BROWSER_NODE_SHA_DARWIN_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
+
 log() {
     # Single-line status prefix so source and wheel flows render consistently.
     printf '  %-12s %s\n' "$1" "$2"
@@ -973,6 +980,100 @@ install_forge_clis() {
     return 0
 }
 
+verify_playwright_runtime() (
+    local root="$1"
+    export PLAYWRIGHT_BROWSERS_PATH="$root/browsers" NO_UPDATE_NOTIFIER=1
+    "$root/node/bin/node" "$root/node_modules/@playwright/cli/playwright-cli.js" --version || exit 1
+    # Also checks reuse: a CLI version alone does not prove its browser files
+    # still exist or that the OS can launch them. No server or network required.
+    "$root/node/bin/node" - "$root" <<'BROWSER_SMOKE'
+const root = process.argv[2];
+const {chromium} = require(root + '/node_modules/playwright');
+const timer = setTimeout(() => { console.error('Browser installation smoke timed out'); process.exit(1); }, 30000);
+(async () => {
+    const browser = await chromium.launch({headless: true, timeout: 15000});
+    try {
+        const page = await browser.newPage();
+        page.setDefaultTimeout(5000);
+        await page.goto('data:text/html,<button onclick="this.textContent=\'Ready\'">Check</button>');
+        await page.getByRole('button', {name: 'Check'}).click();
+        if (await page.getByRole('button').textContent() !== 'Ready') throw new Error('Browser interaction failed');
+        if (!(await page.screenshot()).length) throw new Error('Empty screenshot');
+    } finally { await browser.close(); }
+})().then(() => clearTimeout(timer)).catch(error => { console.error(error); process.exit(1); });
+BROWSER_SMOKE
+)
+
+install_playwright() (
+    # Subshell owns temporary files/traps; a failed upgrade leaves the old
+    # executable and its browser untouched. Old runtimes may still own sessions.
+    set -e
+    local platform expected_sha script_dir lock_dir tmp runtime identity installed link
+    case "$OS/$RAW_ARCH" in
+        linux/x86_64|linux/amd64) platform=linux-x64; expected_sha="$BROWSER_NODE_SHA_LINUX_X64" ;;
+        linux/aarch64|linux/arm64) platform=linux-arm64; expected_sha="$BROWSER_NODE_SHA_LINUX_ARM64" ;;
+        darwin/aarch64|darwin/arm64) platform=darwin-arm64; expected_sha="$BROWSER_NODE_SHA_DARWIN_ARM64" ;;
+        *) echo "Unsupported browser platform: $OS/$RAW_ARCH" >&2; exit 1 ;;
+    esac
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    lock_dir="${1:-$script_dir/../vendor/playwright}"
+    tmp="$(mktemp -d "$TOOLS_DIR/.playwright.XXXXXX")"
+    link="$tmp/link"
+    trap 'rm -rf "$tmp"; rm -f "$link"' EXIT
+    cp "$lock_dir/package.json" "$lock_dir/package-lock.json" "$tmp/"
+    # Include the wrapper/smoke revision and Node asset in the installed identity.
+    printf '%s\n' "wrapper-v1 $expected_sha" > "$tmp/identity"
+    cat "$tmp/package.json" "$tmp/package-lock.json" >> "$tmp/identity"
+    identity="$(sha256_file "$tmp/identity")"
+    installed="$(readlink "$TOOLS_DIR/playwright-cli" || true)"
+    runtime="$TOOLS_DIR/$(dirname "${installed:-missing}")"
+    if [ -n "$installed" ] && [ -x "$runtime/playwright-cli" ] && [ -f "$runtime/identity" ] && \
+        [ "$(sha256_file "$runtime/identity")" = "$identity" ] && verify_playwright_runtime "$runtime"; then
+        log "playwright" "locked runtime already installed"
+    else
+        runtime="$tmp"
+        curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 \
+            "https://nodejs.org/dist/v$BROWSER_NODE_VERSION/node-v$BROWSER_NODE_VERSION-$platform.tar.gz" \
+            -o "$tmp/node.tar.gz"
+        if [ "$(sha256_file "$tmp/node.tar.gz")" != "$expected_sha" ]; then
+            echo "Node SHA256 mismatch; browser installation refused" >&2
+            exit 1
+        fi
+        mkdir "$tmp/node"
+        tar -xzf "$tmp/node.tar.gz" --strip-components=1 -C "$tmp/node"
+        rm "$tmp/node.tar.gz"
+        [ "$("$tmp/node/bin/node" --version)" = "v$BROWSER_NODE_VERSION" ]
+        export PLAYWRIGHT_BROWSERS_PATH="$tmp/browsers"
+        export PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=30000
+        export npm_config_fetch_retries=2 npm_config_fetch_timeout=60000
+        "$tmp/node/bin/node" "$tmp/node/lib/node_modules/npm/bin/npm-cli.js" ci \
+            --prefix "$tmp" --ignore-scripts --no-audit --no-fund
+        "$tmp/node/bin/node" "$tmp/node_modules/playwright/cli.js" install chromium --only-shell
+        verify_playwright_runtime "$tmp"
+        cat > "$tmp/playwright-cli" <<'BROWSER_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+script="$0"
+if [ -L "$script" ]; then script="$(dirname "$script")/$(readlink "$script")"; fi
+root="$(cd "$(dirname "$script")" && pwd)"
+export PLAYWRIGHT_BROWSERS_PATH="$root/browsers"
+export NO_UPDATE_NOTIFIER=1
+exec "$root/node/bin/node" "$root/node_modules/@playwright/cli/playwright-cli.js" "$@"
+BROWSER_WRAPPER
+        chmod 755 "$tmp/playwright-cli"
+        "$tmp/playwright-cli" --version
+        # Each successful install has its own directory. Switching a symlink
+        # is atomic even with concurrent installers; existing sessions retain
+        # their resolved executable and old runtime until they finish.
+        link="$(mktemp "$TOOLS_DIR/.playwright-link.XXXXXX")"
+        rm "$link"
+        ln -s "$(basename "$runtime")/playwright-cli" "$link"
+        mv -f "$link" "$TOOLS_DIR/playwright-cli"
+        trap 'rm -f "$link"' EXIT
+        log "playwright" "installed and browser verified -> $TOOLS_DIR/playwright-cli"
+    fi
+)
+
 install_cbm_if_source_checkout() {
     local script_dir lock_path
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 0
@@ -1015,4 +1116,19 @@ install_ripgrep
 install_temporal
 install_forge_clis
 install_cbm_if_source_checkout
+# Remote-only clients do not execute agents. Match dist/install.sh's existing
+# remote-host detection; local/source installs get the managed browser runtime.
+if [ -z "${HASHD_SERVER_URL:-}" ] || printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; then
+    # Do not call the subshell as an `if` condition: bash would disable errexit
+    # throughout it, allowing a failed checksum/download to reach publication.
+    set +e
+    install_playwright
+    browser_status=$?
+    set -e
+    if [ "$browser_status" -ne 0 ]; then
+        echo "WARN: browser installation failed (see error above); existing runtime retained."
+        echo "      Browser validation will be skipped if unavailable. Re-run the installer after fixing the reported dependency."
+        echo "      Linux shared libraries may require your administrator; Hashd does not run sudo."
+    fi
+fi
 echo "Tool install complete."

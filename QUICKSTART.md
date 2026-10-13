@@ -8,11 +8,43 @@ curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | 
 
 The installer provides a Python 3.11+ runtime (bootstrapping [uv](https://github.com/astral-sh/uv) when your system has none, so PEP-668 "externally-managed-environment" boxes like fresh Arch and Homebrew Python just work), puts `hashd` on your PATH, fetches SHA-verified forge CLIs, and starts the local hashd services. It finishes by running `hashd doctor`.
 
+Rerun it for normal updates; the installation's operations root is retained.
+Replacing a competing installation requires explicit authorization:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash -s -- --replace-install
+```
+
+The installer reports both installations and stops before changes without that
+flag. Replacement does not migrate projects, settings or authentication; a fresh
+installation defaults to solo mode.
+
 > **Working on hashd itself?** This page is the user install. Building from
 > source is a contributor path that needs access to the hashd source repository;
 > its `DEVELOPMENT.md` covers the Go/Task/sqlc toolchain and `setup.sh`.
 > (No link here on purpose: QUICKSTART ships in the public hashd-code release,
 > while the source repo is private, so a relative link would 404 for readers.)
+
+### Your first project
+
+After installation, choose the interface you prefer:
+
+- **CLI:** run `hashd` in a terminal. With no projects registered, it shows the
+  first-project command and team connection instructions. `hashd --help` always
+  shows command help; scripts and redirected output retain normal help output.
+- **TUI:** run `hashd watch`. Without a selected project, it opens a welcome or
+  project picker. **Add a project** opens the existing setup interview in your
+  terminal, then returns to the TUI. Local connections can use a local path;
+  remote connections offer server-side cloning or uploading a local repository.
+- **Web:** open `/ui` at your installation's Web address. With no projects,
+  **Add a project** opens the existing project form. Existing projects take you
+  straight to the dashboard.
+
+Joining an existing team? Use its server address and access from your
+administrator; follow [Connect to a Server](#going-remote-connect-to-a-server).
+You do not need to register the team's projects again. Web's existing-repository
+path is on the server; CLI/TUI local-repository and upload paths are on the
+computer running the client. Use an absolute path in the TUI.
 
 ### Requirements
 
@@ -251,6 +283,11 @@ exactly what is down and the fix is one command:
 hashd restart        # brings up all local hashd services
 ```
 
+If work is running when you restart, `hashd restart` holds new work and waits
+for running stages to reach a stopping point before it stops anything, printing
+what it is waiting on. Ctrl-C cancels and stops nothing; `hashd restart --force`
+interrupts instead. `--yes` does not force.
+
 ```bash
 # Launch TUI
 hashd watch
@@ -386,6 +423,7 @@ hashd admin user add alice@example.com --name "Alice"   # prints Alice's token t
 hashd server set https://<lan-ip>:1337 --token <token>
 hashd status             # shows the server, your identity, and health
 hashd list -p <project>
+hashd list --mine -p <project>   # only the stories and workstreams you own
 hashd watch -p <project>
 
 # Return to local behavior:
@@ -432,7 +470,7 @@ Learn the system:
 
 Reference:
 
-- **[WF.md](WF.md)** -- Full command reference and lifecycle docs
+- **[WF.md](WF.md)** -- Workflow states, guards and recovery; [command reference](docs/walkthrough.md#command-reference) for interface usage
 - **[RELEASE_NOTES.md](docs/RELEASE_NOTES.md)** -- Version-by-version release notes
 - **[docs/AGENT_MANAGEMENT.md](docs/AGENT_MANAGEMENT.md)** -- Agent switching, auth, per-project overrides
 - **[docs/REMOTE.md](docs/REMOTE.md)** -- Remote and team servers: TLS trust, accounts, tokens, pairing

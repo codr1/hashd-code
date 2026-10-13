@@ -92,34 +92,98 @@ workflow:
 
 The default is `true` (enabled).
 
-## Prefect Server Not Running
+## Temporal Server Not Running
 
 If `hashd run` fails with a connection error:
 
 ```bash
-hashd restart            # Restart all services including Prefect
-hashd restart server -y  # Restart one component without orphan-process prompt
+hashd restart                          # Restart all services including the Temporal sidecar
+hashd restart server --reclaim-port    # Restart one component, clearing a foreign port owner
 ```
+
+Restarting stops the server, which stops every activity its Temporal worker is
+running. `hashd restart`, `hashd restart server` and `hashd stop` therefore put
+a restart hold in force and wait -- with no limit -- until every workflow is at
+a stopping point: running stages finish under their own timeouts and the next
+one does not start. Progress prints the whole time (a full summary every 60
+seconds without a terminal). New work is refused while the hold stands; the
+refusal names the command to retry. The hold is released when the replacement
+server is ready (WF.md "Restart holds").
+
+- Ctrl-C cancels the wait: the hold is released and nothing is stopped.
+- `--force` interrupts running work instead of waiting. It lists everything it
+  will interrupt and asks; `--force --yes` proceeds without asking, and without
+  a terminal `--force` needs `--yes`. No environment variable selects it.
+- `--yes` (`-y`) alone never forces: it answers the command's other prompts.
+- If the restart hold cannot be put in force (the local server does not
+  answer, or the configured URL is another machine's), the command stops
+  nothing and exits non-zero at once, naming the same command and the `--force`
+  form.
+- Against a hashd-server older than v0.9.25-998-g077bf39c4, the version that introduced the restart hold, the command holds nothing: it prints one line saying running work is not held, then stops as older releases did.
+- If hashd-server itself cannot be stopped, the command releases the hold it
+  put in force and exits non-zero: the server is still running, and nothing is
+  coming to release a hold left behind.
+- `--reclaim-port` authorizes killing an unrecognized process that still holds
+  the hashd-server port as the server starts. Without a terminal, that kill is
+  refused unless this flag is given; `--yes` does not authorize it. It applies
+  to `hashd restart` and `hashd restart server` -- the restarts that start the
+  server -- and not to `hashd stop`.
+- `--in-place-upgrade` says a restart of a source checkout after a version
+  change is deliberate, skipping the installer's owner provisioning, tool
+  refresh and doctor. `hashd restart` only: a component restart refuses it, and
+  `hashd stop` does not take it. `./setup.sh` is the supported upgrade path and
+  passes it for you.
+
+The board names each item's stage and the substage beside it -- what a live
+agent is running, or the last substage the item recorded when no agent is
+attached -- but never which agent that is, because the record of a running
+invocation carries no agent name. The background housekeeping sweep is
+off the board too: it belongs to no project to be listed under, and it repeats
+every few minutes and redoes whatever a restart interrupts. What a stop
+genuinely could not read -- a project whose database would not open, one the
+check ran out of budget before reaching -- is listed under "Not checked" on
+that stop, and is never the same thing as nothing running.
 
 ## Stale Flows
 
-If a workstream shows as "running" but nothing is happening:
+Inspect the current stage, diagnostics, and available actions before changing
+a workstream that appears stuck:
 
 ```bash
-hashd show <ws_id>     # Check status and last run
-hashd reset <ws_id>    # Reset to active state, cancel stale flows
+hashd show <ws_id> --details
+hashd watch <ws_id>
 ```
+
+- **Failed implementation:** fix the reported cause, then use `hashd run <ws_id>`
+  when run is available. This continues the existing plan.
+- **`awaiting_human_review`:** use `hashd approve <ws_id>` or
+  `hashd reject <ws_id> -f "guidance"`, not `run`. Read the gate reason first:
+  approving a review gate accepts the current diff; approving an agent-stop
+  gate retries implementation without committing it.
+- **Still running:** silence alone does not establish failure. Inspect the
+  active stage; do not reset merely to clear the status.
+
+`hashd reset <ws_id>` is a deliberate implementation restart: it resets the
+worktree to baseline, discards committed micro-commit code and uncommitted
+edits, unmarks the retained plan, removes FIX commits, and clears reviews.
+It is not a harmless retry. See [reset / replan / reject](../WF.md#plan-regeneration-reset--replan--reject).
 
 ## Worktree Cleanup
 
-If git complains about existing worktrees or branches:
+Inspect the owning workstream with `hashd show <ws_id>` before removing its
+worktree. Close only when you intend to abandon that work:
 
 ```bash
-hashd close <ws_id> --force    # Remove worktree, branch, and DB record
+hashd close <ws_id> --keep-branch
 ```
 
-Never `cd` into a worktree directory before removing it. Always run cleanup
-from outside the worktree path.
+Close asks for confirmation, removes the worktree, and discards uncommitted
+changes. `--keep-branch` retains committed work for `hashd open <ws_id>`;
+without it, close also deletes the local branch. The database record is kept.
+Use `-y` only to confirm those consequences without a prompt.
+
+Check the response for cleanup warnings: a closed record does not guarantee
+the worktree was removed. Run cleanup from outside the worktree path.
 
 ## Broken Main (Post-Merge Test Failures)
 
@@ -222,11 +286,12 @@ See README.md for installation instructions.
 
 ## Workspace Hook Failures
 
-See `docs/HOOKS.md` for the full hooks reference. Common failure modes:
+See [Workspace Hooks](HOOKS.md) for configuration and environment variables.
 
 ### Setup hook timed out
 
-The workstream stays at `provisioning` with `provision_error` populated (`runtime_status: provisioning / failed`); the diagnostic looks like:
+The workstream stays at `provisioning` with `runtime_status: failed` and a
+`provision_error` diagnostic:
 
 ```
 Hook exceeded timeout of 300s and was killed.
@@ -243,15 +308,13 @@ Hook exceeded timeout of 300s and was killed.
    hooks:
      timeout_seconds: 900
    ```
-2. Re-run the workstream. Provisioning is idempotent and picks up from the
-   failed step:
+2. Retry provisioning. The setup hook runs again, so it must tolerate partial
+   work from the previous attempt:
    ```bash
    hashd run <ws_id>
    ```
 
-Alternatively, simplify the hook -- prefer `npm ci` over `npm install`,
-break an all-in-one setup script into smaller hooks, or move slow work out
-of the hook entirely (e.g., pre-warm caches with a connector).
+Alternatively, simplify the hook or pre-warm its dependencies.
 
 ### Setup hook failed (non-zero exit)
 
@@ -274,14 +337,13 @@ Hook failed: exit status 1
 
 After fixing the underlying issue, re-run `hashd run <ws_id>`.
 
-### Teardown hook failed (but worktree was removed anyway)
+### Teardown hook failed
 
-Teardown failures never block cleanup. You'll see a `Warning:` line in the
-CLI output and a log entry, but the worktree is already gone.
+Teardown-hook failures are logged and do not block worktree removal. Removal
+can fail separately; check the operation's response before assuming it succeeded.
 
-If the failure left behind orphaned resources (dangling containers, leaked
-volumes, etc.), clean them up manually. Prevention: make teardown idempotent
-and defensive -- e.g., `docker-compose ... down || true`.
+Clean up any resources the failed hook left behind. Make teardown tolerate
+already-removed resources without suppressing other errors.
 
 ### Testing a hook before deploying
 
@@ -297,15 +359,3 @@ bash -c 'YOUR HOOK COMMAND HERE'
 ```
 
 Add `-x` (`bash -x -c ...`) to trace each expanded command.
-
-### "Server unavailable for setup hook -- skipping"
-
-The Prefect flow couldn't reach the Go server. The workstream provisions
-without running the hook and logs a warning. This is intentional (Prefect
-workers shouldn't be coupled to server uptime), but it means the hook's
-side effects won't happen.
-
-**How to fix:**
-- Check the server is up: `curl http://127.0.0.1:1337/health`
-- If running remotely, verify `HASHD_SERVER_URL` is set
-- Re-run the workstream once the server is reachable

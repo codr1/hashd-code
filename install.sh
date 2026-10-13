@@ -4,7 +4,173 @@
 # Intended for packaged wheel installs/upgrades.
 # This script should be safe to re-run; install, migration, and restart work
 # are expected to be idempotent.
-set -e
+# Shared, read-only preflight for source and packaged installers.
+
+# Resolve existing symlinks and missing trailing components without GNU readlink -f.
+hashd_install_path() (
+    local path="$1" parent leaf target depth="${2:-0}"
+    case "$path" in *$'\n'*) echo 'Error: installation paths must not contain newlines.' >&2; return 1 ;; esac
+    [ "$depth" -lt 40 ] || return 1
+    case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+    [ "$path" != / ] || { printf '/\n'; return; }
+    path="${path%/}"
+    parent="$(dirname "$path")"
+    leaf="$(basename "$path")"
+    parent="$(hashd_install_path "$parent" "$((depth + 1))")" || return 1
+    case "$leaf" in
+        .) printf '%s\n' "$parent"; return ;;
+        ..) dirname "$parent"; return ;;
+    esac
+    path="${parent%/}/$leaf"
+    if [ -L "$path" ]; then
+        target="$(readlink "$path")" || return 1
+        case "$target" in /*) ;; *) target="$parent/$target" ;; esac
+        hashd_install_path "$target" "$((depth + 1))"
+    else
+        printf '%s\n' "$path"
+    fi
+)
+
+# Old installs have no receipt. Recognize the same source/package layouts as
+# the CLI bootstrap; an arbitrary executable or dangling link is not proof.
+hashd_install_legacy_root() {
+    local launcher="$1" target="$1" root data dir link depth=0
+    # Source inference checks each launch location before following its symlink,
+    # including a cleaned checkout whose bin/hashd has not been rebuilt yet.
+    while [ "$depth" -lt 20 ]; do
+        dir="$(hashd_install_path "$(dirname "$target")")" || return 1
+        for root in "$(dirname "$dir")" "$dir"; do
+            if [ -f "$root/server/go.mod" ] &&
+                grep -Eq '^[[:space:]]*module github\.com/codr1/hashd/server[[:space:]]*$' "$root/server/go.mod"; then
+                printf '%s\n' "$root"
+                return
+            fi
+        done
+        [ -L "$target" ] || break
+        link="$(readlink "$target")" || return 1
+        case "$link" in /*) target="$link" ;; *) target="$dir/$link" ;; esac
+        depth=$((depth + 1))
+    done
+    target="$(hashd_install_path "$launcher")" || return 1
+    [ -f "$target" ] || return 1
+    root="$(dirname "$(dirname "$target")")"
+    for data in "$root"/lib/python*/site-packages/hashd_data \
+        "$root"/lib64/python*/site-packages/hashd_data "$root"/Lib/site-packages/hashd_data; do
+        if [ -d "$data/prompts" ] && [ -d "$data/templates" ] && [ -d "$data/schemas" ]; then
+            hashd_install_path "$HOME/.hashd"
+            return
+        fi
+    done
+    return 1
+}
+
+hashd_install_receipt_root() {
+    local launcher="$1" receipt version target root extra resolved
+    receipt="$(dirname "$launcher")/.hashd-install"
+    [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
+    {
+        IFS= read -r version && IFS= read -r target && IFS= read -r root &&
+            ! IFS= read -r extra && [ -z "$extra" ]
+    } < "$receipt" || return 2
+    [ "$version" = hashd-install-v1 ] || return 2
+    case "$root" in /*) ;; *) return 2 ;; esac
+    resolved="$(hashd_install_path "$launcher")" || return 2
+    [ "$target" = "$resolved" ] || return 1
+    hashd_install_path "$root" || return 2
+}
+
+# With no override, retain a recorded custom root on an ordinary update. A
+# different source checkout still proposes its own root and requires consent.
+hashd_install_default_root() {
+    local preferred="$1" default="$2" launcher legacy recorded
+    while IFS= read -r launcher; do
+        legacy="$(hashd_install_legacy_root "$launcher")" || legacy=""
+        if [ "$legacy" = "$default" ] && recorded="$(hashd_install_receipt_root "$launcher")"; then
+            printf '%s\n' "$recorded"
+            return
+        fi
+    done < <(hashd_install_launchers "$preferred")
+    printf '%s\n' "$default"
+}
+
+hashd_install_check() {
+    local launcher="$1" proposed="$2" replacement="$3" proposed_binary="$4"
+    local target current rc
+    [ -e "$launcher" ] || [ -L "$launcher" ] || return 0
+    target="$(hashd_install_path "$launcher")" || target="unresolved: $launcher"
+    if current="$(hashd_install_receipt_root "$launcher")"; then
+        :
+    else
+        rc=$?
+        if [ "$rc" = 1 ]; then
+            current="$(hashd_install_legacy_root "$launcher")" || current=""
+        fi
+        [ -n "$current" ] || current="unknown (installation could not be identified)"
+    fi
+    [ "$current" != "$proposed" ] || return 0
+    {
+        if [ "$replacement" = 1 ]; then
+            printf 'Replacing a competing hashd installation (--replace-install).\n'
+        else
+            printf 'Error: another hashd installation is already configured.\n'
+        fi
+        printf '\n  Existing command: %s\n  Existing executable: %s\n  Existing operations root: %s\n' "$launcher" "$target" "$current"
+        printf '\n  Proposed executable: %s\n  Proposed operations root: %s\n\n' "$proposed_binary" "$proposed"
+        printf '%s\n' \
+            'Continuing would replace the installation used by the hashd command' \
+            'and restart services against the proposed installation.' \
+            'Existing data is not deleted or moved. Its projects, settings and' \
+            'authentication do not carry over automatically. A fresh installation' \
+            'uses solo mode; do not assume the existing team-mode authentication remains.'
+        if [ "$replacement" != 1 ]; then
+            printf '\n%s\n' \
+                'No installation changes have been made.' \
+                'To update normally, use the existing installation and operations root.' \
+                'To explicitly replace it, rerun this installer with --replace-install.'
+        fi
+    } >&2
+    [ "$replacement" = 1 ]
+}
+
+# Check every launcher the installers may replace, plus the active PATH entry.
+# Nothing here executes the old binary, touches its data, or contacts services.
+hashd_install_launchers() {
+    local launcher seen=$'\n'
+    for launcher in "${1:-}" "$HOME/.local/bin/hashd" "${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd" \
+        "${UV_TOOL_BIN_DIR:-$HOME/.local/bin}/hashd" "$(type -P hashd || true)"; do
+        [ -n "$launcher" ] || continue
+        case "$seen" in *$'\n'"$launcher"$'\n'*) continue ;; esac
+        seen+="$launcher"$'\n'
+        printf '%s\n' "$launcher"
+    done
+}
+
+hashd_install_preflight() {
+    local proposed="$1" replacement="$2" proposed_binary="$3" launcher
+    proposed="$(hashd_install_path "$proposed")" || {
+        echo 'Error: cannot resolve the proposed operations root; no installation changes made.' >&2
+        return 1
+    }
+    while IFS= read -r launcher; do
+        hashd_install_check "$launcher" "$proposed" "$replacement" "$proposed_binary" || return 1
+    done < <(hashd_install_launchers)
+}
+
+# Bind the selected root to the installed executable, not to a release version.
+# A receipt from a replaced launcher cannot authorize an unrelated installation.
+hashd_install_record() (
+    local launcher="$1" root="$2" target receipt staged
+    target="$(hashd_install_path "$launcher")" || return 1
+    root="$(hashd_install_path "$root")" || return 1
+    case "$target$root" in *$'\n'*) echo 'Error: installation paths must not contain newlines.' >&2; return 1 ;; esac
+    receipt="$(dirname "$launcher")/.hashd-install"
+    [ ! -d "$receipt" ] || { echo "Error: $receipt is a directory, not an installation receipt." >&2; return 1; }
+    staged="$(mktemp "${receipt}.XXXXXX")" || return 1
+    trap 'rm -f "$staged"' EXIT
+    printf 'hashd-install-v1\n%s\n%s\n' "$target" "$root" > "$staged" || return 1
+    mv -f "$staged" "$receipt"
+)
 
 REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
@@ -180,6 +346,7 @@ bootstrap_uv() {
 # managed environment. uv provides a Python 3.11+ interpreter itself, so this
 # works even when the host has no system Python.
 install_via_uv() {
+    HASHD_BIN="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}/hashd"
     step "Installing hashd via uv (Python 3.11+ managed by uv)"
     "$UV_BIN" tool install --force --python 3.11 \
         --with "$CLIENT_WHEEL" \
@@ -187,6 +354,9 @@ install_via_uv() {
         --with "$FIGMA_WHEEL" \
         --with "$GITHUB_CONNECTOR_WHEEL" \
         --with "$JIRA_WHEEL" \
+        --with "$CONFLUENCE_WHEEL" \
+        --with "$AZURE_WHEEL" \
+        --with "$CLICKUP_WHEEL" \
         --with "$TUI_WHEEL" \
         "$WHEEL"
     # uv tool installs land in ~/.local/bin by default; make sure it's wired up.
@@ -197,6 +367,7 @@ install_via_uv() {
 # install_via_pipx: the classic healthy-toolchain path. Unchanged behavior:
 # pipx owns the primary wheel, runpip injects the extras.
 install_via_pipx() {
+    HASHD_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
     step "Installing hashd via pipx"
     pipx install --force --pip-args "--find-links $WORK_DIR" "$WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$CLIENT_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
@@ -204,6 +375,9 @@ install_via_pipx() {
     pipx runpip hashd install --upgrade "$FIGMA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$GITHUB_CONNECTOR_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$JIRA_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$CONFLUENCE_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$AZURE_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
+    pipx runpip hashd install --upgrade "$CLICKUP_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx runpip hashd install --upgrade "$TUI_WHEEL" 2>&1 | grep -v "^$" | grep -v '[✨🌟⚠️]'
     pipx ensurepath 2>/dev/null || true
 }
@@ -408,6 +582,27 @@ warn_external_tools() {
     echo "      Fix: re-run this installer once the fetch succeeds."
 }
 
+# setup.sh and installer tests source definitions without running installation.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
+
+set -e
+REPLACE_INSTALL=0
+for arg in "$@"; do
+    case "$arg" in
+        --replace-install) REPLACE_INSTALL=1 ;;
+        -y|--yes) ;; # Already non-interactive; never authorizes replacement.
+        *) echo "Usage: install.sh [--replace-install]" >&2; exit 1 ;;
+    esac
+done
+
+# Refuse before dependency installation, downloads, migrations, or service changes.
+OPS_ROOT="${HASHD_OPS_ROOT:-$(hashd_install_default_root '' "$(hashd_install_path "$HOME/.hashd")")}"
+OPS_ROOT="$(hashd_install_path "$OPS_ROOT")"
+export HASHD_OPS_ROOT="$OPS_ROOT"
+hashd_install_preflight "$OPS_ROOT" "$REPLACE_INSTALL" 'packaged hashd (uv/pipx managed)'
+
 # --- Detect platform ---
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -554,6 +749,9 @@ BOT_WHEEL="hashd_bot_telegram-${VERSION}-py3-none-any.whl"
 FIGMA_WHEEL="hashd_connector_figma-${VERSION}-py3-none-any.whl"
 GITHUB_CONNECTOR_WHEEL="hashd_connector_github-${VERSION}-py3-none-any.whl"
 JIRA_WHEEL="hashd_connector_jira-${VERSION}-py3-none-any.whl"
+CONFLUENCE_WHEEL="hashd_connector_confluence-${VERSION}-py3-none-any.whl"
+AZURE_WHEEL="hashd_connector_azure_devops-${VERSION}-py3-none-any.whl"
+CLICKUP_WHEEL="hashd_connector_clickup-${VERSION}-py3-none-any.whl"
 TUI_WHEEL="hashd_tui-${VERSION}-py3-none-any.whl"
 CLIENT_WHEEL="hashd_client-${VERSION}-py3-none-any.whl"
 
@@ -573,7 +771,7 @@ else
     _curl_dl=(-sS)
 fi
 DL_BASE="https://github.com/$REPO/releases/download/$RELEASE_TAG"
-for _wheel in "$WHEEL" "$CLIENT_WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$TUI_WHEEL"; do
+for _wheel in "$WHEEL" "$CLIENT_WHEEL" "$BOT_WHEEL" "$FIGMA_WHEEL" "$GITHUB_CONNECTOR_WHEEL" "$JIRA_WHEEL" "$CONFLUENCE_WHEEL" "$AZURE_WHEEL" "$CLICKUP_WHEEL" "$TUI_WHEEL"; do
     printf '  %s\n' "$_wheel"
     if ! curl -fL --connect-timeout 20 --retry 3 --retry-delay 2 \
             "${_curl_dl[@]}" -o "$WORK_DIR/$_wheel" "$DL_BASE/$_wheel"; then
@@ -591,10 +789,13 @@ BOT_WHEEL="$WORK_DIR/$BOT_WHEEL"
 FIGMA_WHEEL="$WORK_DIR/$FIGMA_WHEEL"
 GITHUB_CONNECTOR_WHEEL="$WORK_DIR/$GITHUB_CONNECTOR_WHEEL"
 JIRA_WHEEL="$WORK_DIR/$JIRA_WHEEL"
+CONFLUENCE_WHEEL="$WORK_DIR/$CONFLUENCE_WHEEL"
+AZURE_WHEEL="$WORK_DIR/$AZURE_WHEEL"
+CLICKUP_WHEEL="$WORK_DIR/$CLICKUP_WHEEL"
 TUI_WHEEL="$WORK_DIR/$TUI_WHEEL"
 CLIENT_WHEEL="$WORK_DIR/$CLIENT_WHEEL"
 
-ok "Downloaded wheels" "CLI + server + client SDK + bot + figma/github/jira connectors + TUI"
+ok "Downloaded wheels" "CLI + server + client SDK + bot + figma/github/jira/confluence/azure/clickup connectors + TUI"
 
 # Forge CLIs (gh, glab, bkt, tea) are installed further down by
 # scripts/install-tools.sh, which owns every vendored tool and its pin.
@@ -610,33 +811,7 @@ else
 fi
 ok "hashd installed"
 
-OPS_ROOT="${HASHD_OPS_ROOT:-$HOME/.hashd}"
-
-# A source install keeps its ops root inside the checkout and puts a symlink
-# to it on PATH. Installing the wheel over that silently replaces the symlink
-# and switches the ops root, so every project vanishes from `hashd project
-# list` and the failure reads as total data loss -- which invites destructive
-# "recovery" on a tree where nothing was actually lost. Say where the projects
-# went before replacing anything.
-PRIOR_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
-if [ -L "$PRIOR_BIN" ]; then
-    PRIOR_TARGET="$(readlink -f "$PRIOR_BIN" 2>/dev/null || true)"
-    # bin/hashd inside a checkout -> the checkout root is that ops root.
-    PRIOR_OPS="$(dirname "$(dirname "$PRIOR_TARGET" 2>/dev/null)" 2>/dev/null || true)"
-    if [ -n "$PRIOR_OPS" ] && [ "$PRIOR_OPS" != "$OPS_ROOT" ] && [ -d "$PRIOR_OPS/projects" ]; then
-        PRIOR_PROJECTS="$(find "$PRIOR_OPS/projects" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
-        if [ "${PRIOR_PROJECTS:-0}" -gt 0 ]; then
-            warn "Replacing an existing install that uses a different ops root."
-            warn "  existing: $PRIOR_OPS  ($PRIOR_PROJECTS project(s))"
-            warn "  this install: $OPS_ROOT"
-            warn "Nothing is deleted, but those projects will not appear until you point at them:"
-            warn "  export HASHD_OPS_ROOT=$PRIOR_OPS"
-        fi
-    fi
-fi
-
 mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
-HASHD_BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
 if [ "$INSTALL_VIA" = "pipx" ]; then
     promote_pipx_binary hashd || true
     promote_pipx_binary wf || true
@@ -658,6 +833,7 @@ if [ ! -x "$HASHD_BIN" ]; then
         "Then re-run: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
 fi
 bin_dir="$(dirname "$HASHD_BIN")"
+hashd_install_record "$HASHD_BIN" "$OPS_ROOT"
 ln -sf hashd "$bin_dir/wf"
 ln -sf hashd "$bin_dir/ha"
 
@@ -669,29 +845,10 @@ ensure_dir_on_path "$bin_dir" "# hashd bin dir (managed by hashd install scripts
 install_completions
 
 # --- Install external tools (gitleaks, git-delta, ...) ---
-# Delegates to scripts/install-tools.sh from main -- the same script
-# `hashd` auto-invokes on source checkouts when a tool is missing. One
-# script, two entry points, no drift.
-#
-# Why main, not $RELEASE_TAG:
-#
-# 1. Backward-compat: pinning to $RELEASE_TAG 404s on any tag
-#    predating this script's introduction. install.sh itself is
-#    always fetched from main, so there's no "old installer on
-#    disk" to stay compatible with -- but fetching the tools script
-#    from an arbitrary old tag would break.
-#
-# 2. Forward-drift tradeoff (acknowledged, not yet a problem):
-#    install-tools.sh pins the tool versions itself, so a wheel
-#    user today always gets the script's current pins regardless of
-#    when they install.
-#    The latent risk: if we ever ship hashd code that depends on a
-#    specific tool version's output shape (say, gitleaks 9.x
-#    reshuffles the JSON fields hashd parses) and later bump the
-#    script's pin, old wheels in the wild start getting the new
-#    tool. Revisit this pin at that point: either switch to
-#    $RELEASE_TAG, or freeze per-tool versions per wheel release.
-TOOLS_SCRIPT_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install-tools.sh"
+# Use the selected release's installer and npm lock, not moving main. Browser
+# binaries remain install-time upstream downloads, never wheel payloads.
+TOOLS_BASE_URL="https://raw.githubusercontent.com/$REPO/$RELEASE_TAG"
+TOOLS_SCRIPT_URL="$TOOLS_BASE_URL/scripts/install-tools.sh"
 TOOLS_OS="$PLATFORM"
 if [ "$TOOLS_OS" = "macosx" ]; then
     TOOLS_OS="darwin"
@@ -701,16 +858,24 @@ case "$TOOLS_ARCH" in
     x86_64) TOOLS_ARCH="amd64" ;;
     aarch64) TOOLS_ARCH="arm64" ;;
 esac
-step "Installing external tools (gitleaks, git-delta, ripgrep, forge CLIs)"
+step "Installing external tools (gitleaks, git-delta, ripgrep, forge CLIs, browser)"
 # Wire the bundled-tools dir onto PATH before the install runs, so the freshly
 # dropped gitleaks/delta binaries resolve as bare commands everywhere (the
 # user's shell and any subprocess), not just via hashd's tools-dir-aware code.
 ensure_tools_dir_on_path
+mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/vendor/playwright"
 if curl --fail --silent --location \
     --retry 3 --retry-delay 2 \
     --connect-timeout 10 --max-time 60 \
-    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/install-tools.sh" 2>/dev/null; then
-    if ! HASHD_TOOLS_OS="$TOOLS_OS" HASHD_TOOLS_ARCH="$TOOLS_ARCH" bash "$WORK_DIR/install-tools.sh"; then
+    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/scripts/install-tools.sh" 2>/dev/null; then
+    for browser_lock in package.json package-lock.json; do
+        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+            "$TOOLS_BASE_URL/vendor/playwright/$browser_lock" \
+            -o "$WORK_DIR/vendor/playwright/$browser_lock"; then
+            warn_external_tools "could not download browser lock $browser_lock; browser installation will report unavailable"
+        fi
+    done
+    if ! HASHD_TOOLS_OS="$TOOLS_OS" HASHD_TOOLS_ARCH="$TOOLS_ARCH" bash "$WORK_DIR/scripts/install-tools.sh"; then
         warn_external_tools "installer script failed"
     fi
 else
@@ -789,10 +954,52 @@ step "Starting hashd services"
 # restart means the install-owned infrastructure did not converge -- that is a
 # genuinely broken install, so we stop here rather than print a misleading
 # success.
-"$HASHD_BIN" restart --yes >/dev/null 2>&1 || {
+#
+# Two explicit controls, and deliberately neither --yes nor --force:
+#   --in-place-upgrade  says this restart stands in for the installer's steps.
+#                       A packaged install never trips the manual-upgrade gate,
+#                       but this flag is also what tells a refusal that it
+#                       leaves an INCOMPLETE UPGRADE -- by this line the new
+#                       binaries are in place and migrate-dbs has run -- so the
+#                       refusal names the command that finishes it.
+#   --reclaim-port      authorizes killing an unrecognized process that still
+#                       holds the hashd-server port as the server starts. The
+#                       installer runs headless, where the start path refuses
+#                       rather than kills without it.
+# Without --force the restart puts a restart hold in force and WAITS, with no
+# limit of its own, until running work reaches a stopping point: an unattended
+# install interrupts nothing. The wait prints progress the whole time, so the
+# output is streamed rather than captured -- a captured wait would look like a
+# frozen install for as long as a merge or an agent stage takes.
+#
+# The first attempt's output is also kept, because two different failures come
+# out of this line and only one of them is worth a retry:
+#   - a refusal: the restart hold could not be put in force
+#     (restart.hold_unavailable), or --force was asked for without a terminal
+#     (restart.force_headless). Not a convergence failure; re-running the
+#     identical command refuses again. Print nothing more (the refusal is
+#     already on screen and names the command that finishes this install) and
+#     stop. Detected on the Diagnostic's source tag rather than its prose.
+#   - anything else. Retry once with output, exactly as before.
+#
+# A long wait is neither: the command has not exited, so there is nothing to
+# retry. Both attempts read stdin from /dev/null so the restart is headless on
+# either invocation style.
+restart_log="$(mktemp)"
+set +e
+"$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null 2>&1 | tee "$restart_log"
+restart_status=${PIPESTATUS[0]}
+set -e
+if [ "$restart_status" -ne 0 ]; then
+    if grep -q 'restart\.hold_unavailable\|restart\.force_headless' "$restart_log"; then
+        rm -f "$restart_log"
+        exit 1
+    fi
     printf '%s   first restart did not converge; retrying with output...%s\n' "$C_DIM" "$C_RESET"
-    "$HASHD_BIN" restart --yes
-}
+    rm -f "$restart_log"
+    "$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null
+fi
+rm -f "$restart_log"
 ok "Services started"
 
 printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C_RESET"
@@ -849,6 +1056,7 @@ fi
 echo ""
 
 # --- One inviting next action ---
-printf '%sNext:%s register your first repo\n' "$C_BOLD" "$C_RESET"
-printf '  %s->%s hashd project add /path/to/your/repo\n' "$C_BLUE" "$C_RESET"
+printf '%sReady to work?%s Run hashd for your next step, or hashd watch for the TUI.\n' "$C_BOLD" "$C_RESET"
+printf '  Add a project: hashd project add /path/to/your/repo\n'
+printf '  Joining a team? https://github.com/codr1/hashd-code/blob/main/docs/REMOTE.md\n'
 echo ""

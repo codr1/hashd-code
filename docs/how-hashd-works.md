@@ -119,7 +119,7 @@ the bus is ephemeral; SQLite is the durable source of truth. If the bus is down,
 is still in SQLite. If SQLite somehow failed, the bus already delivered. Publishing is
 non-blocking and fire-and-forget — a slow or absent subscriber never stalls a state
 transition. The TUI is event-driven (no polling fallback): if the bus is down it
-shows an error state rather than masking the failure with degraded polling.
+shows an error state rather than masking the failure with degraded polling. Operator-approved exception: dashboard reporting panels may pull on a 30-second timer while shown. Lifecycle, story and workstream state stays SSE-only, with no polling fallback.
 
 Two choke points cover all state changes: the FSM `transition()` functions, and
 the `notify_*()` user-facing notifications. Both route through a single `emit()`
@@ -178,5 +178,5 @@ trustworthy enough to ship.
 - [watch.md](watch.md) — the watch TUI: the three views and the keys that move between them.
 - [provenance.md](provenance.md) — the audit/lineage story in depth.
 - [glossary.md](glossary.md) — every term defined.
-- **[WF.md](../WF.md)** — the canonical state machines, transitions, and command reference.
+- **[WF.md](../WF.md)** — the canonical state machines, transitions, guards and recovery; [command reference](walkthrough.md#command-reference) for interface usage.
 - **PRD.md** — the full living product specification.

@@ -215,11 +215,16 @@ with a password than carry a token, use the setup-key path instead:
 
   ```bash
   hashd server unset          # drop the stale pin; run on the server host
-  hashd restart --yes         # ensure the server is up on its current cert
+  hashd restart               # ensure the server is up on its current cert
   hashd auth create           # now reachable: mints a token carrying the CURRENT pin
   hashd server set https://<host>:1337 --token <that token>
-  hashd restart --yes
+  hashd restart
   ```
+
+  Neither restart passes `--force`: this recovery does not need to interrupt
+  anything, so the restart waits for running work to reach a stopping point
+  rather than killing it. `--yes` would not change that -- it answers prompts
+  and never interrupts. See the note on stopping the stack below.
 
   `hashd admin user add <email>` is the other way out, and the better one when
   the client cannot reach the server at all: it is host-local, writes directly to
@@ -230,6 +235,21 @@ with a password than carry a token, use the setup-key path instead:
   and that the LAN address and port are open.
 - **Which certificate is the server serving?** On the host:
   `openssl x509 -in <ops-dir>/tls/server.crt -noout -fingerprint -sha256`.
+- **Stopping the stack on the host.** `hashd restart`, `hashd restart server`
+  and `hashd stop` are always local -- there is no remote-shutdown path -- and
+  stopping the server stops every activity its Temporal worker is running, for
+  every project on that host. All three put a restart hold in force and wait,
+  with no limit, until every workflow is at a stopping point; Ctrl-C cancels
+  and stops nothing. A restart on a client box paired to a remote server holds
+  nothing. Holding requires a solo-mode caller or a team owner/admin.
+  - `--force` interrupts instead of waiting (asks first; `--force --yes` does
+    not ask, and is required without a terminal). `--yes` alone never forces.
+  - The two behaviours `--yes` used to carry have their own flags now, and
+    neither is on `hashd stop`. `--reclaim-port` authorizes killing an
+    unrecognized process holding the hashd-server port as the server starts, on
+    `hashd restart` and `hashd restart server`. `--in-place-upgrade` says a
+    source-checkout restart after a version change is a deliberate upgrade, on
+    `hashd restart` only. The installers pass those two and not `--yes`.
 
 ## Solo shared-repo mode
 
@@ -243,3 +263,167 @@ This works, but it is **not recommended** for real collaboration: there is no
 shared workstream registry, no cross-user gate, and no single source of truth for
 in-flight state. Prefer a server (above) when more than one person is driving
 work on the same project.
+
+## Server Security Model
+
+hashd-server runs in one of two **deployment modes**. In **solo** mode (the
+default) it is single-user: transparent for same-machine workflows, fails closed
+when exposed to a network. In **team** mode every REST request must carry a
+bearer token -- even on loopback -- because the token is how the client says
+which user is calling.
+
+Mode is a durable setting: `hashd config set deployment_mode team` (or `solo`),
+then restart the server. It is read once at startup from the `deployment_mode`
+system-config key; unset/unknown resolves to solo, so existing installs are never
+silently changed. How the mode is *chosen* lives behind one resolver, so a
+license key or a separate build could set it later without touching enforcement.
+
+```mermaid
+flowchart TD
+    C[Client request] --> BS{Self-authenticating<br/>bootstrap endpoint?<br/>POST /setup, /auth/login}
+    BS -->|yes| A[Allow: request carries its own credential]
+    BS -->|no| M{Deployment mode?}
+    M -->|solo| P{TCP peer is loopback?}
+    P -->|yes| A2[Allow without token]
+    P -->|no| T{TLS active + bearer valid?}
+    T -->|yes| A3[Allow]
+    T -->|no| R[401 / refuse]
+    M -->|team| B{Bearer token valid?}
+    B -->|yes| A4[Allow, identity = token owner]
+    B -->|no| R
+```
+
+Rules:
+
+- **Solo mode (default):** loopback clients are exempt from auth. Local `hashd`
+  (`wf` alias) and SSH/WireGuard tunnel users keep the transparent experience
+  because hashd-server stays bound to `127.0.0.1:1337`.
+- **Team mode:** there is no loopback exemption -- every request needs a valid
+  bearer token. A user-scoped token (minted by `hashd login`) resolves to its
+  owning user (`auth_tokens.user_id`) as the request's identity; an unowned
+  host-minted `auth create` token still authenticates the request but attaches no
+  user identity. Host-local admin provisioning still runs in-process (no REST),
+  and the bootstrap endpoints below stay reachable, so the first admin can always
+  get a token without already having one.
+- **Identity is required to start.** hashd-server fails closed when no user is
+  configured -- rather than inventing an identity it exits with a Diagnostic
+  pointing at `hashd admin user add`. The installer (`setup.sh` / the curl
+  installer) creates the owner from your git identity before starting the server,
+  so a normal install or upgrade never hits this. The first user created on a
+  fresh server is the **owner** (active, keyless, role `owner`): in solo mode the
+  default identity every action is attributed to, in team mode the bootstrap admin
+  who sets a password to log in. `hashd status` shows the resolved identity, mode,
+  and health.
+- **Attribution.** Core work items (`workstreams`, `stories`, `suggestions`) carry
+  a `user_id`. The id refers to the ops-dir `users` table -- a cross-database,
+  app-enforced reference (no FK; `users` is empty in project DBs). On every start
+  the server attributes any unowned work item to the owner (`WHERE user_id IS
+  NULL`, idempotent), so existing rows and rows created since the last start both
+  land on the owner. Filing a story stamps the acting user. Accepting a story
+  also assigns responsibility to the acting user, within existing authorization.
+  Explicit story assignment changes responsibility only: execution/content locks
+  and linked-workstream ownership remain separate. Assignment emits `story_changed`
+  after its database transaction commits so connected views refresh.
+- **Owner-guard (team mode only).** In team mode, only a work item's owner may
+  mutate it: every state-changing story/workstream endpoint (run, merge, close,
+  reset, approve, transitions, AC edits, feedback, answer, ...) checks the acting
+  user against the item's `user_id` and returns a 403 naming the owner when they
+  differ. An **unassigned** item is open -- anyone may act, which is how an
+  unclaimed item gets picked up -- and `assign`/`unassign` are deliberately
+  ungated so ownership stays open-grab (any reassignment is allowed and logged).
+  Two other classes are exempt by design: internal callers (startup resume,
+  plan-split dispatch), which carry no operator identity, and automated
+  agent-telemetry writes (code-tool-call recording, PR review-finding
+  reconciliation), which are machine writes rather than operator actions.
+  **Solo mode never enforces this**, so the single-user experience is unchanged.
+  `hashd list` and `hashd show` display the owner handle (`@name`) in team mode;
+  in solo mode the owner column stays blank. `hashd list --mine` lists only your
+  own stories and workstreams through the `owner=mine` read below.
+  `GET /dashboard?owner=mine` narrows the dashboard to the caller's own work: in
+  team mode it returns only the stories and workstreams whose owner is the
+  signed-in user (unassigned and other users' items are left out), and a request
+  that carries no user identity, such as an unowned `auth create` token, is
+  refused with a 403 pointing at `hashd login <email>`. `mine` is the only
+  accepted value; any other value is rejected, and omitting `owner` returns the
+  full view. In solo mode `owner=mine` returns everything.
+- **Central-configuration guard (team mode only).** System-scope config is
+  cross-project by definition -- `stage_agents` repoints the agent every project
+  runs, a connector leaf holds the credential path every project reads, and
+  `deployment_mode` is the auth switch itself -- so in team mode only **owner**
+  and **admin** users may write it. `PUT /config`, `POST /config/reset` and
+  `PUT /config/stages-use` refuse everyone else with a 403 carrying
+  `system.config.forbidden`, including a request with no user identity such as
+  an unowned `auth create` token. This is the same administrator test the
+  restart-hold surface applies. **Solo mode never enforces this**: one implicit
+  user, no login ceremony, so `hashd config set` keeps working untouched on a
+  single-user box. Project-scope writes (`hashd project config`) are unaffected
+  in both modes, and a locked-out team server is always recoverable host-locally
+  -- `hashd admin user add <email> --admin` writes the server database directly,
+  and `<ops>/config.yaml` is an editable file on the host.
+- Off-loopback clients require both TLS and a bearer token. On `0.0.0.0`,
+  `:1337`, a public IP, or any other non-loopback bind, hashd-server serves
+  TLS automatically. If `--tls-cert-file` and `--tls-key-file` are not set, it
+  creates a persistent self-signed cert at `<ops>/tls/server.crt` and key at
+  `<ops>/tls/server.key`.
+- Bearer tokens are multi-token personal access tokens. Create them from the
+  server host with `hashd auth create --description <name>`, list metadata with
+  `hashd auth list`, and revoke one with `hashd auth delete <id>`. The plaintext token
+  is shown only once; the database stores only its SHA-256 hash.
+- A small allowlist of **bootstrap endpoints** is exempt from the bearer-token
+  requirement even off-loopback, because they are how a client obtains a
+  credential in the first place and each carries its own credential in the
+  request: `POST /setup` (redeem a one-time setup key to set a password) and
+  `POST /auth/login` (exchange HTTP Basic `email:password` for a token). The
+  handlers enforce that credential themselves; the middleware only skips the
+  bearer check for them.
+- Login tokens are **user-scoped**: `POST /auth/login` stamps `auth_tokens.user_id`
+  with the authenticated user, so a login-minted token is attributable to a
+  person. `hashd auth create` tokens stay unowned (host-local admin tokens).
+  `hashd login <email>` reads the password without echoing it, exchanges it for a
+  token, and stores that token in the client config like a paired `auth create`
+  token. A failed login costs the same bcrypt work whether or not the email
+  exists, so it does not leak which emails are registered.
+- When the generated self-signed cert is active, new tokens include the served
+  certificate fingerprint: `hashd_<fingerprint>.<secret>`. Clients pin that
+  fingerprint instead of needing a CA file. With a BYO/CA certificate, tokens
+  stay `hashd_<secret>`.
+- Regenerating `<ops>/tls/server.crt` changes the fingerprint. Re-issue tokens
+  after replacing or deleting the generated cert so remote clients can re-pair.
+- Auth decisions use the raw TCP peer address. `X-Forwarded-For` and other proxy
+  headers do not grant loopback exemption.
+
+Direct internet exposure can use hashd-server's generated TLS listener.
+hashd-server refuses to start until migration M022 has converted prompt
+overrides to Gonja, so run `hashd start` or `hashd restart` once after
+upgrading. Its marker is per user (`~/.hashd/migrations`), not per ops
+directory, so it does not prove every ops root was inspected.
+
+```bash
+hashd-server --ops-dir ~/.hashd --listen 0.0.0.0:1337
+hashd auth create --description laptop
+```
+
+Or provide your own certificate:
+
+```bash
+hashd-server --ops-dir ~/.hashd \
+  --listen 0.0.0.0:1337 \
+  --tls-cert-file /etc/letsencrypt/live/hashd.example.com/fullchain.pem \
+  --tls-key-file /etc/letsencrypt/live/hashd.example.com/privkey.pem
+```
+
+In solo mode, tunnel access can keep the server loopback-bound and skip tokens.
+Team mode still requires authentication on loopback:
+
+```bash
+hashd-server --ops-dir ~/.hashd --listen 127.0.0.1:1337
+ssh -L 1337:127.0.0.1:1337 user@server
+```
+
+Do not terminate TLS at a reverse proxy that connects to hashd-server over
+loopback in solo mode and expect hashd-server auth to protect the backend.
+From hashd's point of view that connection is loopback, so solo mode's
+loopback exemption applies. Prefer
+hashd-terminated TLS for direct binds, or an SSH/WireGuard tunnel.
+
+---

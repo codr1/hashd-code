@@ -4,6 +4,40 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.26 - 2026-10-12
+
+v0.9.26 is two months of dev since v0.9.25: 182 stories and bugs, 462 pull requests. The headline is Arcs, a story that becomes a planned set of child stories through a reviewable proposal instead of a one-shot conversion. Under it, the engine learned to say what it is doing and why it stopped, the merge gate stopped re-testing trees it has already passed, and the test stage now runs the repository's own pre-commit hook before anything else.
+
+### What's Changed
+
+- **Arcs, the whole flow.** A story that is too big gets an Arc proposal: the planner drafts the child stories, asks factual questions and resumes from the answers, and the proposal waits for review in a dedicated TUI and Web workspace with revise, refresh, cancel, retry, version history and a server-computed comparison between versions. Approval is one typed, version-bound decision that converts the story and creates the children; the old make-arc conversion and its yes/no breakdown review are gone. Children render as a Planner-style tree; Arc labels on every surface come from served facts.
+
+- **Stories have an immutable number.** A story's identity is a project-scoped number allocated durably; its type prefix is a label. Completed stories unblock their dependents through every finalization path, and a story can be assigned to a teammate from Story Detail in the TUI and Web.
+
+- **Cancel what is still being planned.** `hashd cancel` now stops a story that is drafting or editing, discards the in-flight planner output and restores the prior state, with the Web asking first. Workstreams pause and unpause under one name in the TUI, Web and CLI, and a paused workstream reads paused everywhere.
+
+- **The test stage runs the repository's pre-commit hook first.** Lint, formatters, secret scans and whatever else the hook enforces are discovered before the tests and the review, not at commit time; a refusal is a test failure with the hook's output as evidence. Recognized lint refusals at commit get one bounded automatic repair.
+
+- **A tree that passed is not tested again.** A project-wide test verdict store replaces the per-workstream gate receipt: the merge gate, post-rebase verification, the per-commit test stage, the committed-breakage probe and the base comparison reuse a recorded pass for the same tree, command and tool, and every reuse is on the timeline. The gate certifies the head it ships: normalisation happens before verification, never a commit after.
+
+- **Stage roles and per-stage models.** Planner, coder, reviewer and reviewer-adjudicator are roles in system and project config, with per-stage model and effort overrides rendered into the effective agent. A `*_resume` stage always runs its base stage's agent.
+
+- **Every stop says why, durably.** Deadline kills name what died, which bound fired and how it derives; merge stops and merge-gate parks say what failed, never that an allowance was spent; standing faults render in full on TUI, Web and Telegram; action refusals render the full server Diagnostic; messages that name a workstream lead with its story or bug id. Both reviewers emit every finding, each tagged with what it is against and its class, and each verdict is recorded against the diff it graded.
+
+- **Transport failures retry instead of parking.** PR create, PR push and the post-merge dev publish retry a transport-kind push failure on the cached verdict. Runs have honest boundaries: one run_started and exactly one closing outcome, including executions terminated from outside.
+
+- **One notification system.** Server-side attention selection with project history, consistent toast lifetimes and dismissal in the TUI and Web, desktop toasts classified in one place, and an attention filter with cursor paging on the event list.
+
+- **Reports.** Shared report contracts, usage calculations shared with `/cost`, a tokens-over-time series served by hashd-server, captured call usage and cost in relational tables with one authoritative per-call USD, numeric epoch timestamps written by production writers and queried through indexes, and lines-changed recorded at each micro-commit and at merge.
+
+- **Web.** Dashboard with charts first, one sectioned story list and Activity as a drawer; a divided-list component so density is set once; the workstream page shows story and micro-commit LOC; connector links on Story Detail; connector issues import into Suggestions from the Plan page; a filter to my own stories and workstreams; typography on mono roles with the setting-only tests culled.
+
+- **TUI.** Compact Braille graphs on the dashboard, scrollable lists and detail boxes, Forge review at the top of the Review panel, a live timeline that stays current, chat with a real working line and interrupt, LOC on Workstream Detail, and server text rendered as markup without corruption.
+
+- **Operations.** `hashd stop` and `restart` check what they would kill, honor the server's graceful shutdown and confirm process exit; hashd-web drains open streams and exits cleanly on SIGTERM; `hashd doctor` keeps hashd-web's build in step with hashd-server's; the server build produces both binaries; new workstreams provision from a freshly fetched default branch; `hashd approve --force` accepts pending requirements as written; a momentarily missing agent binary is retried; GitLab forge reads work with the pinned glab.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.25...v0.9.26
+
 ## v0.9.25 - 2026-08-12
 
 v0.9.25 makes the PR loop tell the truth about heads. Gatekeeper PR mode deliberately made publishing a keystroke -- but the surfaces never learned about the state that gate created, so finished fixes sat invisibly unpushed while the forge reviewed stale code and the reject box re-fed findings that were already addressed. One comparison -- the worktree's HEAD against the PR head hashd last pushed -- now feeds every surface in the loop. Alongside it, planners can no longer promise commit topology the pipeline itself breaks.
