@@ -4,6 +4,40 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.27 - 2026-10-14
+
+v0.9.27 is two days of dev since v0.9.26, cut to carry the fixes the v0.9.26 release gate itself surfaced and the gate-speed work that followed. Nothing changes in the product's shape; what changes is that upgrades from older releases restart correctly, external tools can open a hashd database again, reviews stay inside their reviewer's limits, and a landing spends minutes rather than tens of minutes in gates.
+
+### What's Changed
+
+- **Upgrading from a pre-hold server restarts instead of refusing.** `hashd restart`, `restart server` and `stop` read the running server's version first. A server older than the restart hold (v0.9.25 and earlier) is stopped the pre-hold way, with one printed line saying so; a modern server keeps the hold-and-wait protocol, and a refusal from it is rendered whole. The in-place upgrade from v0.9.25 is proven by the release upgrade gate.
+
+- **System sqlite3 can open a hashd database again.** Six triggers used expression messages in `RAISE()`, which only SQLite 3.47 and later parse; Debian stable's and Ubuntu's sqlite3 reported the whole database as malformed. The messages are literals now (schema 95), and a guard refuses any future expression message.
+
+- **A merged workstream whose archive failed stays visible.** It reads as failed on every surface, its story says so, `hashd merge` re-runs the checkpointed archive, and the janitor retries a retryable archive failure (including transport timeouts) once. Hook output is kept whole.
+
+- **New databases load the authored schema.** A blank database is created from `schema.sql` at the release's schema version instead of replaying every migration, and upgrades are supported from the previous release onward; an older database is refused read-only with the release to step through first.
+
+- **Reviews know the operator's rulings.** A dismissed finding is recorded with its reason (`hashd workstream acknowledge`, `hashd reject --dismiss`) and reaches every later per-commit, final and repair review round; a reviewer may re-raise it only with new evidence, tagged with the ruling's id. Rulings are shown beside the current review in `hashd show`, the TUI and the Web.
+
+- **Delta final reviews stay inside the reviewer's input limit.** A delta round that would exceed the agent's limit lists the touched files instead of embedding them, and the record says which mode ran; a prompt still over the limit fails with a Diagnostic naming its largest sections instead of a bare agent error.
+
+- **A clean rebase verifies with build plus the fast check.** At the landing, PR, auto-rebase and resolve sites, a conflict-free rebase runs the project build and the fast check over the branch's touched files when the full suite is already proven on the pre-rebase tree; a fast failure runs the full command, whose verdict is what is recorded and recovered. Every surface says which check ran.
+
+- **Commit repair recognises any golangci-lint refusal.** A pre-commit refusal that is a complete golangci-lint report takes the automatic repair whatever linter it names, not only the three that were listed.
+
+- **An adjudicated flake re-runs the merge gate once.** When the adjudicator rules a merge-gate failure a flake and there is nothing to fix, the gate re-runs itself once before parking, without spending the story's automatic FIX allowance, and a park record is complete.
+
+- **Temporal e2e failures carry their evidence.** A cancellation, Arc, runner or housekeeping journey that exceeds its deadline dumps the workflow histories, task-queue state and sidecar metrics into the gate log before teardown. Temporary diagnostic instrumentation, tracked for removal in DAS_PLAN.
+
+- **Gates.** Test-runtime scratch runs on tmpfs (the full gate drops from about 340 s to about 140 s on the dogfood box), gate receipts record wall and CPU per package, a clean full gate records its verdict so the same tree is not re-tested on push, builds stamp one version across all three binaries, the Go build cache is bounded, and the per-commit fast check selects direct importers only and runs Python suites only when Python changed.
+
+- **Specification.** SPEC.md is rewritten as the present-tense specification of the product with a domain-model section derived from the authored state machines, and the post-merge documentation step edits a feature's section in place instead of appending.
+
+- **Release workflow.** The macOS wheel job sources its tooling from a file (bash 3.2), and the manifest counts platform and pure wheels by name.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.26...v0.9.27
+
 ## v0.9.26 - 2026-10-12
 
 v0.9.26 is two months of dev since v0.9.25: 182 stories and bugs, 462 pull requests. The headline is Arcs, a story that becomes a planned set of child stories through a reviewable proposal instead of a one-shot conversion. Under it, the engine learned to say what it is doing and why it stopped, the merge gate stopped re-testing trees it has already passed, and the test stage now runs the repository's own pre-commit hook before anything else.
