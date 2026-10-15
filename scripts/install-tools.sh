@@ -1004,23 +1004,237 @@ const timer = setTimeout(() => { console.error('Browser installation smoke timed
 BROWSER_SMOKE
 )
 
+# browser_package_manager: the host's package manager, empty when none is
+# recognized. Twin of git_install_hint in dist/install.sh, with the same probe
+# order: install-tools.sh is fetched standalone and cannot source install.sh,
+# so this is a second copy. TestInstallToolsSHBrowserPackageManagerMatchesGitInstallHint
+# keeps the two in step.
+browser_package_manager() {
+    local manager
+    [ "$OS" = linux ] || return 0
+    for manager in apt-get dnf pacman zypper apk; do
+        if command -v "$manager" >/dev/null 2>&1; then
+            echo "$manager"
+            return 0
+        fi
+    done
+}
+
+# browser_apt_table <root> prints, one per line, every package the pinned
+# Playwright's install-deps installs for the headless shell on this host. The
+# table is Playwright's own and has no listing command; install-deps runs
+# "apt-get update && apt-get install ... <packages>" through sudo, su or, as
+# root, sh. Shims for sudo, su and apt-get first on PATH record the packages:
+# nothing runs as root and nothing is installed.
+browser_apt_table() {
+    local shim="$1/apt-table"
+    mkdir -p "$shim" || return 1
+    cat >"$shim/sudo" <<'APT_TABLE_SUDO'
+#!/bin/sh
+[ "$1" != -- ] || shift
+exec "$@"
+APT_TABLE_SUDO
+    cat >"$shim/su" <<'APT_TABLE_SU'
+#!/bin/sh
+# su root -c <command>
+exec sh -c "$3"
+APT_TABLE_SU
+    cat >"$shim/apt-get" <<'APT_TABLE_APT'
+#!/bin/sh
+[ "$1" = install ] || exit 0
+shift
+for arg; do
+    case "$arg" in -*) ;; *) printf '%s\n' "$arg" ;; esac
+done >"$BROWSER_APT_TABLE"
+APT_TABLE_APT
+    chmod +x "$shim/sudo" "$shim/su" "$shim/apt-get" || return 1
+    PATH="$shim:$PATH" BROWSER_APT_TABLE="$shim/packages" NO_UPDATE_NOTIFIER=1 \
+        "$1/node/bin/node" "$1/node_modules/playwright/cli.js" install-deps chromium-headless-shell \
+        </dev/null >/dev/null 2>&1 || return 1
+    cat "$shim/packages"
+}
+
+# Fails, without launching the browser, when the downloaded headless shell
+# links against shared libraries this host lacks. Names the libraries and, on a
+# recognized package manager, the one command that recovers them.
+# On apt the names come from the pinned Playwright's own table, checked by
+# apt-get's simulation: Ubuntu 24.04 renamed several libraries with a t64
+# suffix, and a plain list fails there. A simulation that lists no packages
+# failed (lists cleared, as on slim images, or stale; a package with no
+# installation candidate; unmet dependencies), and its error does not name the
+# whole set; the command then refreshes the lists and installs the whole
+# table, which apt skips where already installed. dnf, zypper and apk install by soname; pacman finds
+# each library's package in its file database, synced first. A check that
+# cannot run fails too, so the smoke never stands in for it.
+check_browser_libraries() {
+    local root="$1" binary report reports="" missing lib manager out packages="" command="" refresh=""
+    if ! command -v ldd >/dev/null 2>&1; then
+        browser_failure="the browser's shared libraries could not be checked: ldd is not installed"
+        echo "Cannot check the browser's shared libraries: ldd is not installed." >&2
+        echo "It ships with the system C library tools; install them with your system package manager, then re-run the installer." >&2
+        return 1
+    fi
+    for binary in "$root"/browsers/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell; do
+        [ -f "$binary" ] || continue
+        # ldd exits 0 when it lists missing libraries and non-zero only when it
+        # cannot inspect the file.
+        if ! report="$(ldd "$binary" 2>&1)"; then
+            browser_failure="the browser's shared libraries could not be checked: ldd could not inspect $binary"
+            echo "Cannot check the browser's shared libraries: ldd could not inspect $binary:" >&2
+            printf '%s\n' "$report" >&2
+            return 1
+        fi
+        reports="$reports$report"$'\n'
+    done
+    if [ -z "$reports" ]; then
+        browser_failure="the browser's shared libraries could not be checked: the download has no headless shell under $root/browsers"
+        echo "Cannot check the browser's shared libraries: the download has no headless shell under $root/browsers." >&2
+        return 1
+    fi
+    missing="$(printf '%s' "$reports" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }' | sort -u)"
+    [ -n "$missing" ] || return 0
+    manager="$(browser_package_manager)"
+    case "$manager" in
+        apt-get)
+            # Exits 1 when it reports missing packages and when the
+            # simulation fails; both reports go to stdout. LC_ALL=C keeps
+            # apt's output unlocalized.
+            out="$(LC_ALL=C NO_UPDATE_NOTIFIER=1 "$root/node/bin/node" "$root/node_modules/playwright/cli.js" \
+                install-deps --dry-run chromium-headless-shell 2>/dev/null |
+                awk '/^Missing system dependencies/ { listed = 1; next } listed && /^  / { print $1 }')" || true
+            if [ -z "$out" ]; then
+                refresh="sudo apt-get update && "
+                out="$(browser_apt_table "$root")" || out=""
+            fi
+            for lib in $out; do
+                [[ "$lib" =~ ^[a-z0-9][a-z0-9+.-]+$ ]] || { packages=""; break; }
+                packages="$packages $lib"
+            done
+            ;;
+        dnf|zypper|apk|pacman)
+            for lib in $missing; do
+                [[ "$lib" =~ ^[A-Za-z0-9_+-][A-Za-z0-9_+.-]*\.so(\.[0-9]+)*$ ]] || { packages=""; break; }
+                case "$manager" in
+                    apk) packages="$packages so:$lib" ;;
+                    pacman) packages="$packages usr/lib/$lib" ;;
+                    *) packages="$packages '$lib()(64bit)'" ;;
+                esac
+            done
+            ;;
+    esac
+    if [ -n "$packages" ]; then
+        case "$manager" in
+            apk) command="sudo apk add$packages" ;;
+            pacman) command="sudo pacman -Fy && sudo pacman -S --needed \$(pacman -Fq$packages)" ;;
+            *) command="${refresh}sudo $manager install -y$packages" ;;
+        esac
+    fi
+    browser_failure="the browser cannot start: this host is missing these shared libraries: $(printf '%s\n' "$missing" | paste -sd ' ' -)"
+    browser_failure_command="$command"
+    echo "The browser cannot start: this host is missing these shared libraries:" >&2
+    printf '  %s\n' $missing >&2
+    if [ -n "$command" ]; then
+        echo "Install them, then re-run the installer:" >&2
+        echo "  $command" >&2
+    else
+        echo "Install them with your system package manager, then re-run the installer." >&2
+    fi
+    return 1
+}
+
+# The outcome of the last browser install attempt, read by `hashd doctor` (config.ReadBrowserInstallStatus). One key=value
+# per line: outcome (succeeded or failed) and, for a failure, the reason naming
+# the step that failed and, where check_browser_libraries named one, the
+# command that recovers the missing libraries. The name must not
+# match .playwright.* or .playwright-link.*, the staging files a failed install
+# may not leave behind.
+BROWSER_INSTALL_STATUS=".browser-install-status"
+
+# write_browser_install_status <outcome> [reason] [command] replaces the record
+# in one rename, so a reader sees the previous record or this one, never half.
+# Each writer stages its own file: installers may run concurrently, and a
+# shared staging name would let one truncate or rename another's record. The
+# last attempt to finish owns the record, so an installer that must report its
+# own attempt names a private file in HASHD_BROWSER_INSTALL_RESULT, which gets
+# a copy of this attempt's record (dist/install.sh does).
+write_browser_install_status() {
+    local file="$TOOLS_DIR/$BROWSER_INSTALL_STATUS" reason="${2:-}" command="${3:-}" nl=$'\n' staged
+    if ! staged="$(mktemp "$file.XXXXXX")"; then
+        echo "Could not record the browser install outcome in $file" >&2
+        return 1
+    fi
+    if ! {
+        printf 'outcome=%s\n' "$1"
+        # One line per value: a newline would start a new key.
+        [ -z "$reason" ] || printf 'reason=%s\n' "${reason//$nl/ }"
+        [ -z "$command" ] || printf 'command=%s\n' "${command//$nl/ }"
+    } >"$staged" || ! chmod 644 "$staged" ||
+        ! { [ -z "${HASHD_BROWSER_INSTALL_RESULT:-}" ] || cp "$staged" "$HASHD_BROWSER_INSTALL_RESULT"; } ||
+        ! mv -f "$staged" "$file"; then
+        rm -f "$staged"
+        echo "Could not record the browser install outcome in $file" >&2
+        return 1
+    fi
+}
+
+# read_browser_install_status <key> [file] prints the value of key recorded in
+# file (default: the shared record), nothing when the file or the key is absent.
+read_browser_install_status() {
+    local line file="${2-$TOOLS_DIR/$BROWSER_INSTALL_STATUS}"
+    [ -f "$file" ] || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            "$1="*) printf '%s\n' "${line#"$1="}"; return 0 ;;
+        esac
+    done <"$file"
+}
+
+# install_playwright's EXIT trap. Removes the staging files, then records the
+# attempt's outcome. set +e: a cleanup failure must not replace the install's
+# exit status.
+finish_playwright_install() {
+    local status="$1"
+    set +e
+    [ -z "$tmp" ] || rm -rf "$tmp"
+    [ -z "$link" ] || rm -f "$link"
+    if [ "$status" -eq 0 ]; then
+        write_browser_install_status succeeded
+    else
+        write_browser_install_status failed "$browser_failure" "$browser_failure_command"
+    fi
+}
+
 install_playwright() (
     # Subshell owns temporary files/traps; a failed upgrade leaves the old
     # executable and its browser untouched. Old runtimes may still own sessions.
     set -e
-    local platform expected_sha script_dir lock_dir tmp runtime identity installed link
+    local platform expected_sha script_dir lock_dir runtime identity installed
+    # The EXIT trap reads tmp, link and the browser_failure pair, so they are
+    # not local: when the caller redirects this call
+    # (install_playwright 2>file), errexit from a builtin or function unwinds
+    # locals before the trap runs. The subshell keeps them from reaching the
+    # caller. browser_failure names the step running now, so whichever step
+    # fails, the recorded reason is that step's.
+    tmp= link= browser_failure_command=
+    browser_failure="could not create a browser staging directory in $TOOLS_DIR"
+    trap 'finish_playwright_install $?' EXIT
     case "$OS/$RAW_ARCH" in
         linux/x86_64|linux/amd64) platform=linux-x64; expected_sha="$BROWSER_NODE_SHA_LINUX_X64" ;;
         linux/aarch64|linux/arm64) platform=linux-arm64; expected_sha="$BROWSER_NODE_SHA_LINUX_ARM64" ;;
         darwin/aarch64|darwin/arm64) platform=darwin-arm64; expected_sha="$BROWSER_NODE_SHA_DARWIN_ARM64" ;;
-        *) echo "Unsupported browser platform: $OS/$RAW_ARCH" >&2; exit 1 ;;
+        *)
+            browser_failure="unsupported browser platform: $OS/$RAW_ARCH"
+            echo "Unsupported browser platform: $OS/$RAW_ARCH" >&2
+            exit 1
+            ;;
     esac
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     lock_dir="${1:-$script_dir/../vendor/playwright}"
     tmp="$(mktemp -d "$TOOLS_DIR/.playwright.XXXXXX")"
     link="$tmp/link"
-    trap 'rm -rf "$tmp"; rm -f "$link"' EXIT
+    browser_failure="the browser lock files package.json and package-lock.json are missing from $lock_dir"
     cp "$lock_dir/package.json" "$lock_dir/package-lock.json" "$tmp/"
+    browser_failure="could not compute the browser runtime identity (sha256sum or shasum is required)"
     # Include the wrapper/smoke revision and Node asset in the installed identity.
     printf '%s\n' "wrapper-v1 $expected_sha" > "$tmp/identity"
     cat "$tmp/package.json" "$tmp/package-lock.json" >> "$tmp/identity"
@@ -1032,13 +1246,16 @@ install_playwright() (
         log "playwright" "locked runtime already installed"
     else
         runtime="$tmp"
+        browser_failure="the Node.js $BROWSER_NODE_VERSION download for the browser runtime failed"
         curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 \
             "https://nodejs.org/dist/v$BROWSER_NODE_VERSION/node-v$BROWSER_NODE_VERSION-$platform.tar.gz" \
             -o "$tmp/node.tar.gz"
         if [ "$(sha256_file "$tmp/node.tar.gz")" != "$expected_sha" ]; then
+            browser_failure="the Node.js $BROWSER_NODE_VERSION download did not match its pinned SHA256 checksum"
             echo "Node SHA256 mismatch; browser installation refused" >&2
             exit 1
         fi
+        browser_failure="the downloaded Node.js $BROWSER_NODE_VERSION could not be unpacked or run"
         mkdir "$tmp/node"
         tar -xzf "$tmp/node.tar.gz" --strip-components=1 -C "$tmp/node"
         rm "$tmp/node.tar.gz"
@@ -1046,10 +1263,26 @@ install_playwright() (
         export PLAYWRIGHT_BROWSERS_PATH="$tmp/browsers"
         export PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=30000
         export npm_config_fetch_retries=2 npm_config_fetch_timeout=60000
+        browser_failure="npm could not install the locked Playwright packages"
         "$tmp/node/bin/node" "$tmp/node/lib/node_modules/npm/bin/npm-cli.js" ci \
             --prefix "$tmp" --ignore-scripts --no-audit --no-fund
-        "$tmp/node/bin/node" "$tmp/node_modules/playwright/cli.js" install chromium --only-shell
+        # Playwright's own post-download host check would print its own
+        # install-deps and apt-get advice beside check_browser_libraries' one
+        # command, apt advice on rpm hosts included. Download errors still
+        # fail the step, and the smoke's launch runs Playwright's check. A
+        # prefix assignment, not env(1): env reads any argument containing
+        # "=" as an assignment, and $tmp lives under the operator's tools dir.
+        browser_failure="the Chromium headless shell download failed"
+        PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 \
+            "$tmp/node/bin/node" "$tmp/node_modules/playwright/cli.js" install chromium --only-shell
+        # A missing library otherwise shows up only as a browser that will not start.
+        if [ "$OS" = linux ]; then
+            browser_failure="the browser's shared libraries could not be checked"
+            check_browser_libraries "$tmp"
+        fi
+        browser_failure="the browser smoke test failed: the headless browser did not start or could not drive a page"
         verify_playwright_runtime "$tmp"
+        browser_failure="the browser runtime could not be published to $TOOLS_DIR/playwright-cli"
         cat > "$tmp/playwright-cli" <<'BROWSER_WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1069,7 +1302,8 @@ BROWSER_WRAPPER
         rm "$link"
         ln -s "$(basename "$runtime")/playwright-cli" "$link"
         mv -f "$link" "$TOOLS_DIR/playwright-cli"
-        trap 'rm -f "$link"' EXIT
+        # Published: the staging dir is now the runtime, not a leftover.
+        tmp=
         log "playwright" "installed and browser verified -> $TOOLS_DIR/playwright-cli"
     fi
 )
@@ -1093,7 +1327,10 @@ install_cbm_if_source_checkout() {
 # this); `install-tools.sh temporal` vendors only the temporal sidecar
 # (the CI candidate-smoke gate uses this to leave its tool env otherwise
 # unchanged); a bare run installs everything, taking the cbm leg only on
-# a source checkout. Add future install_* calls here.
+# a source checkout; `install-tools.sh --without-browser` installs the
+# same set minus the browser runtime, leaving a published runtime and the
+# browser install record untouched (dist/install.sh passes it for its
+# --without-browser flag). Add future install_* calls here.
 # ---------------------------------------------------------------------
 if [[ "${1:-}" == "cbm" ]]; then
     shift
@@ -1104,8 +1341,13 @@ if [[ "${1:-}" == "temporal" ]]; then
     install_temporal
     exit 0
 fi
+without_browser=0
+if [[ "${1:-}" == "--without-browser" ]]; then
+    without_browser=1
+    shift
+fi
 if [[ -n "${1:-}" ]]; then
-    echo "install-tools: unknown subcommand: $1 (expected 'cbm', 'temporal', or no argument)" >&2
+    echo "install-tools: unknown subcommand: $1 (expected 'cbm', 'temporal', '--without-browser', or no argument)" >&2
     exit 2
 fi
 
@@ -1117,18 +1359,26 @@ install_temporal
 install_forge_clis
 install_cbm_if_source_checkout
 # Remote-only clients do not execute agents. Match dist/install.sh's existing
-# remote-host detection; local/source installs get the managed browser runtime.
-if [ -z "${HASHD_SERVER_URL:-}" ] || printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; then
+# remote-host detection; local/source installs get the managed browser runtime
+# unless the operator asked for none. The skip is not an attempt, so it records
+# no outcome; dist/install.sh reports it.
+if [ "$without_browser" -eq 0 ] && { [ -z "${HASHD_SERVER_URL:-}" ] || printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; }; then
     # Do not call the subshell as an `if` condition: bash would disable errexit
     # throughout it, allowing a failed checksum/download to reach publication.
+    # The WARN reports this attempt, so it reads an invocation-owned copy of
+    # the record: a concurrent installer may replace the shared one.
     set +e
-    install_playwright
+    browser_result="${HASHD_BROWSER_INSTALL_RESULT:-}" own_result=
+    [ -n "$browser_result" ] || { own_result="$(mktemp)"; browser_result="$own_result"; }
+    HASHD_BROWSER_INSTALL_RESULT="$browser_result" install_playwright
     browser_status=$?
     set -e
     if [ "$browser_status" -ne 0 ]; then
-        echo "WARN: browser installation failed (see error above); existing runtime retained."
+        browser_failure="$(read_browser_install_status reason "$browser_result")"
+        echo "WARN: browser installation failed (${browser_failure:-see error above}); existing runtime retained."
         echo "      Browser validation will be skipped if unavailable. Re-run the installer after fixing the reported dependency."
         echo "      Linux shared libraries may require your administrator; Hashd does not run sudo."
     fi
+    [ -z "$own_result" ] || rm -f "$own_result"
 fi
 echo "Tool install complete."

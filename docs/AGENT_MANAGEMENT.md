@@ -219,7 +219,7 @@ refused when:
 | Agent | Accepted `stage_effort` levels |
 |---|---|
 | claude | `low`, `medium`, `high`, `xhigh`, `max` |
-| codex | `low`, `medium`, `high` |
+| codex | `low`, `medium`, `high`, `xhigh` |
 | others | none: no effort slot |
 
 A covered stage where the entry does not apply is not checked; the write is
@@ -1285,7 +1285,7 @@ kimi shapes.
 | `{model}` / `{effort}` | rendered through the agent's `model_template` / `effort_template` | dropped when the agent declares no template |
 
 An agent that declares `effort_template` must also declare `effort_levels`, the
-values its effort flag accepts (claude `low`..`max`, codex `low`/`medium`/`high`);
+values its effort flag accepts (claude `low`..`max`, codex `low`/`medium`/`high`/`xhigh`);
 an agent with no `effort_template` declares none. `TestLoadRegistryEffortLevels`
 enforces the pairing.
 

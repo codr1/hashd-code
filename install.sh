@@ -582,6 +582,142 @@ warn_external_tools() {
     echo "      Fix: re-run this installer once the fetch succeeds."
 }
 
+# remote_server_paired: true when HASHD_SERVER_URL names a non-loopback server.
+# Such a client has no local server to own and runs no agents, so it gets
+# neither a local owner nor the browser runtime. install-tools.sh repeats this
+# test because it is fetched standalone and cannot source this file.
+remote_server_paired() {
+    [ -n "${HASHD_SERVER_URL:-}" ] && ! printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'
+}
+
+# install.sh's exit status when the browser runtime was wanted and this run
+# could not install it. die and usage exit 1, and set -e passes on the hashd
+# CLI's own statuses (1, 2, 6, 10, 130, 253), so a script can tell this outcome
+# apart.
+BROWSER_MISSING_EXIT=75
+
+# The browser install outcome record install-tools.sh writes into its tools
+# dir (BROWSER_INSTALL_STATUS there; `hashd doctor` reads it). Named here
+# rather than by sourcing install-tools.sh: it is fetched standalone and its
+# entry point runs when sourced.
+BROWSER_INSTALL_STATUS=".browser-install-status"
+
+# browser_install_record: the outcome record's path.
+browser_install_record() {
+    printf '%s/%s\n' "${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}" "$BROWSER_INSTALL_STATUS"
+}
+
+# record_browser_install_failure <reason> records a failure that kept
+# install-tools.sh from running, for `hashd doctor`. Twin of install-tools.sh's
+# write_browser_install_status, which is not available when its script could
+# not be downloaded; TestInstallSHBrowserRuntimeOutcome reads the result back
+# through doctor's reader. The record is replaced in one rename.
+record_browser_install_failure() {
+    local file staged
+    file="$(browser_install_record)"
+    if ! mkdir -p "$(dirname "$file")" || ! staged="$(mktemp "$file.XXXXXX")"; then
+        echo "WARN: could not record the browser install outcome in $file; hashd doctor will not show it."
+        return 0
+    fi
+    if ! printf 'outcome=failed\nreason=%s\n' "$1" >"$staged" || ! chmod 644 "$staged" || ! mv -f "$staged" "$file"; then
+        rm -f "$staged"
+        echo "WARN: could not record the browser install outcome in $file; hashd doctor will not show it."
+    fi
+}
+
+# browser_install_status <file> <key> prints the recorded value of key, nothing
+# when the key is absent. Same format as install-tools.sh's
+# read_browser_install_status: one key=value per line.
+browser_install_status() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "$2="*) printf '%s\n' "${line#"$2="}"; return 0 ;;
+        esac
+    done <"$1"
+}
+
+# install_external_tools <base url> <os> <arch>: fetch the selected release's
+# install-tools.sh and browser lock files into $WORK_DIR and run it. Under
+# --without-browser (WITHOUT_BROWSER=1) the lock files are not fetched and
+# install-tools.sh is told to skip the browser leg. A fetch failure that keeps
+# the browser from installing is kept in BROWSER_INSTALL_FAILURE; one that keeps
+# install-tools.sh from running is recorded for doctor too. install-tools.sh
+# copies this run's outcome to BROWSER_INSTALL_RESULT, private to this run:
+# concurrent installers share the tools dir's record, so it may be another's.
+install_external_tools() {
+    local base_url="$1" tools_os="$2" tools_arch="$3" browser_lock
+    local tools_args=()
+    BROWSER_INSTALL_FAILURE= BROWSER_INSTALL_RESULT="$WORK_DIR/browser-install-result"
+    mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/vendor/playwright"
+    if ! curl --fail --silent --location \
+        --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 60 \
+        "$base_url/scripts/install-tools.sh" -o "$WORK_DIR/scripts/install-tools.sh" 2>/dev/null; then
+        BROWSER_INSTALL_FAILURE="install-tools.sh could not be downloaded from $base_url/scripts/install-tools.sh"
+        warn_external_tools "could not download installer script"
+        if [ "${WITHOUT_BROWSER:-0}" != 1 ] && ! remote_server_paired; then
+            record_browser_install_failure "$BROWSER_INSTALL_FAILURE"
+        fi
+        return 0
+    fi
+    if [ "${WITHOUT_BROWSER:-0}" = 1 ]; then
+        tools_args=(--without-browser)
+    else
+        for browser_lock in package.json package-lock.json; do
+            if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+                "$base_url/vendor/playwright/$browser_lock" \
+                -o "$WORK_DIR/vendor/playwright/$browser_lock"; then
+                BROWSER_INSTALL_FAILURE="${BROWSER_INSTALL_FAILURE:+$BROWSER_INSTALL_FAILURE; }the browser lock file $browser_lock could not be downloaded from $base_url/vendor/playwright/$browser_lock"
+                warn_external_tools "could not download browser lock $browser_lock; browser installation will report unavailable"
+            fi
+        done
+    fi
+    if ! HASHD_BROWSER_INSTALL_RESULT="$BROWSER_INSTALL_RESULT" HASHD_TOOLS_OS="$tools_os" HASHD_TOOLS_ARCH="$tools_arch" bash "$WORK_DIR/scripts/install-tools.sh" "${tools_args[@]}"; then
+        warn_external_tools "installer script failed"
+    fi
+}
+
+# browser_runtime_outcome: print the installer's last line about the browser
+# runtime, and return 0 or BROWSER_MISSING_EXIT. Prints nothing for a
+# remote-paired client (it never gets the runtime) and for a successful
+# install. Otherwise the outcome is what install_external_tools and this run's
+# BROWSER_INSTALL_RESULT say happened, never install-tools.sh's exit status: a
+# failure there need not be the browser's, and a browser failure does not fail
+# it. A runtime still in place after a failed upgrade is the previous one,
+# kept, and named; the install still failed, so the status is
+# BROWSER_MISSING_EXIT.
+browser_runtime_outcome() {
+    local runtime="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}/playwright-cli" result="${BROWSER_INSTALL_RESULT:-}" reason
+    if remote_server_paired; then
+        return 0
+    fi
+    if [ "${WITHOUT_BROWSER:-0}" = 1 ]; then
+        if [ -x "$runtime" ]; then
+            printf "browser runtime: existing runtime kept at %s, not upgraded (skipped at the operator's request via --without-browser)\n" "$runtime"
+        else
+            printf "browser runtime: not installed (skipped at the operator's request via --without-browser); browser validation disabled\n"
+        fi
+        return 0
+    fi
+    reason="${BROWSER_INSTALL_FAILURE:-}"
+    if [ -n "$result" ] && [ -f "$result" ]; then
+        if [ "$(browser_install_status "$result" outcome)" = succeeded ]; then
+            return 0
+        fi
+        [ -n "$reason" ] || reason="$(browser_install_status "$result" reason)"
+        [ -n "$reason" ] || reason="the browser install failed without recording a reason"
+    elif [ -z "$reason" ]; then
+        reason="install-tools.sh did not reach the browser step (it recorded no browser install outcome during this run)"
+    fi
+    if [ -x "$runtime" ]; then
+        printf 'browser runtime: previous runtime kept at %s; the upgrade failed (%s)\n' "$runtime" "$reason"
+    else
+        printf 'browser runtime: not installed (%s); browser validation disabled\n' "$reason"
+    fi
+    return "$BROWSER_MISSING_EXIT"
+}
+
 # setup.sh and installer tests source definitions without running installation.
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
     return 0
@@ -589,11 +725,13 @@ fi
 
 set -e
 REPLACE_INSTALL=0
+WITHOUT_BROWSER=0
 for arg in "$@"; do
     case "$arg" in
         --replace-install) REPLACE_INSTALL=1 ;;
+        --without-browser) WITHOUT_BROWSER=1 ;;
         -y|--yes) ;; # Already non-interactive; never authorizes replacement.
-        *) echo "Usage: install.sh [--replace-install]" >&2; exit 1 ;;
+        *) echo "Usage: install.sh [--replace-install] [--without-browser]" >&2; exit 1 ;;
     esac
 done
 
@@ -847,8 +985,6 @@ install_completions
 # --- Install external tools (gitleaks, git-delta, ...) ---
 # Use the selected release's installer and npm lock, not moving main. Browser
 # binaries remain install-time upstream downloads, never wheel payloads.
-TOOLS_BASE_URL="https://raw.githubusercontent.com/$REPO/$RELEASE_TAG"
-TOOLS_SCRIPT_URL="$TOOLS_BASE_URL/scripts/install-tools.sh"
 TOOLS_OS="$PLATFORM"
 if [ "$TOOLS_OS" = "macosx" ]; then
     TOOLS_OS="darwin"
@@ -863,24 +999,7 @@ step "Installing external tools (gitleaks, git-delta, ripgrep, forge CLIs, brows
 # dropped gitleaks/delta binaries resolve as bare commands everywhere (the
 # user's shell and any subprocess), not just via hashd's tools-dir-aware code.
 ensure_tools_dir_on_path
-mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/vendor/playwright"
-if curl --fail --silent --location \
-    --retry 3 --retry-delay 2 \
-    --connect-timeout 10 --max-time 60 \
-    "$TOOLS_SCRIPT_URL" -o "$WORK_DIR/scripts/install-tools.sh" 2>/dev/null; then
-    for browser_lock in package.json package-lock.json; do
-        if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
-            "$TOOLS_BASE_URL/vendor/playwright/$browser_lock" \
-            -o "$WORK_DIR/vendor/playwright/$browser_lock"; then
-            warn_external_tools "could not download browser lock $browser_lock; browser installation will report unavailable"
-        fi
-    done
-    if ! HASHD_TOOLS_OS="$TOOLS_OS" HASHD_TOOLS_ARCH="$TOOLS_ARCH" bash "$WORK_DIR/scripts/install-tools.sh"; then
-        warn_external_tools "installer script failed"
-    fi
-else
-    warn_external_tools "could not download installer script"
-fi
+install_external_tools "https://raw.githubusercontent.com/$REPO/$RELEASE_TAG" "$TOOLS_OS" "$TOOLS_ARCH"
 
 step "Migrating local databases"
 # Before anything opens a database. A checkout upgraded across a schema bump
@@ -907,7 +1026,7 @@ step "Configuring owner identity"
 # is inert, the owner would be created in a database nothing reads, and a
 # failure here would abort an install that is otherwise complete. Skip it and
 # say why.
-if [ -n "${HASHD_SERVER_URL:-}" ] && ! printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; then
+if remote_server_paired; then
     ok "Paired to a remote server ($HASHD_SERVER_URL) -- no local owner needed"
 elif "$HASHD_BIN" admin user list 2>/dev/null | grep -q '@'; then
     ok "Owner already configured"
@@ -1056,7 +1175,15 @@ fi
 echo ""
 
 # --- One inviting next action ---
-printf '%sReady to work?%s Run hashd for your next step, or hashd watch for the TUI.\n' "$C_BOLD" "$C_RESET"
-printf '  Add a project: hashd project add /path/to/your/repo\n'
-printf '  Joining a team? https://github.com/codr1/hashd-code/blob/main/docs/REMOTE.md\n'
-echo ""
+# Not when the browser install failed: the install is not ready to work, and
+# the browser line ends the output with the dedicated exit status.
+BROWSER_STATUS=0
+BROWSER_LINE="$(browser_runtime_outcome)" || BROWSER_STATUS=$?
+if [ "$BROWSER_STATUS" -eq 0 ]; then
+    printf '%sReady to work?%s Run hashd for your next step, or hashd watch for the TUI.\n' "$C_BOLD" "$C_RESET"
+    printf '  Add a project: hashd project add /path/to/your/repo\n'
+    printf '  Joining a team? https://github.com/codr1/hashd-code/blob/main/docs/REMOTE.md\n'
+    echo ""
+fi
+[ -z "$BROWSER_LINE" ] || printf '%s\n' "$BROWSER_LINE"
+exit "$BROWSER_STATUS"

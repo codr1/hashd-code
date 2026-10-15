@@ -19,6 +19,22 @@ The installer reports both installations and stops before changes without that
 flag. Replacement does not migrate projects, settings or authentication; a fresh
 installation defaults to solo mode.
 
+To install without the managed browser runtime (browser validation stays
+disabled; an existing runtime is kept, not upgraded):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codr1/hashd-code/main/install.sh | bash -s -- --without-browser
+```
+
+Without that flag, a browser runtime that could not be installed (a missing
+system library, for example) ends the install with exit status 75 after every
+other step has run. The last line names the reason:
+`browser runtime: not installed (<reason>); browser validation disabled`.
+Fix the reason and re-run the installer, or re-run it with `--without-browser`.
+If an upgrade fails while a previous runtime is installed, that runtime is kept
+and the install still exits 75; the last line reads
+`browser runtime: previous runtime kept at <path>; the upgrade failed (<reason>)`.
+
 > **Working on hashd itself?** This page is the user install. Building from
 > source is a contributor path that needs access to the hashd source repository;
 > its `DEVELOPMENT.md` covers the Go/Task/sqlc toolchain and `setup.sh`.

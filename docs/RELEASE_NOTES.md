@@ -4,6 +4,42 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.28 - 2026-10-15
+
+v0.9.28 is one day of dev since v0.9.27: the fifteen findings of the first full soak of a packaged install (solo, team and GitHub PR mode on a fresh box), each fixed and landed the same day. A fresh install gets a working TUI again, a team server comes up and restarts the way the docs describe, Codex can resume its sessions under per-user credentials, and several diagnostics say what the operator actually has to do.
+
+### What's Changed
+
+- **A fresh install's TUI starts.** hashd-tui bounds textual to the locked, tested version (a fresh wheel install had resolved textual 8, which removed an export the TUI imports, so `hashd watch` died at import), and the release upgrade smoke now checks the installed textual against the lock and imports the TUI's entry modules from the installed environment.
+
+- **Team servers release the stop hold at startup.** On an HTTPS bind the server's boot-time self-dial verifies against its own certificate fingerprint and presents the internal token, so the startup release of a restart hold runs and spawned agent runs can register; `hashd start` waits for that release and reports it instead of staying silent while every client is refused.
+
+- **A restart that moves the bind address stops the server that is running.** With the configured URL naming a new local address, `hashd restart` and `hashd stop` hold, wait and stop the server actually listening, print one line naming both addresses, and start the replacement at the configured one. The cached token is found for the same loopback server under its other spellings (localhost, 127.0.0.1, ::1) and never sent to a different loopback address.
+
+- **Codex resumes sessions under an injected credential.** The per-user codex home keeps its session rollouts across invocations and server restarts while still removing the materialised credential, so review and implement resumes work in team mode; a genuinely lost session (`no rollout found`) is classified as a dead session and the review falls back to a cold round instead of failing the run after transient retries.
+
+- **Remote clients read context files locally.** `plan story -f`, `plan bug -f`, story edits, rejects and workstream feedback that name a file read it on the client and send its content; a path-shaped value that names no readable file is refused before any request is sent.
+
+- **`hashd plan` refuses unknown words and running discoveries.** `hashd plan <typo>` errors with the subcommand list and a did-you-mean instead of dispatching discovery, and `POST /plan/discover` while a discovery is already running answers a 409 naming the running discovery and its start time, with no side effects.
+
+- **The planner splits bundled features.** A story whose description lists two or more independently deliverable features gets a split verdict however far under the size threshold it is, with one piece per feature; it stays whole only when the reason says why the features are inseparable.
+
+- **Breakdown survives a worker death.** A breakdown activity lost to a dead worker is retried once, recovering a plan, guidance or question the lost attempt had already committed (stamped with the run id, so a run that started already parked is told apart) instead of failing the run or asking twice.
+
+- **Planner and implementer know the configured commands.** The project's build, test and merge-gate commands reach the planner and implementer, a story that renames a configured script parks with the exact config command to run, and a missing configured script is attributed as such for npm, pnpm and Yarn (asking Yarn under Plug'n'Play), with script-neutral flags tolerated and everything unknown kept conservative.
+
+- **Installer and doctor say what is wrong.** The installer reports a browser runtime that failed to install (missing system libraries) with the package command for the detected manager instead of silently continuing; `hashd doctor` never prints "All checks passed" under an error line, and optional dependencies warn instead of failing.
+
+- **Codex accepts `xhigh`.** The Codex effort ladder includes `xhigh`, and an unknown `agents.<name>` key refusal points at `stage_effort` and `stage_models`.
+
+- **`hashd pr push` brings the branch up to its base.** A plain push rebases onto the current base before publishing, as its help says; a refusal names the hashd command to run, and the behind-base retry keeps the first attempt's force-with-lease so a colleague's commit on the PR branch is refused, never overwritten.
+
+- **Config listings render whole numbers as integers.**
+
+- **Web design audit follow-ups.** Tooltips and popovers stay inside the viewport instead of being clipped by cards and scroll boxes, Code saved rows keep their file name beside the per-file discard control, the Code page shows one column at a time and gallery stat tiles go two-up at phone width.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.27...v0.9.28
+
 ## v0.9.27 - 2026-10-14
 
 v0.9.27 is two days of dev since v0.9.26, cut to carry the fixes the v0.9.26 release gate itself surfaced and the gate-speed work that followed. Nothing changes in the product's shape; what changes is that upgrades from older releases restart correctly, external tools can open a hashd database again, reviews stay inside their reviewer's limits, and a landing spends minutes rather than tens of minutes in gates.
