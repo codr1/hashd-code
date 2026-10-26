@@ -1057,6 +1057,4 @@ baseline test failures, stale flows, worktree cleanup, and missing tools.
 
 ## License
 
-BSL 1.1 (Business Source License)
-
-See [LICENSE](LICENSE.md) for details.
+hashd is licensed under the [hashd License](https://coderica.com/terms/).
