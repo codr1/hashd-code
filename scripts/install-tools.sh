@@ -499,15 +499,12 @@ install_delta() {
 
 
 # ---------------------------------------------------------------------
-# codebase-memory-mcp (cbm) -- our own pinned artifact, from
-# vendor/cbm.lock. Unlike the third-party tools above it installs
-# per-checkout (.cache/cbm/<platform>/), because the pin moves with the
-# code: two checkouts on different branches may need different cbm
-# versions, so a machine-global copy would break branch switching.
-# Wheel users never take this leg -- the release wheel ships cbm inside
-# the package (dist/build_wheel.sh embeds it via the cbm subcommand).
-# When this script is fetched standalone (dist/install.sh pipes it over
-# HTTPS), there is no repo and no lock file: the leg is skipped.
+# codebase-memory-mcp (cbm) -- the pinned artifact in vendor/cbm.lock.
+# A full install uses the shared tools directory, which copied runner binaries
+# resolve too. Wheel installs verify the embedded copy in HASHD_PACKAGE_BIN_DIR.
+# The explicit cbm subcommand retains per-checkout/platform staging by default
+# for source builds and accepts --dest for release packaging.
+
 # ---------------------------------------------------------------------
 
 cbm_die() {
@@ -720,8 +717,6 @@ PY
     log "cbm" "$version -> $dest"
 }
 
-# install_cbm_if_source_checkout: the default-run leg. Only a source
-# checkout has vendor/cbm.lock; wheel users get cbm from the package.
 # ---------------------------------------------------------------------
 # Forge CLIs (gh / glab / bkt / tea)
 #
@@ -1308,14 +1303,6 @@ BROWSER_WRAPPER
     fi
 )
 
-install_cbm_if_source_checkout() {
-    local script_dir lock_path
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 0
-    lock_path="$script_dir/../vendor/cbm.lock"
-    [[ -f "$lock_path" ]] || return 0
-    install_cbm
-}
-
 # ---------------------------------------------------------------------
 # --- Entry point ---
 #
@@ -1326,8 +1313,9 @@ install_cbm_if_source_checkout() {
 # explicit platform/dest control (setup.sh and dist/build_wheel.sh use
 # this); `install-tools.sh temporal` vendors only the temporal sidecar
 # (the CI candidate-smoke gate uses this to leave its tool env otherwise
-# unchanged); a bare run installs everything, taking the cbm leg only on
-# a source checkout; `install-tools.sh --without-browser` installs the
+# unchanged); a bare run installs everything, including pinned cbm in the
+# shared tools directory (or verifies the wheel's embedded copy);
+# `install-tools.sh --without-browser` installs the
 # same set minus the browser runtime, leaving a published runtime and the
 # browser install record untouched (dist/install.sh passes it for its
 # --without-browser flag). Add future install_* calls here.
@@ -1357,12 +1345,12 @@ install_delta
 install_ripgrep
 install_temporal
 install_forge_clis
-install_cbm_if_source_checkout
+install_cbm --dest "${HASHD_PACKAGE_BIN_DIR:-$TOOLS_DIR}/codebase-memory-mcp"
 # Remote-only clients do not execute agents. Match dist/install.sh's existing
 # remote-host detection; local/source installs get the managed browser runtime
 # unless the operator asked for none. The skip is not an attempt, so it records
 # no outcome; dist/install.sh reports it.
-if [ "$without_browser" -eq 0 ] && { [ -z "${HASHD_SERVER_URL:-}" ] || printf '%s' "$HASHD_SERVER_URL" | grep -qE '://(127\.0\.0\.1|localhost|\[::1\])'; }; then
+if [ "$without_browser" -eq 0 ] && { [ -z "${HASHD_SERVER_URL:-}" ] || grep -qE '://(127\.0\.0\.1|localhost|\[::1\])' <<<"$HASHD_SERVER_URL"; }; then
     # Do not call the subshell as an `if` condition: bash would disable errexit
     # throughout it, allowing a failed checksum/download to reach publication.
     # The WARN reports this attempt, so it reads an invocation-owned copy of

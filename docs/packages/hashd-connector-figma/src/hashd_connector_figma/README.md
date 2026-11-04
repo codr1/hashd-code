@@ -161,6 +161,14 @@ figma:
 
 The token is never stored in config. Only the env var name. Set the actual token in your shell environment.
 
+**On a team server** every person signs in with their own token:
+`hashd connector login figma` (there is no site to give; every Figma account is
+for `figma.com`). Reads, previews and checks use your account. An agent's
+`figma_browse` and `figma_fetch` tools run on the server with the account of
+whoever owns the work, in every mode, and never read `token_env` or
+`FIGMA_TOKEN`. See
+docs/CONNECTORS.md.
+
 ## Health checks
 
 `hashd doctor` Figma section validates:
@@ -181,7 +189,7 @@ The connector uses the Figma REST API v1:
 
 The REST API returns raw style data (RGBA, font properties, auto-layout params), not CSS. The `.txt` summary extracts human-readable values. For exact CSS, agents read the `.json` source and construct styles from the raw properties.
 
-Auth is via `X-Figma-Token` header with a personal access token. OAuth is not supported (would be needed for MCP server integration in a future phase).
+Auth is via `X-Figma-Token` header with a personal access token. OAuth is not supported.
 
 ## Architecture
 

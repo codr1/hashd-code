@@ -77,14 +77,51 @@ and confidence, and the human decision:
 ```text
 $ hashd lineage a1b2c3d
 
-Commit a1b2c3d: COMMIT-AUTH-003: Implement JWT token validation
-  Workstream: auth_jwt
-  Story:      STORY-0012 - JWT Authentication (discovery)
-  Requirement: Users must authenticate via JWT with 30-minute session expiry
-  Run:        run_2026-03-09T10:05:13
-  Prompt:     implement (template: implement)
-  Review:     pass (confidence: 0.94, 0 blockers)
-  Human:      approved
+Commit: a1b2c3d4e5
+------------------
+  SHA:         a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0
+  Repository:  (root)
+  Revision:    a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0
+  Message:     COMMIT-AUTH-003: Implement JWT token validation
+  Created:     2026-03-09T10:21:40Z
+
+Links:
+  Workstream: STORY-0012
+  Story: STORY-0012
+  Run: run_2026-03-09T10:05:13
+  Microcommit: COMMIT-AUTH-003
+  Reviews: recorded
+  Human decisions: recorded
+  Agent calls: recorded
+  Git object: recorded
+
+Story (as it reads now): STORY-0012 - JWT Authentication
+  Source refs (discovery): REQS.md#auth-jwt
+
+Intent in force:
+  State: recorded
+  Micro-commit entry in force: COMMIT-AUTH-003 - Implement JWT token validation
+  ...
+
+Reviews (1):
+  implement      approve  confidence=0.94  2026-03-09 10:20
+
+Human decisions (1):
+  2026-03-09 10:30  approved
+```
+
+A link that was not recorded or could not be read keeps its line and says
+which; a failed one is followed by its error and cause:
+
+```
+Links:
+  Workstream: not applicable (recorded as intentionally absent)
+  Story: failed (could not be read; the error below says why)
+    error: The story STORY-0012 of commit a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0 could not be read
+      --> lineage.commit.story
+
+      caused by: database is locked
+  Run: not recorded (never recorded for this commit)
 ```
 
 Output formats: `--format table` (default), `--format json` (for `jq` / tooling),
@@ -100,17 +137,35 @@ attestation:
 hashd lineage export <sha> --format slsa      # in-toto Statement, SLSA v1.0 provenance predicate
 hashd lineage export <sha> --format in-toto   # in-toto Statement, hashd predicate
 hashd lineage export STORY-0012 --format slsa # array of attestations, one per commit
+hashd lineage export STORY-0012 --format in-toto --details    # every review with its stored record
+hashd lineage export STORY-0012 --format in-toto --details=3  # only the review numbered 3
 ```
 
 - **SLSA** export emits an in-toto Statement carrying a SLSA v1.0 provenance
-  predicate (`buildType: https://hashd.ai/provenance/v1`), with the story,
-  micro-commit, requirement, and origin as external parameters and the run id as
-  the invocation id.
+  predicate (`buildType: https://hashd.ai/provenance/v1`), with the recorded
+  story and micro-commit ids as external parameters, the run id and the chain's
+  `links` as internal parameters, and the run id as the invocation id.
 - **in-toto** export carries the full hashd predicate
-  (`https://hashd.ai/provenance/v1`): the commit row, story summary, review
-  decisions and confidence, human decisions, and agent calls (model, tokens,
-  duration) — plus a `chain` section with `prev_hash` and `record_hash` for
-  verifiability.
+  (`https://hashd.ai/provenance/v1`): the commit row, its reviews as numbered
+  entries (type, decision, confidence, time and the change hash with its
+  state, as `hashd lineage --format json` lists them), human decisions, agent
+  calls (model, tokens, duration), the chain's `links` — plus a `chain`
+  section with `prev_hash` and `record_hash` for verifiability.
+
+Reviews stay compact by default. `--details` adds each review's stored
+`record` whole, as recorded; `--details=N` only review N. A story export
+numbers reviews across all its attestations, each review once by its ID,
+so N names one review of the story wherever it appears. `--details` applies to in-toto only: SLSA provenance carries no
+reviews, so `--format slsa --details` is refused before anything is fetched.
+
+`links` holds each link of the commit's recorded chain (`workstream`, `story`,
+`run`, `microcommit`, `reviews`, `human_decisions`, `agent_calls`, `object`)
+as its `state` and recorded `id`, so `not_applicable` and `not_recorded` stay
+distinct. Both formats attest only what was recorded: a section the lineage
+read marks `present_day` (today the current story row, with its title and
+source refs) is left out, as are link locations and host paths, so an export, compact or expanded,
+reproduces byte-for-byte across story edits and a backup restored elsewhere.
+A commit with a `failed` link is refused rather than attested.
 
 ## Tamper evidence: `hashd lineage verify`
 
@@ -123,9 +178,19 @@ predecessor.
 hashd lineage verify   # exit 0 if the chain is intact, 1 if broken
 ```
 
-`verify` walks the chain and reports total / verified / breaks. It tolerates legacy
+`verify` reports two separate results over the same commit records. **Chain
+integrity** walks the chain and reports total / verified / breaks. It tolerates legacy
 pre-hash-chain segments and fails when a link is missing, duplicated, cyclic, or
 mismatched — i.e. when a record was altered or removed after the fact.
+
+**Coverage** reports how many of those commits still have their git object in
+their recorded repository, and how many have their attribution complete: their
+workstream, story, run and micro-commit links each recorded or recorded as not
+applicable. It lists every commit short of either, with each incomplete link and,
+for a link that could not be read, its diagnostic. A valid chain says only that
+the stored records were not altered or reordered; it does not say the lineage is
+complete. Only the chain decides the exit status: coverage gaps and failed reads
+never change it.
 
 ## The durable event log underneath it all
 

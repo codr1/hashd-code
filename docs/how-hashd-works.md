@@ -52,7 +52,10 @@ REQS.md and SPEC.md are living project artifacts. Operators can inspect them wit
 `hashd project reqs` and `hashd project spec`, and can make guarded manual edits with
 `hashd project reqs edit` or `hashd project spec edit`. Those commands go through
 hashd-server; a remote CLI client does not need the repository mounted locally,
-and successful edits are committed by the server in the configured repo.
+and successful edits are committed by the server in the configured repo today.
+The [decided runner direction](ARCHITECTURE.md#runner-architecture-decided-direction)
+will move repository execution to runners while retaining central API authority;
+that migration is not yet the active execution path.
 
 The key insight: these are not just labels on a kanban board. Each entity is an
 FSM. State only changes through a *validated transition* that persists atomically
@@ -99,11 +102,29 @@ The project's **autonomy mode** governs gate behavior:
 |------|-----------------|------------|
 | `supervised` | human approves each commit | human approves merge |
 | `gatekeeper` (default) | auto-continue if AI review confidence clears the threshold | human approves merge |
-| `autonomous` | auto-continue when confident | auto-merge when thresholds are met |
+| `autonomous` | auto-continue when confident | a person still runs `hashd merge`; a local merge needs no `--confirm` |
 
 All three modes still **block to a human on failures**. Autonomy decides how much
 *clean* work flows through unattended; it never suppresses an escalation. This is
-why "autonomous" is safe: it changes the merge gate, not the failure handling.
+why "autonomous" is safe: it changes which clean gates stop, not the failure handling.
+
+## Parallel branches and migration numbers
+
+High-water-mark migrators such as golang-migrate remember the highest applied
+version. If migration 180 lands before migration 172 from another branch, a
+database already at 180 silently skips 172. Hand-assigned numbers do not survive
+parallel branches.
+
+At the final rebase, compare the branch's new migrations with the base's highest
+version. If **any** new migration is at or below that version, renumber **all** of
+the branch's new migrations from highest + 1, in their original order, keeping
+up/down pairs together. For example, with base 180, branch migrations 179 and 185
+become 181 and 182. If all new migrations are already above the base's highest,
+leave them alone; gaps are harmless.
+
+Set the project's `migration_dir` to have hashd apply this rule at merge, after
+the rebase and before verification, and commit the renames. Teams without that
+setting should apply the same rule in their own CI at the final rebase.
 
 ## The dual-write event log
 
@@ -159,10 +180,10 @@ Honesty matters here, because the value proposition depends on it:
   you start from a requirement, but a project can skip `REQS.md` and create Stories
   directly with `hashd plan story` / `hashd plan bug`. Discovery is a convenience, not a
   gate.
-- **Single-operator today.** The audit/governance story is real, but the shipped
-  ops model is one operator per project. There is no multi-user coordination, RBAC,
-  SSO, or team-approval gate. A multi-user team server is in development, not
-  shipped — see the README's "What's coming."
+- **Team access is not a separate approval workflow.** Shared servers already
+  provide user identity, work ownership and per-user agent credentials. This
+  does not imply multi-party approval policies; see [Remote and Team Servers](REMOTE.md)
+  for the current access model.
 - **hashd is not CI and not a forge.** It can run local gates and observe forge
   checks, but external CI and PR review remain external.
 

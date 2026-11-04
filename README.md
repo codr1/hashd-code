@@ -95,7 +95,7 @@ The bottleneck in shipping AI-written code is not typing speed -- it is **trust*
 
 **Grounds the agents.** Agents query a pre-computed Context Graph instead of re-discovering the codebase on every run. AST structure, dependency edges, and project knowledge are extracted once and made available to every agent in every workstream. Published research on systems like Aider shows tool-based exploration consumes 54-70% of the context window for orientation alone; pre-computed structural maps reduce this to 4-6%. That's a 10-15x reduction in tokens spent discovering what static analysis already knows -- and a corresponding reduction in cost, latency, hallucinated file paths, and first-pass review failures.
 
-**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `hashd lineage <file|sha|STORY-xxx>` reconstructs the chain. `hashd lineage export --format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `hashd lineage verify` validates the hash chain integrity. AI-generated code becomes auditable.
+**Records the lineage.** Every commit traces through its workstream, its story, its reviews, its clarifications, and the human decisions that gated it. `hashd lineage <file|sha|STORY-xxx>` reconstructs the chain. `hashd lineage export --format slsa|in-toto` produces machine-readable provenance for supply-chain compliance. `hashd lineage verify` validates the hash chain integrity and, as a separate result, reports coverage: how many commits keep their git object and complete attribution. AI-generated code becomes auditable.
 
 ```
 file -> git log -> commit message (COMMIT-XX-NNN)
@@ -130,6 +130,8 @@ Either way the token carries the server's certificate fingerprint, so pairing ne
 **Working together on one server.** A shared server is multi-user for real: every request is attributed to the person who made it, and a workstream belongs to the user who started it. Agent credentials are per-user too -- each member registers their own agent login (`hashd agents login claude`, or the web dashboard's Settings -> Agent logins panel), stored encrypted at rest and injected only into runs that member owns; a run whose owner has no live credential refuses to start rather than borrowing someone else's account. Team mode (`hashd config set deployment_mode team`) makes per-user identity mandatory on every request. The server also serves a browser dashboard alongside the TUI -- workstream monitoring, change review, chat, and settings -- so teammates can observe and act without a terminal.
 
 **Solo shared-repo (advanced, not recommended).** Several developers each run their own solo hashd against the same git repository, their per-project state living side by side under `.hashd`, with no server coordinating them. Git is the only shared substrate. It works, but there is no shared workstream registry or multi-user gate -- prefer a server for real collaboration.
+
+The [decided runner architecture](docs/ARCHITECTURE.md#runner-architecture-decided-direction) is being built slice by slice: execution will move to a separate local or remote runner while the server retains workflow authority. That topology is not activated by today's runner registry.
 
 ## What's coming
 
@@ -197,7 +199,7 @@ Hashd sends desktop notifications at three levels:
 | Level | Urgency | Expires | When |
 |-------|---------|---------|------|
 | Needs you | critical | stays until dismissed | Review parks, final review concerns, blocked runs, runs closed outside workflow control, merges stopped on work in progress, raised clarifications, Arc proposals awaiting a decision |
-| Failure | critical | 20s | Run failure, merge failure, PR create/push failure, workstream creation failure, engine degraded |
+| Failure | critical | 20s | Run failure, merge failure, PR create/push failure, workstream creation failure, Temporal answering slowly / not answering |
 | Good news | low | 5s | Ready to merge, merged, story implemented, suggestion reverted |
 
 Works with any freedesktop-compliant notification daemon (mako, dunst, GNOME, KDE).
@@ -347,6 +349,8 @@ Directives are automatically included in implementation prompts.
 |---------|-------------|
 | `hashd plan` | Plan stories from REQS.md (saves suggestions) |
 | `hashd plan list` | View current suggestions |
+| `hashd plan dismiss <S-id or position> [--reason "..."] [-y]` | Mark an available suggestion as not planned; `-y` confirms without a terminal |
+| `hashd plan restore <S-id> [-y]` | Restore a dismissed suggestion; S-id only, with `-y` required without a terminal |
 | `hashd plan story "title"` | Quick feature story (skips REQS discovery) |
 | `hashd plan bug "title"` | Quick bug fix (skips REQS discovery, conditional SPEC update) |
 | `hashd story clone STORY-xxx` | Clone a locked story to edit |
@@ -358,7 +362,7 @@ Directives are automatically included in implementation prompts.
 | `hashd approve <id>` | Accept story or approve workstream gate |
 | `hashd pr create [id]` | Create PR/MR on forge (for external review) |
 | `hashd pr feedback <ws>` | View PR/MR review comments |
-| `hashd merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge) |
+| `hashd merge [id] [--confirm\|-y] [--pr] [--strategy <s>] [--no-push] [--fix] [--ai-resolve]` | Merge to main (`--pr`: via forge PR instead of direct merge; `--strategy`: PR merge strategy for this merge) |
 | `hashd close <id>` | Close story or workstream (abandon) |
 | `hashd watch [id]` | Interactive TUI (dashboard, or detail for workstream/STORY-xxxx). A pure viewer: connects to running services, never starts them -- if the stack is down it says what to run |
 
@@ -409,6 +413,8 @@ The Telegram bot covers the full workflow from mobile. Send `/` for the button m
 
 The bot also auto-starts when you run `hashd run`.
 
+On a team server, the hashd credential the bot runs with must belong to the server owner or carry no user identity: the configured chat receives the alerts routed to that credential. Teammates who pair with `hashd telegram connect` get their own alerts in their private chat with the bot.
+
 ### Supporting Commands
 
 | Command | Description |
@@ -419,9 +425,9 @@ The bot also auto-starts when you run `hashd run`.
 | `hashd run [id] --verbose` | Show implement/review exchange |
 | `hashd log [id]` | Show workstream timeline |
 | `hashd review [id]` | Show the current review (pending micro-commit/FIX, or the current final verdict) |
-| `hashd lineage <target>` | Trace code lineage (file, SHA, or STORY/BUG ID) |
-| `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto` | Export attestation JSON for a tracked commit or story |
-| `hashd lineage verify` | Validate commit hash chain integrity |
+| `hashd lineage <target> [--details[=N]]` | Trace code lineage (file, SHA, or STORY/BUG ID); `--details` expands every review of a SHA or story with its stored record whole, `--details=N` only review N |
+| `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> --format slsa\|in-toto [--details[=N]]` | Export attestation JSON for a tracked commit or story; with in-toto, `--details` expands every review with its stored record whole, `--details=N` only review N (numbered across a story's attestations) |
+| `hashd lineage verify` | Validate commit hash chain integrity and report coverage separately; only the chain decides the exit status |
 | `hashd reject [id] -f "..."` | Reject with additive human guidance (context-aware) |
 | `hashd review findings ID [--include-forge]` | Export editable Markdown without rejecting |
 | `hashd reject ID --findings-file FILE` | Replace the complete findings set (`-` reads stdin) |
@@ -429,7 +435,7 @@ The bot also auto-starts when you run `hashd run`.
 | `hashd workstream resolve-oscillation <id> -f "..."` | Record an operator ruling on the latest FIX commit; does not resume execution |
 | `hashd diff [id]` | Show workstream diff |
 | `hashd test [--] <command...>` | Run a test command in the current worktree and record its verdict |
-| `hashd skip [id]` | Mark commit as done without changes |
+| `hashd skip [id] [commit] [--discard]` | Mark commit as done without changes; skipping the next commit over its uncommitted work needs `--discard`, which saves that work as a patch first |
 | `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
 | `hashd replan [id] [-f "..."]` | Regenerate the plan from a clean base |
 | `hashd refresh [id]` | Refresh touched files |
@@ -555,11 +561,14 @@ This writes a rejection file and continues the run loop.
 
 Rejection appends one FIX task and resumes the existing implementation loop.
 It includes the latest applicable internal final-review findings by default.
-The existing PR and its metadata are preserved.
+At `pr_open` and `pr_approved` it also folds the PR's open forge threads and
+current changes-requested review bodies by default; other gates fold internal
+findings only unless `--include-forge` is given. The existing PR and its
+metadata are preserved.
 
 ```bash
-hashd reject my_feature                              # Include internal findings
-hashd reject STORY-0042 --include-forge -f "Keep the public API"  # Also include open forge findings
+hashd reject my_feature                              # Internal findings; at a PR gate, forge feedback too
+hashd reject STORY-0042 --include-forge -f "Keep the public API"  # Also include open forge findings at any FIX gate
 hashd review findings STORY-0042 --include-forge > findings.md   # Export only; edit this file
 hashd reject STORY-0042 --findings-file findings.md -f "Human ruling"
 hashd reject my_feature --findings-file - < findings.md
@@ -568,7 +577,8 @@ hashd reject my_feature --findings-file - < findings.md
 Both commands accept workstream IDs or story IDs. A story must have a linked
 workstream. `--findings-file` replaces the **complete** findings set; an empty
 file excludes all findings. It cannot be combined with `--include-forge`.
-Explicitly requested forge-fetch failures are reported before rejection.
+Forge-fetch failures, requested or by default, are reported before rejection;
+pass `--findings-file` to reject without forge findings.
 `-f` adds human guidance, which takes precedence over findings. A FIX needs
 findings or guidance; if both are empty, rejection is refused.
 
@@ -610,7 +620,7 @@ See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions includ
 
 - **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
 - **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `hashd doctor` prints the exact OS-correct install commands.
-- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea/) (Gitea). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks.
+- A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea/) (Gitea). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks. Azure Repos needs no CLI: hashd calls its REST API with a stored credential.
 - [delta (git-delta)](https://github.com/dandavison/delta) - bundled TUI side-by-side, syntax-highlighted, word-level diff renderer (auto-installed by the installer / `setup.sh`)
 - [gitleaks](https://github.com/gitleaks/gitleaks) - secrets scanning at project setup (auto-installed by the installer / `setup.sh`)
 - [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) - bundled code intelligence backend (auto-fetched by the installer / `setup.sh`; setup fails if the pinned binary cannot be fetched or executed)
@@ -624,6 +634,7 @@ glab auth login                       # GitLab
 bkt auth login --kind cloud --web     # Bitbucket OAuth
 bkt auth login --kind cloud --web-token # Bitbucket API-token alternative
 tea login add --name work --url https://git.example.com --token $TOKEN  # Gitea
+hashd forge login --host dev.azure.com --scope <organisation>           # Azure Repos (Entra sign-in)
 ```
 
 For GitHub and GitLab PR operations, solo mode uses an authenticated local CLI
@@ -631,9 +642,99 @@ first, then a stored credential. Team mode uses the workstream owner's stored
 credential for the target repository's host; it never falls back to the server's
 CLI account. Store credentials with `hashd forge login --host <host>` or in the
 web's **Settings > Forge** panel. Stored credentials remain encrypted and are
-never returned by the listing API. Bitbucket and Gitea PR operations currently
+never returned by the listing API. Each host (and, on Azure Repos, each
+organisation) holds one credential: a static token or an Entra binding.
+`hashd forge status [--host H --scope S]` lists each key with its source, and
+for an Entra-backed key its account, the account's state and, when it needs a
+sign-in, the reason. Inside a project, `hashd forge status` with no `--host`
+lists the project's credential keys instead: each key with its forge type, the
+repos using it and its state (`none`, `static`, `entra_usable` or
+`needs_sign_in`), an Entra key's bound account and, when it needs a sign-in,
+the reason, then each repo whose remote gives no key, with why.
+Inside a project, `hashd forge login` with no `--host` and no token piped
+signs in to, or stores a token for, each of the project's credential keys that
+lacks a usable credential, one key at a time, and skips keys already usable;
+`--device-code` and `--new-account` apply to each of its Entra sign-ins. A
+non-Entra key's token is read hidden on a TTY; without one the key is reported
+with its `printf '%s' "$TOKEN" | hashd forge login --host <host> --type <type>`
+command. Whether every key ends usable is read back from the server after the
+run, since a sign-in can leave another key needing one. A
+key that fails is reported and the next still runs, and the command exits 0
+only when every key ends usable, otherwise naming each key left unusable with
+its explicit command.
+A token piped with no `--host` inside a project goes to the single key that
+lacks a usable credential; when several keys lack one, or none does, nothing is
+stored and the command is refused, listing each key's
+`printf '%s' "$TOKEN" | hashd forge login --host <host> [--scope <scope>]`
+command.
+`hashd forge logout` removes the key's credential of either kind. Inside a
+project, `hashd forge logout` with no `--host` removes the project's single
+credential key; when the project has several keys it removes nothing and
+refuses, listing the explicit `hashd forge logout --host <host> [--scope
+<scope>]` command for each, and when no repo gives a key it asks for `--host`.
+
+Git reaches origin with the workstream owner's stored credential, on the
+server and on every runner alike, chosen by the origin's own transport: an
+HTTPS origin uses the key's token (or its Entra sign-in), and an SSH origin
+(`git@host:path`, `ssh://`) the key's SSH key. `hashd forge login ssh --host
+<host> [--scope <scope>]` generates an ed25519 key on the server and prints
+its public key to add to your forge account (pipe a private key on stdin to
+import one instead), and pins the host key the forge's SSH host presents,
+printing its fingerprint to check against the forge's published ones. The SSH
+key stands beside the key's token or sign-in, which PR operations still need;
+`hashd forge status` lists it under **SSH keys**, and `hashd forge logout ssh
+--host <host>` removes only it. Git with the key trusts only the pinned host
+key and never reads the host's own `~/.ssh`, agent or `gh` login; a runner
+whose owner has stored no credential for the origin's transport is refused
+with the command that stores one.
+Bitbucket and Gitea PR operations currently
 use local CLI authentication in solo mode; stored-token PR authentication for
 those providers is not supported.
+
+Azure Repos has no CLI login, so its PR operations always use a stored
+credential, in both modes, kept per organisation (a legacy
+`<organisation>.visualstudio.com` remote uses the same credential).
+`hashd forge login --host dev.azure.com --scope <organisation>` signs you in
+with Microsoft Entra. The server looks up the organisation's tenant and, when
+you already hold an account in that tenant, binds that account without asking;
+`--new-account` skips it and lets you choose another. Otherwise the sign-in
+opens in your browser and returns to a loopback port on your machine, or, when
+no browser can open there or with `--device-code`, prints an address and a
+code to enter on any device. The server redeems the sign-in and keeps the
+tokens; neither reaches your machine. A completed sign-in replaces a token
+stored for the same organisation. To store a personal access token with Code
+(Read & write) scope instead, pipe it:
+`printf '%s' "$PAT" | hashd forge login --host dev.azure.com --scope <organisation>`.
+`hashd forge status --host dev.azure.com --scope <organisation>` shows that
+organisation's credential alone.
+
+Entra sign-in needs an app registration, set once by a server administrator:
+
+1. In the Entra admin center, register an application and add the **Mobile and
+   desktop applications** platform with the redirect URI `http://localhost`.
+2. Under **Authentication**, set **Allow public client flows** to Yes, which
+   allows the device code flow.
+3. Under **API permissions**, add **Azure DevOps**, delegated permission
+   **user_impersonation**.
+4. Replace the shipped `coderica-hashd` placeholder with your app:
+
+   ```bash
+   hashd config set sso.entra.client_id <application-client-id>
+   hashd config set sso.entra.tenant <tenant-id, domain, or organizations>
+   ```
+
+5. If your tenant does not let users consent to apps, a tenant administrator
+   grants consent once, under the app's **API permissions** > **Grant admin
+   consent**, or at
+   `https://login.microsoftonline.com/<tenant>/adminconsent?client_id=<application-client-id>`.
+
+In PR mode hashd posts its own PR notes as
+closed threads, so a comment-resolution policy never waits on them, and a PR
+description longer than Azure Repos accepts continues in closed threads rather
+than being cut. hashd completes an approved PR with a merge commit
+(`noFastForward`), keeps the source branch, and never bypasses branch policy.
+Creating a repository on Azure Repos (`hashd project add --create`) is not
+supported.
 
 Minimum agent/tool versions verified for this release:
 
@@ -667,7 +768,16 @@ build_cmd: ""
 merge_gate_test_cmd: "make test" # merge-time tests; the visible failure surface
 test_timeout: 300
 merge_mode: "local"              # "local" or "pr"
-forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea"
+forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea", "azuredevops"
+# How the forge merges a PR (merge_mode: pr). Project scope only; checked
+# against the project's forge when written.
+# pr:
+#   completion: forge              # hashd (hashd rebases, re-tests and merges) or forge (the forge completes the PR,
+#                                  #   and hashd never rewrites its branch once a person reviewed it); unset is the
+#                                  #   forge's default: forge on Azure Repos, hashd elsewhere; forge needs Azure Repos
+#                                  #   or GitHub, whose PR reads report every review
+#   merge_strategy: merge          # merge (default), rebase, rebase_merge; squash is refused until squash lineage exists (#2211)
+#   delete_source_branch: true     # true/false; unset deletes in forge completion mode and keeps each forge's own call in hashd mode
 # Build artifacts written into the TRACKED tree that must never land on a
 # branch (compiler doc output, say). The merge-gate heal still proves the
 # build owns each one -- a path it does not own blocks as before -- and then
@@ -712,9 +822,16 @@ job. `gates.commit_check` chooses the per-commit check: `fast` runs
 `fast_test_cmd`, `full` runs the full test command, and unset runs `fast_test_cmd`
 when one is set. Push and merge gates still run the full suite.
 
-This repository ships `scripts/ci-fast.sh` as its fast check. It selects the Go
-packages, pytest suites and shell tests the touched files reach, and runs the
-full suite through `scripts/ci-local.sh` for any file it cannot attribute.
+This repository ships `scripts/ci-fast.sh` as its fast check. For a touched Go
+file it runs that file's own tests, or a source file's sibling `foo_test.go`
+tests (never the rest of the package, nor its importers); it also runs the tests
+that read a touched non-Go file, and the pytest suites and shell tests the
+touched files reach. A file nothing claims runs nothing there and is named in the log;
+the full suite covers it, and everything else, at the plan's last micro-commit
+and at the merge gate. After a pass it records, in the checkout's git dir, the
+content it passed on; the next run on the same base selects only the touched
+paths that changed since, and any other run (a new base, changed fast-check
+scripts, no record) selects them all.
 Enable it on a project with:
 
 ```bash
@@ -782,7 +899,7 @@ platform/              # project root (git repo, may be local-only)
     package.json
 ```
 
-**Setup:** `hashd project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `hashd project add /path --no-interview --suggest` followed by `hashd project add /path --no-interview`; see [QUICKSTART.md](QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
+**Setup:** `hashd project add /path/to/platform` detects whether the path is a single repo, a multi-repo container, or a superproject and then prompts for the right setup flow. For agent-driven onboarding, the canonical pattern is `hashd project add /path --no-interview --suggest` followed by `hashd project add /path --no-interview`; see [QUICKSTART.md](QUICKSTART.md) for the full two-flag walkthrough. Use `--primary <repo>` to pin the primary sub-repo, `--active <repo>` (repeatable) or `--all-active` to mark non-primary repos active, `--repo-skip-test <repo>` to explicitly acknowledge a repo with no test command, and `--repo-skip-build <repo>` to explicitly acknowledge a repo with no build command. `--repo-test-cmd <repo>=<cmd>`, `--repo-build-cmd <repo>=<cmd>` and `--repo-merge-gate-test-cmd <repo>=<cmd>` (repeatable) set each repo's commands for a scripted add, and `--repo-config <repo>=<file.yaml>` sets the same keys from a file; a flag beats the file, with a warning. For container bootstrap, root-level files are committed into the local control repo by default; root-level directories require an explicit `--commit-root-dirs` in non-interactive mode. Each registered repo gets its own test command, build command, merge mode, default branch, and status.
 
 **Config:** project-level settings live in `config.yaml`; per-repo state for multi-repo projects lives in SQLite `project_repos`, not in a `repos:` block in YAML.
 
@@ -917,16 +1034,18 @@ If rebase fails due to merge conflicts, blocks for human resolution with instruc
 | Force push loses work | `--force-with-lease` prevents overwriting if branch changed |
 | Infinite rebase loop | Max 3 attempts before blocking for human |
 | Forge API timing | 2s delay after push; worst case run `hashd merge` again |
-| Review bypass | Checks for `REVIEW_REQUIRED` status from forge |
+| Review bypass | Checks for a `review_required` decision from the forge |
 
 ### Review Requirements
 
 The merge respects the forge's configured review requirements:
 
-- **APPROVED** - Merge proceeds
-- **PENDING/None** - Merge proceeds (assumes no review required)
-- **CHANGES_REQUESTED** - Blocks; use `hashd reject` to generate fix commit from PR feedback
-- **REVIEW_REQUIRED** - Blocks until required reviews complete
+Each forge's own review state is mapped to one common decision:
+
+- **approved** - Merge proceeds
+- **none** - Merge proceeds (assumes no review required)
+- **changes_requested** - Blocks; use `hashd reject` to generate fix commit from PR feedback
+- **review_required** - Blocks until required reviews complete
 
 ### Check Requirements
 

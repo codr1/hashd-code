@@ -55,8 +55,14 @@ Called from:
 
 ## HASHD_* Environment Variables
 
-Hook subprocesses inherit the full parent environment plus these context
-variables:
+A hook runs repository code, so it does not inherit the server's
+environment. It receives the same allowlisted environment as an agent
+(see AGENT_MANAGEMENT.md, "Environment variables"): the base names (`PATH`,
+`HOME`, locale, `TERM`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, the
+proxy and CA variables), any name the project lists in `exec.env_allow`,
+the values the project sets in `exec.env`, and these context variables last.
+A hook never receives an `exec.credentials` credential; only project
+commands do:
 
 | Variable | Description | Always set? |
 |----------|-------------|-------------|
@@ -193,35 +199,28 @@ Hook failed: exit status 1
 - Missing file in the worktree (fresh checkouts don't have untracked files)
 - Path assumptions (always use `$HASHD_WORKTREE_PATH` or relative paths)
 - Missing tool (the hook inherits the parent's PATH -- confirm the tool is on it)
+- Missing variable (a toolchain variable such as `JAVA_HOME` is not inherited
+  unless the project lists it in `exec.env_allow`; `hashd doctor` lists what a
+  hook receives and what it does not)
 
 ## Call Flow
 
-```
-provisioning.py / archive.py        server/internal/cli/{close,workstream}.go
-        |                                      |
-        +-------> HTTP POST ------+------------+
-                                  |
-                                  v
-                  server/internal/api/mutations_hooks.go
-                  (registerRunHookRoute)
-                                  |
-                                  v
-                  server/internal/hooks/hooks.Run()
-                                  |
-                                  v
-                  bash -c "<hook>" in ws.worktree
-                  with HASHD_* env vars injected
-```
+The hooks run only at their lifecycle points, inside the server's own flows;
+no endpoint runs one on request.
 
-- Python callers: `orchestrator/lib/server_client.py::run_hook()` (310s client timeout)
-- Go callers: `server/internal/cli/helpers.go::runTeardownHook()` (310s client timeout)
-- Server endpoint: `POST /workstreams/{id}/run-hook?project=<name>` with body
-  `{"hook": "setup" | "teardown"}`
-- Response: `{ok: bool, output: string, error: string}`
-
-The 310s HTTP client timeout is intentionally 10s longer than the hook's
-default 300s so the server has time to return a timeout diagnostic instead of
-the client giving up first.
+```
+setup     provisioning's environment build    server/internal/runflow/environment.go
+teardown  the merge archive's checkout removal server/internal/mergeflow/archive.go
+teardown  close / remove / archive delete      server/internal/api/mutations_state.go
+                                               (teardownWorkstreamArtifacts)
+                 |
+                 v
+     server/internal/hooks (Run / RunContext)
+                 |
+                 v
+     bash -c "<hook>" in the story's checkout
+     with HASHD_* env vars injected
+```
 
 ## See Also
 
@@ -229,4 +228,3 @@ the client giving up first.
 - `docs/TROUBLESHOOTING.md#workspace-hook-failures` -- recovery recipes
 - `config.sample.yaml` -- annotated config template
 - `server/internal/hooks/hooks.go` -- Go implementation
-- `server/internal/api/mutations_hooks.go` -- REST endpoint

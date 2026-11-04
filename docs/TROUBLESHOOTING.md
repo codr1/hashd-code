@@ -47,6 +47,30 @@ and excluded from the test stage so the agent isn't blamed for pre-existing
 failures. The merge gate runs the full test suite without exclusions, so the
 fix is verified before merging.
 
+When a story that is not the fix reaches the merge gate and its only failures
+are tests its baseline recorded as failing before it, the gate parks at
+`merge_test_failed` naming them, with no FIX and no recovery question, and
+offers go-anyway: `hashd run <ws_id> --run-anyway` (TUI `!`, Web "Go
+anyway") accepts them for the revision the gate tested. The acceptance is
+recorded (who, when, which tests) and stated in the PR body, and the next gate
+at that revision passes on those failures. Any other failure, a test outside
+the baseline, or a new revision blocks again, and go-anyway is asked again.
+Test identity comes only from the repo's build adapter (`build.adapters`): a
+fresh, complete report the merge-gate command writes, as the test command
+does. Console output is never read for it, so a repo without an adapter (Go
+and pytest today) is not offered go-anyway at the gate, and neither is a
+build failure or a report that may be missing a failure. An adapter whose
+report cannot prove every part of the build compiled (Maven) needs a build
+that passed on the same content: the post-rebase build, or one the gate runs
+for the purpose, which counts only if it changes no file the suite tested --
+not even one the side-effect policy puts back afterwards.
+
+The adapter's report says nothing about another step of the same command
+(`jest; eslint`), so go-anyway is your decision on the evidence: the park and
+the Go anyway confirmation name the tests and show the command's exit status
+and the end of its raw output. Check that output for any other failure before
+you accept.
+
 Once the fix merges to main, run the blocked workstream again:
 
 ```bash
@@ -184,6 +208,19 @@ Use `-y` only to confirm those consequences without a prompt.
 
 Check the response for cleanup warnings: a closed record does not guarantee
 the worktree was removed. Run cleanup from outside the worktree path.
+
+Close is one of three kinds, and each decides what happens to the story's
+requirement in REQS:
+
+- `hashd close <story>` abandons the story; its requirement returns to REQS
+  as open work.
+- `hashd close <story> --no-changes --reason "..."` closes it as no changes
+  needed; the requirement is met and its REQS sections are burned.
+- `hashd close <story> --ref <ref> --reason "..."` closes it as
+  `closed_by_person`, for work done outside hashd. The server verifies the
+  ref first (`#<number>` or the URL of a merged or closed PR, a commit SHA on
+  the target branch, or an implemented story) and refuses one it cannot
+  confirm. The requirement is met and burned, and the branch is always kept.
 
 ## Broken Main (Post-Merge Test Failures)
 

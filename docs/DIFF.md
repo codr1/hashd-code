@@ -32,13 +32,13 @@ Enhanced rendering is built on [delta](https://github.com/dandavison/delta) (git
 
 Delta is an optional client-side dependency for the TUI diff panel.
 
-| Platform | Install command |
-|----------|----------------|
-| Arch Linux | `pacman -S git-delta` |
-| macOS | `brew install git-delta` |
-| Ubuntu/Debian (24.04+) | `apt install git-delta` |
-| Older Ubuntu/Debian | Download `.deb` from GitHub releases |
-| Any (Rust) | `cargo install git-delta` |
+| Platform               | Install command                      |
+| ---------------------- | ------------------------------------ |
+| Arch Linux             | `pacman -S git-delta`                |
+| macOS                  | `brew install git-delta`             |
+| Ubuntu/Debian (24.04+) | `apt install git-delta`              |
+| Older Ubuntu/Debian    | Download `.deb` from GitHub releases |
+| Any (Rust)             | `cargo install git-delta`            |
 
 If delta is not found on the client PATH, the diff panel still renders the REST-fetched unified diff. Delta only adds syntax highlighting, word-level markers, and side-by-side mode.
 
@@ -46,12 +46,12 @@ If delta is not found on the client PATH, the diff panel still renders the REST-
 
 hashd controls delta's output via explicit flags, not the user's `~/.config/delta/` or `.gitconfig` settings. This ensures consistent rendering across machines. Key flags used:
 
-| Flag | Purpose |
-|------|---------|
-| `--paging=never` | No pager -- output captured for the TUI panel |
-| `--width=N` | Match the TUI panel width or terminal width |
+| Flag             | Purpose                                                |
+| ---------------- | ------------------------------------------------------ |
+| `--paging=never` | No pager -- output captured for the TUI panel          |
+| `--width=N`      | Match the TUI panel width or terminal width            |
 | `--no-gitconfig` | Ignore user's delta theme to ensure consistent display |
-| `--side-by-side` | When explicitly requested and width permits |
+| `--side-by-side` | When explicitly requested and width permits            |
 
 ---
 
@@ -68,6 +68,7 @@ Replace the manual Rich coloring in the diff panel with delta-rendered output. S
 **ANSI to Rich conversion**: Delta outputs ANSI escape sequences (24-bit color). Textual's `Static` widget renders Rich markup, not raw ANSI. The bridge is `rich.text.Text.from_ansi()`, which converts ANSI escape sequences into a Rich `Text` object that `Static` can render directly.
 
 **`detail.py`**: The `_update_diff_panel()` method currently calls `get_diff_content()` and passes the result as a markup string. It needs to:
+
 1. Determine the actual rendered width of the diff panel (`self.query_one("#panel-diff").size.width`).
 2. Subtract a margin for the scrollbar and padding.
 3. Pass that width to the delta rendering function.
@@ -101,12 +102,12 @@ When viewing a diff, show a navigable file list with per-file +/- line counts. S
 
 The left column currently always shows the status box (top) and microcommit list (bottom). With this change, the bottom half becomes context-aware:
 
-| Active panel | Left column bottom half shows |
-|---|---|
-| review | Microcommit list (current behavior) |
-| log | Microcommit list (current behavior) |
-| timeline | Microcommit list (current behavior) |
-| diff | File tree with +/- stats |
+| Active panel | Left column bottom half shows       |
+| ------------ | ----------------------------------- |
+| review       | Microcommit list (current behavior) |
+| log          | Microcommit list (current behavior) |
+| timeline     | Microcommit list (current behavior) |
+| diff         | File tree with +/- stats            |
 
 When the user presses `d` to enter the diff panel, the left column replaces the microcommit list with the file tree. When the user switches to any other panel (`v`, `l`, `L`, `t`), the microcommit list returns.
 
@@ -136,13 +137,13 @@ Approach: Parse the raw REST-fetched unified diff text before piping through del
 
 The `d` key gains context awareness based on the currently highlighted microcommit:
 
-| Context | `d` asks the server for |
-|---|---|
-| No commit highlighted | `scope=story` -- the whole story |
-| The micro-commit the server is working | `scope=current` |
-| A micro-commit that has landed | `commit=<micro-commit id>` |
-| A pending micro-commit that is neither | `scope=story` |
-| `d` again, already in the diff panel | `scope=story` |
+| Context                                | `d` asks the server for          |
+| -------------------------------------- | -------------------------------- |
+| No commit highlighted                  | `scope=story` -- the whole story |
+| The micro-commit the server is working | `scope=current`                  |
+| A micro-commit that has landed         | `commit=<micro-commit id>`       |
+| A pending micro-commit that is neither | `scope=story`                    |
+| `d` again, already in the diff panel   | `scope=story`                    |
 
 Which micro-commit is being worked is the server's answer, read off the
 `current` range's `scope.microcommit_id` on `/workstreams/{id}/changes` -- the
@@ -168,10 +169,10 @@ base".
 The file list is driven from the same selector as the panel, so a file it lists
 is a file the panel below it will show.
 
-The full view's starting point is the branch's live fork point with its base branch, not the `base_sha` recorded at provisioning. The two differ once the branch is rebased: `base_sha` is a provisioning record that no rebase advances, so a range spelled from it would report everything the base branch gained in the meantime as this workstream's own work. The server falls back to the recorded `base_sha` whenever there is no fork point to derive, or none it can trust: no base branch ref to resolve, a branch its base already contains, a workstream in a terminal state (merged, closed and closed-without-changes rows are never probed, so they report exactly the range they always did), or a recorded base that `origin/<base>` has not caught up with, where the derived point would sit *behind* the record and widen the range instead of narrowing it. That is the usual state right after provisioning, which pins `base_sha` from its own fetch of origin and moves neither `origin/<base>` nor the local base branch; a `base_sha` recorded from a local base branch with unpushed commits does the same.
+The full view's starting point is the branch's live fork point with its base branch, not the `base_sha` recorded at provisioning. The two differ once the branch is rebased: `base_sha` is a provisioning record that no rebase advances, so a range spelled from it would report everything the base branch gained in the meantime as this workstream's own work. The server falls back to the recorded `base_sha` whenever there is no fork point to derive, or none it can trust: no base branch ref to resolve, a branch its base already contains, a workstream in a terminal state (merged, closed and closed-without-changes rows are never probed, so they report exactly the range they always did), or a recorded base that `origin/<base>` has not caught up with, where the derived point would sit _behind_ the record and widen the range instead of narrowing it. That is the usual state right after provisioning, which pins `base_sha` from its own fetch of origin and moves neither `origin/<base>` nor the local base branch; a `base_sha` recorded from a local base branch with unpushed commits does the same.
 
 To get a per-commit diff, the TUI sends the micro-commit's id and the server
-resolves which commits it landed (`commit=<id>`, api/read_diff_microcommit.go):
+resolves which commits it landed (`commit=<id>`, workreads/microcommit.go):
 the range runs from the parent of the earliest of them through the latest, so a
 micro-commit that landed several commits reports all of them. No client looks a
 SHA up for an id -- a second copy of that rule client-side is one that can
@@ -180,14 +181,14 @@ micro-commit lands exactly one commit.
 
 ### TUI diff scopes
 
-| Usage | Behavior |
-|-------|----------|
-| `d` with no microcommit highlighted | `scope=story`: everything this workstream has produced, landed or not |
-| `d` on the micro-commit being worked | `scope=current`, falling back to the story when the server cannot bound it |
-| `d` on a landed microcommit | `commit=<micro-commit id>`: the range its commits occupy |
-| Highlight a file in the diff file list | That file alone, within the range above |
-| `s` | Side-by-side mode (delta `--side-by-side`, when installed) |
-| `h` | Hunk selection, over the same range |
+| Usage                                  | Behavior                                                                   |
+| -------------------------------------- | -------------------------------------------------------------------------- |
+| `d` with no microcommit highlighted    | `scope=story`: everything this workstream has produced, landed or not      |
+| `d` on the micro-commit being worked   | `scope=current`, falling back to the story when the server cannot bound it |
+| `d` on a landed microcommit            | `commit=<micro-commit id>`: the range its commits occupy                   |
+| Highlight a file in the diff file list | That file alone, within the range above                                    |
+| `s`                                    | Side-by-side mode (delta `--side-by-side`, when installed)                 |
+| `h`                                    | Hunk selection, over the same range                                        |
 
 Every one of these is one query parameter on `/workstreams/{id}/diff`, resolved
 by the range rule both diff endpoints share -- the same rule `hashd diff
@@ -199,6 +200,33 @@ The lineage view (`I`) reads at branch state whichever range is on screen. Its
 endpoint (`/workstreams/{id}/blame`) takes a hex revision alone, and narrowing
 it to a micro-commit would mean teaching it the id -- which this arc does not
 do.
+
+### While a workstream is provisioning
+
+A workstream's worktree path is recorded before `git worktree add` runs, and a
+checkout of a large repository takes minutes. Read in that window, `git diff
+HEAD` reports every file not yet written as deleted. So while the workstream's
+stage is `provisioning`, the server does not read its working tree:
+
+- `/diff` and `/diff/changes` answer `200` with `pending: "provisioning"` and
+  nothing else for every read not addressed by a commit -- `uncommitted`,
+  `staged`, `scope=story`, `scope=current` and the no-selector default.
+  `commit=<sha>` and `commit=<micro-commit id>` are served as at any other time;
+- `/changes` answers `pending: "provisioning"` with empty lists and
+  `has_worktree` false, and its `story` and `current` summaries are
+  `not measured` with the same reason;
+- `/diff/blob?path=` refuses with `409` (`read.diff_blob.pending`), since no
+  change list in that window names a path; `?sha=` is served as usual.
+
+The rule is one server predicate on the FSM stage (`WorkingTreePending`,
+workreads/source.go), not on the `worktree_create` substage, whose stamp is
+best-effort. The stage is entered only at creation and never re-entered, so no
+work the workstream produced can be hidden behind it. A provisioning attempt
+that failed stays in the stage and reports the marker too, which is why the
+marker names the stage and not "checking out". `pending` is a state, not a
+failure, and not an empty diff: the TUI's Pending Changes block and diff panel,
+the web Changes tab, `hashd show` and `hashd diff` print the marker verbatim in
+place of a stat or a "no changes" line.
 
 ### Status box change sizes
 
@@ -273,10 +301,10 @@ rather than blanking the line.
 Wall time of one `GET /workstreams/web_story_import/changes?project=hashd`
 read, before and after the `microcommits` list:
 
-| Revision | Median | Range (10 warm reads) |
-|---|---|---|
-| Before: `37d5f804b0eb3c7c323701d50ca74f214a410dc2` | ~90 ms (90.4) | 83.1-100.2 ms |
-| After: COMMIT-MC_LOC_LIST-FIX-001 tree, committed as `94e86f51764621fe7680d5a4a39e411e3e704db6` | ~118 ms (118.3) | 104.4-130.1 ms |
+| Revision                                                                                        | Median          | Range (10 warm reads) |
+| ----------------------------------------------------------------------------------------------- | --------------- | --------------------- |
+| Before: `37d5f804b0eb3c7c323701d50ca74f214a410dc2`                                              | ~90 ms (90.4)   | 83.1-100.2 ms         |
+| After: COMMIT-MC_LOC_LIST-FIX-001 tree, committed as `94e86f51764621fe7680d5a4a39e411e3e704db6` | ~118 ms (118.3) | 104.4-130.1 ms        |
 
 Method: taken 2026-09-27 during the FIX-001 implement run. The live hashd
 project DB was copied with `sqlite3 .backup` into a scratch ops directory. A
@@ -301,8 +329,8 @@ resolution; a workstream whose done entries resolve also pays one
 
 ### TUI keybinding additions (diff panel active)
 
-| Key | Action | Notes |
-|---|---|---|
+| Key | Action                        | Notes                                                            |
+| --- | ----------------------------- | ---------------------------------------------------------------- |
 | `s` | Toggle side-by-side / unified | Only shown when diff panel is active and git-delta is installed. |
 
 ### Acceptance criteria
@@ -341,6 +369,7 @@ LINEAGE.md Phase 3 landed in PR #85. The full CLI and data layer already exist:
 - Output formats: `--format table` (default), `json`, `markdown`
 
 Key functions already implemented:
+
 - `git_blame()` in `orchestrator/git/branch.py` -- porcelain output for machine parsing
 - `get_commit_row()` in `orchestrator/lib/db.py` -- single commit lookup by SHA
 - `list_commits_by_story()` / `list_commits_by_workstream()` in `db.py` -- batch queries
@@ -367,8 +396,8 @@ If a SHA is not found in the commits table (pre-hashd code, manual edits, or ext
 
 When the diff panel is active and a file is selected in the file tree, a new keybinding becomes available:
 
-| Key | Action |
-|---|---|
+| Key | Action                                  |
+| --- | --------------------------------------- |
 | `I` | Show lineage view for the selected file |
 
 The lineage view replaces the diff content in the right panel with enriched per-line commit attribution:
@@ -380,11 +409,11 @@ The lineage view replaces the diff content in the right panel with enriched per-
 
 Navigation in the lineage view:
 
-| Key | Action |
-|---|---|
-| Arrow up/down | Move through lines |
-| Enter | Show lineage detail for the current line's commit |
-| Escape | Return to diff view |
+| Key           | Action                                            |
+| ------------- | ------------------------------------------------- |
+| Arrow up/down | Move through lines                                |
+| Enter         | Show lineage detail for the current line's commit |
+| Escape        | Return to diff view                               |
 
 ### Lineage detail display
 
@@ -414,12 +443,12 @@ The TUI lineage view may need a richer return type than the CLI formatters produ
 
 ### TUI keybinding summary (when lineage view is active)
 
-| Key | Action |
-|---|---|
-| `I` | Toggle lineage view on/off for the selected file |
-| Up/Down | Navigate lines in lineage view |
-| Enter | Show lineage detail modal for current line's commit |
-| Escape | Return to diff view |
+| Key     | Action                                              |
+| ------- | --------------------------------------------------- |
+| `I`     | Toggle lineage view on/off for the selected file    |
+| Up/Down | Navigate lines in lineage view                      |
+| Enter   | Show lineage detail modal for current line's commit |
+| Escape  | Return to diff view                                 |
 
 ### Acceptance criteria
 
@@ -469,27 +498,27 @@ Step 2 shows files changed in the current workstream diff (base..HEAD) or in a s
 
 ## Implementation Order
 
-| Step | Depends on | Scope | New CLI commands | New TUI keys |
-|------|-----------|-------|-----------------|-------------|
-| 1 | delta installed | Small | None | None (existing `d` key, better output) |
-| 2 | Step 1 | Medium | None | `s` (side-by-side toggle) |
-| 2.5 | Step 2 | Medium | None (CLI `hashd lineage` already exists, PR #85) | `I` (lineage) |
-| 3 | Step 2.5 | Large | Extensions to `hashd diff` and `hashd lineage` | TBD |
+| Step | Depends on      | Scope  | New CLI commands                                  | New TUI keys                           |
+| ---- | --------------- | ------ | ------------------------------------------------- | -------------------------------------- |
+| 1    | delta installed | Small  | None                                              | None (existing `d` key, better output) |
+| 2    | Step 1          | Medium | None                                              | `s` (side-by-side toggle)              |
+| 2.5  | Step 2          | Medium | None (CLI `hashd lineage` already exists, PR #85) | `I` (lineage)                          |
+| 3    | Step 2.5        | Large  | Extensions to `hashd diff` and `hashd lineage`    | TBD                                    |
 
 ---
 
 ## Files Touched (estimated)
 
-| File | Steps | Nature of change |
-|------|-------|-----------------|
-| `packages/hashd-tui/src/hashd_tui/watch/detail_git.py` | 1, 2 | Replace diff rendering with delta, add file stat parsing |
-| `packages/hashd-tui/src/hashd_tui/watch/detail.py` | 1, 2, 2.5 | Panel width passing, left column context switching, lineage view, keybindings |
-| `packages/hashd-tui/src/hashd_tui/watch/detail_display.py` | 2, 2.5 | File tree widget, lineage view widget |
-| `packages/hashd-tui/src/hashd_tui/watch/base.py` | 2 | Possible new cached list widget for file tree |
-| `orchestrator/commands/lineage.py` | 2.5 | Refactor enrichment logic into shared function for TUI reuse (already exists from PR #85) |
-| `packages/hashd-tui/src/hashd_tui/watch/detail_lineage.py` (new) | 2.5 | TUI lineage view widget and lineage detail modal |
-| `README.md` | 1 | Document delta as optional |
-| `WF.md` | 1, 2, 2.5 | Document new keybindings |
+| File                                                             | Steps     | Nature of change                                                                          |
+| ---------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
+| `packages/hashd-tui/src/hashd_tui/watch/detail_git.py`           | 1, 2      | Replace diff rendering with delta, add file stat parsing                                  |
+| `packages/hashd-tui/src/hashd_tui/watch/detail.py`               | 1, 2, 2.5 | Panel width passing, left column context switching, lineage view, keybindings             |
+| `packages/hashd-tui/src/hashd_tui/watch/detail_display.py`       | 2, 2.5    | File tree widget, lineage view widget                                                     |
+| `packages/hashd-tui/src/hashd_tui/watch/base.py`                 | 2         | Possible new cached list widget for file tree                                             |
+| `orchestrator/commands/lineage.py`                               | 2.5       | Refactor enrichment logic into shared function for TUI reuse (already exists from PR #85) |
+| `packages/hashd-tui/src/hashd_tui/watch/detail_lineage.py` (new) | 2.5       | TUI lineage view widget and lineage detail modal                                          |
+| `README.md`                                                      | 1         | Document delta as optional                                                                |
+| `WF.md`                                                          | 1, 2, 2.5 | Document new keybindings                                                                  |
 
 ---
 
@@ -534,15 +563,15 @@ silently overwrite work. Five rules enforce that:
   When a rebase conflict is generated-artifact noise (lockfiles, codegen
   output), the gate accepts `theirs` -- the branch's own copy of the
   artifact -- and lets the build re-derive the canonical content at the
-  rebased tip. It qualifies a conflicted path *before* overwriting it, on the
+  rebased tip. It qualifies a conflicted path _before_ overwriting it, on the
   clean pre-rebase tree, by asking whether the build **owns** it, not merely
-  whether the build *changed* it: the build runs on the intact tree (so its
+  whether the build _changed_ it: the build runs on the intact tree (so its
   output for each conflicted path is known), the paths are removed, and the
   build runs again -- a path the build recreates from nothing with exactly
   the bytes it produces is owned (an artifact already in sync is rewritten
   byte-identical, invisible to a status delta). A path the build does not
   recreate is hand-written (a formatter that rewrites a source in place
-  cannot recreate it from nothing); a path it recreates with *different*
+  cannot recreate it from nothing); a path it recreates with _different_
   bytes is a scaffold (a template copied over a missing file) and the
   branch's content is hand-authored -- neither is owned, the whole batch
   parks for a human, and those paths are never given `--theirs`. The same
@@ -578,10 +607,10 @@ silently overwrite work. Five rules enforce that:
   it) parks, and the tracked paths the build changed are committed as
   `Regenerate after rebase`. Park reasons an operator will meet:
   `conflicted path(s) the build does not regenerate: ...`, `conflicted
-  path(s) deleted on one side are not regeneration-subsumable: ... (DU)`,
+path(s) deleted on one side are not regeneration-subsumable: ... (DU)`,
   `regeneration does not recreate conflicted path(s) at the rebased tip:
-  ...`, and the bound guards `stopped more than the N commit(s) it
-  replays` / `restarted more than ...`; a failed rollback is appended as
+...`, and the bound guards `stopped more than the N commit(s) it
+replays` / `restarted more than ...`; a failed rollback is appended as
   `; rollback failed: ...`. Every park above, and a tip regeneration build
   that fails, times out or is cancelled, comes before the integration is
   proven and restores the pre-rebase branch. Once the replay has finished
@@ -617,7 +646,7 @@ silently overwrite work. Five rules enforce that:
   goes to the agent, logged), and hands the agent only what remains. A
   stop made only of owned paths is resolved with no agent invocation at
   all, and the resolve narrates it (`N build-owned file(s) taken for
-  regeneration, not sent to the agent`). Probing is bounded by the commit
+regeneration, not sent to the agent`). Probing is bounded by the commit
   count; past the bound, unprobed paths go to the agent. Once an agent is
   handed a stop, the later stops are the agent's: it completes the rest
   of the rebase itself (its prompt says so), a path first seen at a later
@@ -627,9 +656,9 @@ silently overwrite work. Five rules enforce that:
   removed and the build runs on the tip and must recreate each of them
   from the merged tree (the same proof the gate requires; a path the
   build does not recreate fails the resolve with `regeneration does not
-  recreate conflicted path(s) at the rebased tip: ...` and resets the
+recreate conflicted path(s) at the rebased tip: ...` and resets the
   branch -- an agent that regenerated a taken artifact itself is simply
-  confirmed by it), and every *tracked* path the build changed --
+  confirmed by it), and every _tracked_ path the build changed --
   including a generated file an agent hand-merged --
   is committed as `Regenerate after rebase` before the branch is verified
   or pushed; untracked strays the build introduced are removed, never
@@ -692,12 +721,12 @@ silently overwrite work. Five rules enforce that:
   cause re-runs the configured verification once on the revision it tried
   to publish, and a failure there parks like any other verification
   failure. The local `merge
-  --no-ff` retry loop
+--no-ff` retry loop
   (`AttemptMergeWithRetry`, used by the merge flow's local merge) still
   hands every conflict to the agent. Before any of its rebases, the
   resolver confirms the worktree is on the workstream's branch -- `git
-  rebase` acts on HEAD, and a worktree parked on another branch would
-  have *that* branch rewritten and force-pushed under the workstream's
+rebase` acts on HEAD, and a worktree parked on another branch would
+  have _that_ branch rewritten and force-pushed under the workstream's
   name -- and refuses a wrong checkout (a detached HEAD, or another
   branch, named as such), leaving the checkout where it was and parking
   where that leg's failures park; the entry's loss-free debris stash and
@@ -730,7 +759,7 @@ silently overwrite work. Five rules enforce that:
   network bound, once per rebase leg), and a heal that runs out of it
   parks with the reason and the tree restored; a rollback that itself
   fails is named in the reason rather than hidden behind "unchanged". A build that restores files from the index (`git checkout
-  -- path`, `git restore path`, a stash pop) cannot make a hand-written
+-- path`, `git restore path`, a stash pop) cannot make a hand-written
   path read as owned: the probes and the tip proof remove a candidate from
   the index as well as the tree before asking the build to recreate it. A
   build that restores from a named commit (`git checkout HEAD -- path`,
@@ -822,7 +851,7 @@ The dashed edges are the gap: `merge_conflicts` is the state whose
 purpose is conflict resolution, and no publish verb routes into it. One
 operator edge does reach it solid -- `MergeApprovedPRLocked`, `hashd
 merge` on an approved PR, whose pre-merge rebase transitions there. It is
-the only operator route that *enters* the state from outside.
+the only operator route that _enters_ the state from outside.
 
 ai-resolve also has a solid edge back into `merge_conflicts` and is also
 an operator verb (`i`), but it is reachable only from that state to begin
@@ -872,12 +901,12 @@ approved-PR merge.
   `RunGit(..., "rebase", <ref>)`, so the compiler cannot reach them and
   each answers for itself:
 
-  | Site | Reached from | Guarded |
-  |---|---|---|
-  | `mergeflow/resolve.go` | ai-resolve | yes |
-  | `mergeflow/pre_validate.go` | `hashd merge`, via `PrepareRebasedBranch` | yes, twice -- before `syncBranch`'s `pull --ff-only` and again before the rebase |
-  | `runflow/mergegate_rebase.go` | the merge gate, via `HandleRebase` | **no** |
-  | `runflow/mergegate_regen.go` | the merge gate's regeneration retry | **no** |
+  | Site                          | Reached from                              | Guarded                                                                          |
+  | ----------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------- |
+  | `mergeflow/resolve.go`        | ai-resolve                                | yes                                                                              |
+  | `mergeflow/pre_validate.go`   | `hashd merge`, via `PrepareRebasedBranch` | yes, twice -- before `syncBranch`'s `pull --ff-only` and again before the rebase |
+  | `runflow/mergegate_rebase.go` | the merge gate, via `HandleRebase`        | **no**                                                                           |
+  | `runflow/mergegate_regen.go`  | the merge gate's regeneration retry       | **no**                                                                           |
 
   The two guarded ones share a `wrongCheckout` helper rather than
   repeating the `symbolic-ref` call -- searching for the raw git command

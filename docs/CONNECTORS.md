@@ -63,6 +63,7 @@ ACCOUNT_DESTINATION = site_of                      # (typed text) -> the destina
 Import errors are logged and skipped. Namespace collisions (two connectors with the same `CONNECTOR_NAME`) are fatal -- hashd refuses to proceed.
 
 Shipped connectors are registered in `pyproject.toml`:
+
 ```toml
 [project.entry-points."hashd.connectors"]
 github = "hashd_connector_github"
@@ -153,20 +154,24 @@ declared and stay on `hashd project config set`.
   repository's own host (`gh api --hostname`), never `gh auth status`, which
   tests every account on every host.
 
-| Connector | Personal credential | Destination |
-|---|---|---|
-| GitHub issues | your account for the issues repository's host (`hashd connector login github`): an Issues token, or your forge login if you choose it; never the code repository's remote | `github.repo` |
-| Jira | your account (`hashd connector login jira`) | `jira.url` |
-| Azure Boards | your account (`hashd connector login azure`) | `azure.organization_url` |
-| ClickUp | your account (`hashd connector login clickup`) | `clickup.workspace_id` |
-| Confluence | your account (`hashd connector login confluence`): Atlassian email and API token; it declares no checks | `confluence.url` |
-| Figma | none yet: no authenticated check runs | -- |
+| Connector     | Personal credential                                                                                                                                                       | Destination                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| GitHub issues | your account for the issues repository's host (`hashd connector login github`): an Issues token, or your forge login if you choose it; never the code repository's remote | `github.repo`                                |
+| Jira          | your account (`hashd connector login jira`)                                                                                                                               | `jira.url`                                   |
+| Azure Boards  | your account (`hashd connector login azure`)                                                                                                                              | `azure.organization_url`                     |
+| ClickUp       | your account (`hashd connector login clickup`)                                                                                                                            | `clickup.workspace_id`                       |
+| Confluence    | your account (`hashd connector login confluence`): Atlassian email and API token; it declares no checks                                                                   | `confluence.url`                             |
+| Figma         | your account (`hashd connector login figma`): a personal access token                                                                                                     | none: every Figma account is for `figma.com` |
 
 Note the order: `hashd connector status jira` lists your Jira accounts;
 `hashd connector jira status` reports the project's Jira connector.
 
+A connector that serves one place declares no destination field: its
+`ACCOUNT_DESTINATION` names that place from no text, so `hashd connector login
+figma` needs no `--destination`.
+
 **Team-mode reads.** In team mode the connectors above with a personal
-credential (GitHub issues, Jira, Azure Boards, ClickUp, Confluence) are read the same way
+credential (GitHub issues, Jira, Azure Boards, ClickUp, Confluence, Figma) are read the same way
 a check is: with **your** credential for the project's destination, pinned to
 it, and never with the project's `config.yaml` credentials, the server's
 environment or its `gh` login. This covers reference search
@@ -188,9 +193,18 @@ stops mid-request can leave that request's directory behind; nothing removes it
 yet. The directory's file modes separate nothing between Hashd users, who share
 the server's OS account: the boundary is that no shared read path reaches it.
 
+**Planning reads as the story's owner.** The references a planning or PM
+attempt captures for a story (its typed `@connector:` references and attached
+items) are read with the account of whoever owns the story at that moment, so a
+reassignment carries through to the next attempt. The read uses a cache private
+to the attempt, as search and preview do; what it returns is copied into the
+story's captured inputs and the cache is removed. A story with no owner, or an
+owner with no usable account, fails the attempt with the reason and how to fix
+it; nothing is read with the project's or the server's credentials instead.
+
 **Chat references are unavailable** in team mode for these connectors:
-`@jira:KEY`, `@github:N`, `@azure:N`, `@clickup:ID` and `@confluence:ID` in a
-chat message are
+`@jira:KEY`, `@github:N`, `@azure:N`, `@clickup:ID`, `@confluence:ID` and
+`@figma:NAME` in a chat message are
 refused, in every turn and when the conversation is rebuilt, and not read with
 anyone's credential. What such a read returns is a file the agent reads on later
 turns, and nothing yet keeps it with the conversation. Before this change chat
@@ -199,13 +213,11 @@ deliberately. A bare `@jira` still lists the connector's tools. Preview an item,
 or paste what the conversation needs.
 
 Not yet covered (#1856):
+
 - Chat references to the connectors above: keeping what they return with
   the conversation, and answering later turns and rebuilds from it.
-- Figma, which has no personal accounts, is still read with the project's or
-  the server's credentials; so are references fetched during planning, and the
-  Figma tools an agent's MCP server runs.
 - Connector caches written before this change, and by solo mode, are not purged;
-  planning and implementation still read the shared caches.
+  implementation still unfolds references from the shared caches.
 - Autocomplete (`GET /connectors/autocomplete`) still offers the issue keys in
   the project's shared Jira cache to every signed-in user, with or without an
   account. That is separate from the cached listings above: `@jira:issues` and
@@ -269,6 +281,15 @@ checks these at discovery and serves them in `capabilities`, with no project:
   Markdown, so what Hashd adds to a note (an attribution) is escaped as
   Markdown there.
 
+- `CREATE_STORY` (#2918): called with the project directory, it returns an
+  object whose `find_or_create(story)` finds the tracker story carrying
+  `story.stamp`, else creates it as the fixed view (`TrackerStoryContract`:
+  title, problem, criteria, the line naming the hashd story and its link), and
+  returns its native id and whether it created it. The host's `create_story`
+  verb calls it behind the same gates as a write (`MODIFIES_EXTERNAL`,
+  configured, a readable destination). Settings only creation needs declare
+  `needed_for: create`.
+
 A stored account reaches the connector as the caller credential source:
 `HASHD_CONNECTOR_CREDENTIAL_SOURCE=caller` and `HASHD_CONNECTOR_CREDENTIALS`, a
 JSON object of credential field to value. A connector whose config loader uses
@@ -286,12 +307,12 @@ distribution that provides the entry point.
 
 ### Integration points
 
-| File | What |
-|---|---|
-| `cli.py` | Registers CLI commands from `CLI_COMMANDS` |
-| `commands/doctor.py` | Runs `DOCTOR_CHECKS` for configured connectors |
-| `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
-| `lib/agents_config.py` | Injects MCP config for `TOOLS` into agent commands |
+| File                         | What                                                        |
+| ---------------------------- | ----------------------------------------------------------- |
+| `cli.py`                     | Registers CLI commands from `CLI_COMMANDS`                  |
+| `commands/doctor.py`         | Runs `DOCTOR_CHECKS` for configured connectors              |
+| `lib/ref_resolver.py`        | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER`          |
+| `lib/agents_config.py`       | Injects MCP config for `TOOLS` into agent commands          |
 | `server/api/autocomplete.go` | REST endpoint for TUI autocomplete (reads connector caches) |
 
 ---
@@ -303,7 +324,7 @@ It declares `EVENT_HANDLER` and `EVENT_TYPES`. A project then subscribes the
 connector by name, in the connector's own section:
 
 ```yaml
-jira:
+azure:
   events:
     subscribe: [requirements_approved, workstream_ready_to_merge]
 ```
@@ -314,19 +335,69 @@ note, unless notes are switched off.
 
 **Types.** These are the note milestones: `requirements_approved`,
 `story_edited`, `clarification_answered`, `workstream_ready_to_merge`,
-`workstream_merged` and `workstream_pr_link`. Two more types are events only,
-never notes:
+`workstream_merged` and `workstream_pr_link`. `workstream_plan` is a note
+only, never an event: the plan a workstream's breakdown wrote, its
+micro-commits as stored, posted when it is made and again only when a later
+breakdown, whole or partial, replaces it, marked replacing. The
+`workstream_ready_to_merge` note carries the final review as recorded: its
+verdict and the reviewer's summary. A note is never cut; one the tracker
+refuses is a failed note on the story, whole. Three more types are events
+only, never notes:
+
 - `story_implemented`: the story reached implemented. This happens
   automatically once every workstream it owns has finished, or when an
   operator marks it implemented.
 - `story_abandoned`: the story was closed, cancelled, or abandoned.
+- `workstream_started`: the story's workstream moved into implementing for the
+  first time. It is published once per workstream, and later returns to
+  implementing publish nothing.
 
-Both are terminal, so each happens at most once per story. Unlike the
-workstream milestones, they speak for the whole story. An unknown name is
+`story_implemented` and `story_abandoned` are terminal, so each happens at
+most once per story. Unlike the workstream milestones, they speak for the
+whole story. An unknown name is
 ignored with a warning. A type the connector's `EVENT_TYPES` does not declare is refused at
 delivery, and the refusal is recorded on the story.
 
+**Default tracker behavior.** Subscription is still required. The default
+work-start milestone is `requirements_approved`. Existing `workstream_started`
+support and its connector mappings remain available. These defaults use the
+existing lifecycle settings as overrides; no new keys are needed.
+
+| Event | Azure Boards | ClickUp | GitHub Issues | Jira |
+| --- | --- | --- | --- | --- |
+| `requirements_approved` | InProgress; override: `azure.lifecycle.requirements_approved`. Missing default category: successful no-op; ambiguous states require `.states`. | Unchanged; override: `clickup.lifecycle.<list id>.requirements_approved` (`to` / `from`). | Unchanged, no default label; override: `github.lifecycle.labels.requirements_approved`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.requirements_approved` (`to` / `from`). |
+| `workstream_pr_link` | InProgress; override: `azure.lifecycle.workstream_pr_link`. Missing default category: successful no-op; ambiguous states require `.states`. | Unchanged; override: `clickup.lifecycle.<list id>.workstream_pr_link` (`to` / `from`). | Unchanged, no default label; override: `github.lifecycle.labels.workstream_pr_link`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.workstream_pr_link` (`to` / `from`). |
+| `workstream_ready_to_merge` | Resolved; override: `azure.lifecycle.workstream_ready_to_merge`. Missing default category: successful no-op; ambiguous states require `.states`. | Unchanged; override: `clickup.lifecycle.<list id>.workstream_ready_to_merge` (`to` / `from`). | Unchanged, no default label; override: `github.lifecycle.labels.workstream_ready_to_merge`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.workstream_ready_to_merge` (`to` / `from`). |
+| `workstream_merged` | Resolved; override: `azure.lifecycle.workstream_merged`. Missing default category: successful no-op; ambiguous states require `.states`. | Unchanged; override: `clickup.lifecycle.<list id>.workstream_merged` (`to` / `from`). | Unchanged, no default label; override: `github.lifecycle.labels.workstream_merged`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.workstream_merged` (`to` / `from`). |
+| `story_implemented` | Completed; override: `azure.lifecycle.story_implemented`. Missing default category: successful no-op; ambiguous states require `.states`. | Sole closed/done status; override: `clickup.lifecycle.<list id>.story_implemented` (`to` / `from`). Zero targets: successful no-op; several targets: refusal. | Close as completed; override: `github.lifecycle.close`. Labels are optional via `github.lifecycle.labels.story_implemented`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.story_implemented` (`to` / `from`). |
+| `story_abandoned` | Removed; override: `azure.lifecycle.story_abandoned`. Missing default category: successful no-op; ambiguous states require `.states`. | Sole closed/done status, the same as implementation because ClickUp has no abandoned status type; override: `clickup.lifecycle.<list id>.story_abandoned` (`to` / `from`). Zero targets: successful no-op; several targets: refusal. | Close as not planned; override: `github.lifecycle.close`. Labels are optional via `github.lifecycle.labels.story_abandoned`. | No inferred move; an unmapped subscribed event is refused; add `jira.lifecycle.story_abandoned` (`to` / `from`). |
+
+An equivalent default the tracker cannot express succeeds without a write;
+an explicitly configured move that cannot be made is refused. In Azure, set
+`azure.lifecycle.<event>.states` to select among several states in the target
+category; an unavailable category named by an override is refused.
+
+Moves go forward only, and finished items are never edited or reopened. Azure
+ranks state categories; configured ClickUp moves and Jira rely on the operator's
+`from` / `to` mapping to define progression. For an unmapped terminal event,
+ClickUp uses the List's sole `closed`/`done` status by default. GitHub adds
+milestone labels, never
+removing or ranking them. Only the story's own terminal events finish an item;
+a workstream milestone never does. Before terminal writes, including GitHub
+labels, `attachment_shared: "true"` leaves the item alone, `"false"` permits
+the action, and an absent or invalid fact is refused. The fact is a delivery
+snapshot from this project's records, with the limits described below.
+
+GitHub supplies no default labels: they belong to the repository and must
+already exist there. An absent `github.lifecycle.close` enables both terminal
+closes; an explicit list, including `[]`, is authoritative. **Compatibility:**
+a subscribed terminal event with a label and no close list now also closes;
+`close: []` preserves label-only behavior. Unmapped non-terminal events
+succeed without edits. Jira retains its configured transition behavior and
+infers no default move.
+
 **The event.** The host verb is `deliver_event`. Each event carries:
+
 - `type`, `occurrence` and `occurred_at` (when it was published, just after
   the commit);
 - the story, the workstream, and the attached item (`external_id`,
@@ -345,12 +416,16 @@ delivery, and the refusal is recorded on the story.
 - `credential`: whose account the connector acts with.
 
 **Actor and credential are separate.**
+
 - `actor` is a Hashd user (`kind: user` with `user_id`) or `kind: system`.
   It is never a guess. A user is the authenticated Hashd account that
   requested the action. It is not an independently verified person: a client
   that sends one shared account's token is reported as that account.
 - A workstream reaching ready to merge is caused by the system, and acted on
   with the workstream owner's account (`credential.kind: owner`).
+- A workstream starting implementation (`workstream_started`) is caused by the
+  system, and acted on with the workstream owner's account
+  (`credential.kind: owner`), as for ready to merge.
 - A merge or a PR link that Hashd performed (`hashd merge`, `hashd pr create`)
   is caused by the account that requested it. It is acted on with the
   workstream owner's account, as for ready to merge.
@@ -386,6 +461,7 @@ environment variable acts as whoever that belongs to, and Hashd cannot see or
 prevent it.
 
 **Delivery.**
+
 - Checked with the same gates as outbound notes: a connector that is
   configured, declares that it modifies external systems, and still points at
   the attachment's destination.
@@ -408,21 +484,21 @@ prevent it.
 There are two resolver implementations sharing the same connector-host surface:
 
 - **Python harness** (`lib/ref_resolver.py`) -- used by the planner and runner prompt assembly. Connector dispatch only; built-in artifact names in `BUILTIN_REFS` are skipped and resolve elsewhere.
-- **Go server** (`server/internal/refs/`) -- used by the chat generation path (`POST /chat/messages`, serving both `hashd chat` and the TUI). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home for server-side chat `@`-reference resolution.
+- **Go server** (`server/internal/refs/`) -- used by the chat generation path (a chat session message, serving `hashd chat`, the TUI and the Web). One entry point unfolds every `@`-reference in place so the agent never sees a raw token: built-in artifacts load **locally in Go** from the project DB / git / filesystem, and connector references dispatch through the same connector host via `server/internal/connectors`. This is the Go-canonical home for server-side chat `@`-reference resolution.
 
 Both call the identical connector-host verbs (`capabilities`, `resolve_artifacts`), so connectors plug into either resolver unchanged.
 
 ### Reference types
 
-| Pattern | What happens |
-|---|---|
-| `@figma:job-list` | Resolves to cached file references (JSON, SVG, TXT) |
-| `@github:42` | Resolves to cached/fetched GitHub issue details |
-| `@jira:PROJ-123` | Resolves to cached/fetched Jira issue details |
-| `@jira:123` | Resolves using default project key from config |
-| `@jira:OTHER:456` | Resolves to `OTHER-456` (cross-project) |
-| `@figma` (bare) | Resolves to tool listing + cached artifacts manifest |
-| `@diff`, `@story`, etc. | Built-in refs -- not routed to connectors |
+| Pattern                 | What happens                                         |
+| ----------------------- | ---------------------------------------------------- |
+| `@figma:job-list`       | Resolves to cached file references (JSON, SVG, TXT)  |
+| `@github:42`            | Resolves to cached/fetched GitHub issue details      |
+| `@jira:PROJ-123`        | Resolves to cached/fetched Jira issue details        |
+| `@jira:123`             | Resolves using default project key from config       |
+| `@jira:OTHER:456`       | Resolves to `OTHER-456` (cross-project)              |
+| `@figma` (bare)         | Resolves to tool listing + cached artifacts manifest |
+| `@diff`, `@story`, etc. | Built-in refs -- not routed to connectors            |
 
 ### ARTIFACT_RESOLVER contract
 
@@ -437,10 +513,22 @@ def resolver(project_dir: Path, refs: list[str], fetch: bool) -> dict[str, Resol
 - `fetch=False`: cache only, error if missing (batch stages)
 - Returns `ResolvedArtifact` with file references (path, format, size, description) or error
 - Never raises -- errors in the `ResolvedArtifact.error` field
+- A tracker connector may also return `projection`, an `ItemProjection`: the
+  item's type, state, revision, tags, display-only `attributes` in the
+  tracker's own words, parent and child `links`, and `fields`, each a
+  `ProjectedField` holding one field converted to Markdown (whole, with the
+  SHA-256 of its bytes) under a role: `description`, `acceptance_criteria`,
+  `repro_steps` or `other`. The connector maps its own facts into the neutral
+  hints `story_type_hint` (`feature` or `bug`) and `target_repo_hint`. The
+  contract names no tracker's concepts. Convert HTML with
+  `hashd_client.html_markdown.html_to_markdown`, so every connector projects
+  the same HTML to the same bytes; also write the Markdown as an `md` file in
+  `files`, which is what the planner reads.
 
 ### Resolution output
 
 Specific refs get file metadata:
+
 ```
 @figma:job-list resolved to:
   Source: Figma: Job List (375x812pt)
@@ -450,6 +538,7 @@ Specific refs get file metadata:
 ```
 
 Bare refs get tool listing + cached data:
+
 ```
 @figma capabilities:
   Available tools:
@@ -462,6 +551,7 @@ Bare refs get tool listing + cached data:
 ### Error handling
 
 Resolution failure triggers a human gate:
+
 - Interactive: retry/continue/abort prompt. Continue allows optional user context.
 - Non-interactive (`--yes`): continues with missing-artifact note injected.
 - Prefect flows: transition to blocked state.
@@ -473,6 +563,7 @@ Same ref appearing multiple times: first occurrence gets full metadata, subseque
 ### Substitution safety
 
 `apply_substitutions()` uses context-aware regex:
+
 - Bare `@mock` won't match inside `@mock:test` (colon in negative lookahead)
 - `@figma:job` won't match inside `@figma:job-list` (word/hyphen boundary)
 
@@ -486,32 +577,37 @@ Same ref appearing multiple times: first occurrence gets full metadata, subseque
 @dataclass(frozen=True)
 class ToolSpec:
     name: str                  # globally unique, model-facing
-    description: str           # one-line for prompt
-    parameters: dict[str, str] # param_name -> description
-    handler: Callable          # (project_dir, args: dict) -> str
-    include_stages: list[str]  # empty = all stages
-    exclude_stages: list[str]  # empty = no exclusions
+    description: str           # one line, shown to the agent
+    parameters: dict[str, str] # param_name -> description; each an optional string
+    handler: Callable[[ToolContext, dict[str, str]], str]
+
+@dataclass(frozen=True)
+class ToolContext:
+    settings: dict[str, str]   # the connector's effective settings (declared fields, never secrets)
+    account: dict[str, str]    # the work owner's stored account; empty without LOGIN_METHODS
+    destination: str           # where that account is for
+    cache_dir: Path            # the connector's own cache
 ```
 
-### Two delivery paths
+A handler uses only its context: it reads no project configuration, environment
+variable or other login. Core and the connector host speak tool contract
+version `TOOL_CONTRACT_VERSION` (1); a call at any other version is refused,
+with no compatibility path.
 
-**Prompt-based dispatch** (for `hashd chat` one-shot mode):
-- Tools described in a prompt section appended by `format_tools_section()`
-- Model signals tool calls via `tool_call` fenced blocks
-- Harness parses, dispatches to handler, injects result, re-invokes
-- Max 10 iterations per turn, human continuation at limit
+### Where tools run
 
-**MCP server** (for agent stages -- implement, review):
-- `mcp_server.py` wraps connector tools via FastMCP
-- `mcp_config.py` generates per-agent config (7 agents supported)
-- Auto-injected into agent commands via `get_stage_command()`
-- Agents call tools natively -- no prompt-based dispatch needed
+Tools run on the server, in its connector host. An agent reaches them, wherever
+it runs, through hashd's connector tool server (`hashd-tools`, `hashd code
+connector-tools-mcp`), which forwards with the run's token:
 
-### Tool loading
+- `GET /connector-tools?project=<p>` lists the tools the project's configured
+  connectors declare.
+- `POST /connector-tools/call?project=<p>` with `{connector, tool, arguments}`
+  runs one. Only a declared tool, and only its declared parameters, are
+  accepted.
 
-Lazy -- only when `@connector` is detected in the prompt:
-- `@figma:job-list` or bare `@figma` -> load Figma tools
-- No `@figma` in prompt -> no Figma tools
+The tool server holds no connector package and no connector credential, so a
+runner carries neither.
 
 ### Error handling
 
@@ -548,30 +644,48 @@ Snapshot is copied by `snapshot_connector_caches()` during `provision_workstream
 
 ---
 
-## 5. MCP Server
+## 5. Connector Tool Server
 
-`packages/hashd-client/src/hashd_client/mcp_server.py` -- FastMCP stdio server that exposes connector tools to AI agents.
+`server/internal/cli/connector_tools_mcp.go` -- the stdio MCP server
+(`hashd-tools`) through which an agent calls connector tools.
 
 ### How it works
 
 1. Orchestrator writes MCP config before agent invocation (format varies per agent)
-2. Agent starts the hashd MCP server as a stdio subprocess
-3. Server discovers configured connectors, registers their tools with typed signatures
-4. Agent calls tools natively during execution
-5. Server logs timing for every tool call and startup
+2. Agent starts `hashd code connector-tools-mcp --project <p>` as a stdio subprocess
+3. On `tools/list` it lists the project's tools from the server (`GET /connector-tools`)
+4. On `tools/call` it forwards the call (`POST /connector-tools/call`) and returns the result, or the server's refusal as an error result
 
 ### Supported agents
 
-| Agent | Config mechanism |
-|---|---|
-| Claude Code | `--mcp-config` flag with JSON file |
-| Codex | `.codex/config.toml` in worktree |
-| Gemini CLI | `.gemini/settings.json` in worktree |
-| OpenCode | `OPENCODE_CONFIG_CONTENT` environment overlay (`mcp` key) |
-| Kimi Code | `--mcp-config-file` flag with JSON file |
-| Qwen Code | `.qwen/settings.json` in worktree |
+| Agent       | Config mechanism                                          |
+| ----------- | --------------------------------------------------------- |
+| Claude Code | `--mcp-config` flag with JSON file                        |
+| Codex       | `.codex/config.toml` in worktree                          |
+| Gemini CLI  | `.gemini/settings.json` in worktree                       |
+| OpenCode    | `OPENCODE_CONFIG_CONTENT` environment overlay (`mcp` key) |
+| Kimi Code   | `--mcp-config-file` flag with JSON file                   |
+| Qwen Code   | `.qwen/settings.json` in worktree                         |
 
 File-based configs are excluded from git via `.git/info/exclude`.
+
+### Tools run as the work's owner
+
+A connector's tools act for the person who owns the work, in every mode: the
+owner the run's token recorded when the stage started (the workstream's, or the
+story's when there is no workstream), so a reassignment takes effect at the
+next stage. On a solo server unowned work is the server owner's.
+
+- For a connector that declares `LOGIN_METHODS`, the server runs the tool in a
+  connector host handed only that person's stored account for the connector's
+  destination, and pinned to it: the host refuses before the tool runs if the
+  connector points elsewhere. A credential value in what the tool returns is
+  replaced with `[REDACTED]`.
+- With no usable account (none stored, unowned team work, a declaration the
+  host refused) the tool does not run, and the call is refused naming the
+  sign-in command. Project configuration and environment credentials are never
+  read instead. The stage itself is never refused for it.
+- The agent never sees a connector credential: the account stays on the server.
 
 ---
 
@@ -591,7 +705,7 @@ PRs are unchanged.
   `LOGIN_METHODS`:** each user can connect a personal account for one
   destination on the connector's Web page, or with
   `hashd connector login <connector> --destination <site, Workspace ID or
-  organization> [--method NAME] [--field KEY=VALUE]...`, and check or remove it
+organization> [--method NAME] [--field KEY=VALUE]...`, and check or remove it
   with `hashd connector status` / `logout`. `--method` picks one of the
   connector's sign-in methods (asked on a terminal when it has several);
   fields that are not secret go in `--field` or are asked; the secret is read
@@ -650,6 +764,7 @@ connector's own section (`github`, `jira`, `azure`, `clickup`).
 **Defining an account (server administrators).** Only a server administrator
 defines fallback accounts, in the central config. This is the file
 `hashd config set` writes, and it needs an owner or admin in team mode.
+
 - `destinations`: where the account may post, as the connector names its
   account destinations -- sites, organizations, Workspace IDs, or GitHub hosts
   (a repository URL stands for its host).
@@ -665,10 +780,10 @@ jira:
   outbound_notes:
     fallback_accounts:
       hashd-automation:
-        label: Hashd automation                 # the name the note gives for who posted it
+        label: Hashd automation # the name the note gives for who posted it
         destinations: [https://example.atlassian.net]
         email: hashd-bot@example.com
-        api_token_env: HASHD_NOTES_JIRA_TOKEN   # or pat_env, for Server/DC
+        api_token_env: HASHD_NOTES_JIRA_TOKEN # or pat_env, for Server/DC
 github:
   outbound_notes:
     fallback_accounts:
@@ -684,6 +799,7 @@ define an account itself, name a different environment variable, or send an
 account's credential anywhere else.
 
 The rules:
+
 - The person's own connected account is always used first.
 - The fallback posts only when that person has no account for the destination,
   and only to a listed destination.
@@ -702,15 +818,27 @@ The rules:
 
 GitHub issue reference resolver. Use `@github:42` in stories, acceptance
 criteria, or chat to embed issue context. The connector reads issue details on
-demand and caches them; it does not create stories, create issues, or run a sync
-daemon. Its remote writes are hashd's outbound story notes -- a comment or a
+demand and caches them; it does not run a sync daemon. `hashd story link
+STORY-x` with no reference finds or creates the story's issue: it looks in
+`github.repo` for issues, open or closed (pull requests excluded), labelled
+`hashd:<project>:<STORY-x>`. One is linked; two or more are refused, each
+named. Otherwise the label is created if it is missing, and one issue is
+created with the story's title, a body holding the problem, the acceptance
+criteria and the "Created by hashd" line (a link to the story unless
+`github.link_back` is `"false"` or hashd's `web.public_url` is localhost),
+and the stamp label, then linked as `@github:<n>`. Its remote writes are that
+created issue and its label, hashd's outbound story notes -- a comment or a
 pull-request link on an issue already attached to a story -- and, only for the
-lifecycle events a project subscribes it to and maps to a label, an added label
-on that issue (connector events, above), and, only for a story's own
-`story_implemented` or `story_abandoned` event that the project lists in
-`github.lifecycle.close`, a close with a fixed reason, never while another
-story in this project still in progress shares the issue. All are refused
-unless the configured repository is still the one the issue was attached from.
+lifecycle events a project subscribes it to, an optional mapped label on that
+issue (connector events, above), and default closing on the story's own
+`story_implemented` (completed) and `story_abandoned` (not planned) events,
+never while another story in this project still in progress shares the issue.
+An explicit `github.lifecycle.close` list overrides the defaults, including
+`[]` to disable closing. A subscribed terminal event with a label and no close
+list now also closes; `close: []` preserves label-only behavior. There are no
+default labels, and unmapped non-terminal events succeed without edits. All but
+the created issue and its label are refused unless the configured repository
+is still the one the issue was attached from.
 It never reopens an issue or removes a label.
 
 See [packages/hashd-connector-github/src/hashd_connector_github/README.md](packages/hashd-connector-github/src/hashd_connector_github/README.md).
@@ -727,7 +855,20 @@ Jira issue reference resolver for Jira Cloud (REST API v3) and Server/Data
 Center (REST API v2). Use `@jira:PROJ-123`, `@jira:123`, or
 `@jira:OTHER:456` in stories, acceptance criteria, or chat to embed issue
 context. The connector reads issue details on demand and caches them; it does
-not create stories, create issues, or run a sync daemon.
+not create hashd stories or run a sync daemon. Besides the issue
+`hashd story link` creates (below), its remote writes are hashd's outbound
+story notes (a comment or a pull-request link) and, opt-in, a status move for a
+subscribed event mapped in `jira.lifecycle`. Notes and moves act only on an
+issue already attached to a story, refused unless `jira.url` is still the site
+the issue was attached from. Only the story's own terminal events
+(`story_implemented`, `story_abandoned`) may move an issue to a status in Jira's
+done category, and not while `attachment_shared` says another unfinished story
+still uses it; nothing reopens an issue. See
+[Lifecycle moves](packages/hashd-connector-jira/src/hashd_connector_jira/README.md#lifecycle-moves).
+`hashd story link STORY-xxx PROJ-123` links a story to an existing Jira issue,
+and `hashd story link STORY-xxx` finds the issue labelled for it in
+`jira.project_key` or creates one of type `jira.issue_type`; see "Tracker
+stories" in [WF.md](../WF.md).
 
 See [packages/hashd-connector-jira/src/hashd_connector_jira/README.md](packages/hashd-connector-jira/src/hashd_connector_jira/README.md).
 
@@ -748,22 +889,68 @@ or its Web page): their Atlassian email and an API token.
 ### Azure Boards
 
 Azure DevOps Services work items use `@azure:123` or the shared reference picker.
-Search stays within the configured organization/project; native state, assignee
-and type filters preserve Azure values. Explicit numeric references can read any
+Search stays within the configured organization/project, or the projects
+`azure.intake.sources` names in that organization; native state, assignee and
+type filters preserve Azure values, and area path, iteration, tag, team,
+`changed_since` and saved-query filters scope the listing to the team's board,
+with `azure.intake` setting the picker's defaults. Explicit numeric references can read any
 work item accessible to the credential within that organization, including other
 projects. The configured project limits search, not direct-ID access; Azure
 credential permissions and existing Hashd caller/project authorization still apply.
 Full returned JSON reaches preview and
 the same owned planning capture as typed references. Related targets and history
 are not implicitly fetched, and there are no ownership claims. The only remote
-writes are outbound notes on attached items and, when a project configures them
-under `azure.lifecycle`, forward-only state moves on connector events. Only a
-story's own `story_implemented` or `story_abandoned` event moves an item to
-Completed or Removed, and not while another story in this project still in
-progress shares it (`attachment_shared`).
+writes include outbound notes on attached items and forward-only state moves on
+events subscribed through `azure.events.subscribe`. By default,
+`requirements_approved` and `workstream_pr_link` target `InProgress`,
+`workstream_ready_to_merge` and `workstream_merged` target `Resolved`,
+`story_implemented` targets `Completed`, and `story_abandoned` targets `Removed`.
+An explicit `azure.lifecycle.<event>` entry replaces its default and retains
+category and state validation; `workstream_started` requires such an entry.
+A missing category succeeds without a write only for a default; several states
+require a choice in `azure.lifecycle.<event>.states` even for a default.
+Finished items are never touched. Only a story's own terminal events finish an
+item, and only when `attachment_shared` is `"false"`: `"true"` leaves it alone,
+while an absent or unknown fact refuses the terminal move. The fact covers
+other stories still in progress in this project.
+`hashd story link STORY-xxx 1234` links a story to an existing Azure DevOps
+story, `hashd story link STORY-xxx` finds the work item tagged for it in
+`azure.project` or creates one of type `azure.work_item_type`, and
+`hashd story unlink STORY-xxx` removes the link in hashd only; see "Tracker
+stories" in [WF.md](../WF.md).
 Use the existing project configuration editors with exactly one PAT or externally
 supplied Entra access token. Ordinary authorized config readback remains unchanged,
 not masked secret storage. See the [provider guide](packages/hashd-connector-azure-devops/src/hashd_connector_azure_devops/README.md).
+
+Azure Boards permission selection follows the operation, including POST reads:
+
+| Boards operation | Required resource-prefixed permission | Retained grant satisfying it |
+| --- | --- | --- |
+| Item/reference reads; fields, types, states and team settings; saved-query definition/execution; WIQL, batch and search POSTs; story-stamp lookup | `499b84ac-1321-427f-aa17-267ca6975798/vso.work` | `499b84ac-1321-427f-aa17-267ca6975798/vso.work_write` inherits Work read |
+| Work-item creation/updates, comments, PR relations and lifecycle state changes | `499b84ac-1321-427f-aa17-267ca6975798/vso.work_write` | Work write directly |
+| Azure Repos PR lookup before adding an artifact relation | `499b84ac-1321-427f-aa17-267ca6975798/vso.code` | `499b84ac-1321-427f-aa17-267ca6975798/vso.code_write` inherits Code read |
+
+An explicit Bearer `insufficient_scope` response names the failed operation's
+permission, the retained write grant and its read inheritance. Have a tenant
+administrator configure that grant in the supplying app's Azure DevOps delegated
+permissions and grant administrator consent. Then obtain a replacement token from
+the external supplier and store it for the selected connector destination:
+
+```sh
+hashd connector login azure --destination https://dev.azure.com/your-organization
+```
+
+Choose the Entra access-token credential and retry the failed operation manually.
+This updates the connector account; `hashd forge login` uses a separate account
+and cannot renew it. In a configuration/environment credential route, replace
+that route's effective `azure.access_token` or `AZURE_DEVOPS_ACCESS_TOKEN` instead;
+clear a displaced environment override when the configured value should win.
+`hashd connector azure status` shows the destination, and
+`hashd connector azure configure` corrects it. PATs retain their existing Basic
+credential and Work Items/Code permission guidance. A plain 403 leaves
+project/item authorization and token permissions uncertain; expiry and
+connectivity failures keep their own diagnoses. Rejection bodies and challenges
+may echo a credential and are not copied into diagnostics.
 
 ### ClickUp
 
@@ -776,13 +963,23 @@ URLs are not accepted. Every read verifies the returned Workspace against
 that Workspace, including other Lists. Full returned task JSON reaches preview and
 the same owned planning capture as typed references. Comments, attachment files
 and Docs are not fetched; there are no ownership claims. Its remote writes are
-hashd's outbound story notes (a comment or a pull-request link) and, opt-in, a
-status move for a subscribed event mapped per List in `clickup.lifecycle`. Both
+tracker task creation, hashd's outbound story notes (a comment or a pull-request link) and, opt-in, a
+status move for a subscribed event. An unmapped `story_implemented` or
+`story_abandoned` moves any open/custom task to its List's sole closed/done
+status; no terminal status leaves it unchanged and succeeds. Several terminal
+statuses refuse before writing: configure `clickup.lifecycle.<list id>.<event>`
+with `to` and `from` to choose. A configured List/event move replaces the
+default, resolves names ignoring case, and only moves from its named `from`
+statuses to `to`. Other unmapped events succeed without a move. Notes and status moves
 act only on a task already attached to a story, refused unless
 `clickup.workspace_id` is still the Workspace the task was attached from. Only
 the story's own terminal events (`story_implemented`, `story_abandoned`) may
 move a task to a closed or done status, and not while `attachment_shared` says
 another unfinished story still uses it; nothing reopens a task.
+`hashd story link STORY-xxx 86a4xte6z` links a story to an existing ClickUp
+task, `hashd story link STORY-xxx` finds the task tagged for it in `clickup.list_id`
+or creates one in `clickup.list_id`, and `hashd story unlink STORY-xxx` removes
+the link in hashd only; see "Tracker stories" in [WF.md](../WF.md).
 Use the existing project configuration editors with exactly one personal token or
 externally supplied OAuth access token. Ordinary authorized config readback remains
 unchanged, not masked secret storage. See the [provider guide](packages/hashd-connector-clickup/src/hashd_connector_clickup/README.md).
@@ -790,6 +987,7 @@ unchanged, not masked secret storage. See the [provider guide](packages/hashd-co
 ## 7. Future Connectors
 
 ### Linear, Shortcut
+
 Same connector contract, different API clients.
 
 ---
@@ -849,6 +1047,7 @@ def is_configured(project_dir):
 ```
 
 Wire it up:
+
 ```python
 # __init__.py (add)
 from hashd_connector_linear.config import is_configured
@@ -970,6 +1169,7 @@ CACHE_STRATEGY = "snapshot"  # or "live" (default), or callable
 ### What you get for free
 
 Without writing any integration code in core:
+
 - `hashd doctor` validates your config and runs your health checks
 - `@linear:ref` resolves in every prompt surface
 - Your tools appear in MCP and chat

@@ -1,7 +1,8 @@
 # GitHub Connector
 
-Resolves GitHub issue references into prompt/chat context. It does not create
-hashd stories, create GitHub issues, or run a background sync daemon.
+Resolves GitHub issue references into prompt/chat context, and finds or
+creates the GitHub issue for a hashd story when one is linked without a
+reference. It does not create hashd stories or run a background sync daemon.
 
 ## Setup
 
@@ -42,6 +43,17 @@ github:
 If `github.repo` is omitted, the connector attempts to infer the repository from
 the GitHub CLI in the configured project repo.
 
+**Tracker stories (#2918).** `hashd story link STORY-x` with no reference finds
+the issue labelled `hashd:<project>:<STORY-x>` in `github.repo` (required for
+this; never inferred), open or closed, pull requests excluded, else creates
+one: the label is created if it is missing, the issue's title is the story's
+title, its Markdown body holds the problem, the acceptance criteria and a line
+naming the hashd story (every story value literal, in a fenced code block), a
+link to it unless `link_back: "false"` or hashd's `web.public_url` is
+localhost, and its label is the stamp. Two or more labelled issues are refused,
+each named; link one by its number. Creating needs **write** access to issues
+and labels in the repository.
+
 ## Health Checks
 
 `hashd doctor` validates:
@@ -70,11 +82,12 @@ connector resolves to (`REMOTE_SCOPE`, `https://<host>/<owner>/<repo>`) is still
 the one the issue was attached from, and `gh --repo` is pinned to that same
 host-qualified repository. A `gh` timeout is reported as possibly posted.
 
-## Lifecycle labels (opt-in connector events)
+## Lifecycle labels (optional, on subscribed connector events)
 
 A project can have a label added to an attached issue when a Hashd lifecycle
-event happens. Both halves are the project's choice, and nothing happens
-without both:
+event happens. Subscription opts in to delivery; labels are optional and have
+no defaults, since label names belong to the repository. An unmapped
+non-terminal event succeeds without editing the issue:
 
 ```yaml
 github:
@@ -87,7 +100,8 @@ github:
 ```
 
 The events this connector takes are `requirements_approved`,
-`workstream_ready_to_merge`, `workstream_pr_link` and `workstream_merged`, and
+`workstream_started`, `workstream_ready_to_merge`, `workstream_pr_link` and
+`workstream_merged`, and
 the story's own terminal events `story_implemented` and `story_abandoned`
 (below).
 
@@ -104,9 +118,10 @@ Other rules:
 - **A closed issue is not edited.** The event succeeds without touching it.
   The check is a read before the write, so an issue closed in between can
   still get the label. Nothing ever reopens it.
-- **A subscribed event with no label mapped is refused**, with the key to set.
-  The refusal is recorded on the story. So is a `lifecycle` or `labels` value
-  that is not a mapping.
+- **An absent label mapping is accepted for every subscribed event.** An
+  explicitly invalid label (including a blank or non-string value) is refused
+  and recorded on the story, as is a `lifecycle` or `labels` value that is not
+  a mapping. Remove the event's label mapping to request no label.
 - **Each mapping is exactly one label.** `gh --add-label` splits its value on
   commas and parses double quotes, so a label containing either is refused
   rather than turned into something else.
@@ -117,26 +132,29 @@ Other rules:
 The label is added through the same host-pinned `gh --repo` and credential
 path as the notes.
 
-## Closing on the story's own terminal events (opt-in)
+## Default closing on the story's own terminal events
 
 The workstream and approval events above never close an issue: an issue is
 attached to a story, and a workstream merging is not the story being done. The
-story's own terminal events can, when the project lists them:
+story's own terminal events close it by default once subscribed, without any
+label or lifecycle configuration:
 
 ```yaml
 github:
   events:
     subscribe: [story_implemented, story_abandoned]
-  lifecycle:
-    close: [story_implemented, story_abandoned]
-    labels:
-      story_implemented: "hashd: done"   # optional, added before the close
 ```
 
 - **The reasons are fixed:** `story_implemented` closes the issue as
-  *completed*, `story_abandoned` as *not planned*. `close` is a list of those
-  two names only; anything else (a bare string, a mapping, another event) is
-  refused.
+  *completed*, `story_abandoned` as *not planned*. An absent
+  `github.lifecycle.close` enables both. An explicit list is authoritative:
+  `close: []` disables all closing, and `close: [story_implemented]` closes
+  only on implementation. Only those two names are accepted; anything else
+  (a bare string, a mapping, another event) is refused.
+- **Compatibility:** a subscribed terminal event with a label and no close
+  list now also closes. Set `github.lifecycle.close: []` to preserve
+  label-only behavior. Labels under `github.lifecycle.labels.<event>` remain
+  optional and are added before closing.
 - **Order:** the issue is read first, and an issue observed closed is left
   alone. Then the label, if one is mapped for the event, then the close. A
   failure stops what comes after it, and a close that fails after the label
@@ -154,8 +172,10 @@ github:
   reports "already closed" and succeeds), but a close landing between `gh`'s
   read and its close can have its reason overwritten. Nothing ever reopens an
   issue.
-- A terminal event with neither a label nor a close configured is refused. A
-  `gh` timeout on the close is reported as possibly closed. Nothing is retried.
+- A terminal event disabled by the close list with no label mapped succeeds
+  without edits. A `gh` timeout on the close is reported as possibly closed.
+  Nothing is retried. Refusals carry source `github.lifecycle` and a one-line
+  title with the reason, recovery action and full external error evidence.
 
 ## Architecture
 

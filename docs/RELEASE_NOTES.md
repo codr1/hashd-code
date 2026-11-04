@@ -4,6 +4,46 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.29 - 2026-11-04
+
+v0.9.29 brings Network access and link-based pairing, whole-stage execution on runners, Azure DevOps integration, and Antigravity support. It also improves recovery when a rebase, sign-in, review or merge stops, and keeps the evidence needed to make a decision visible across the CLI, TUI and Web.
+
+### What's Changed
+
+- **Upgrade note: remote clients and runners must re-join.** Network access changes TLS trust. After upgrading, existing remote clients must re-join with a new link. Re-join each existing runner under its **same ID**: generate its link with `hashd runner join-link <runner>`, then run `hashd runner connect -` on that runner and supply the link. This preserves its placements. For a source checkout, set `HASHD_OPS_ROOT` explicitly when the operations root is not the checkout, and launch services with `umask 022`.
+
+- **Network access has one set of controls.** Enable “Allow other devices to connect” in TUI or Web Settings, or use `hashd network on|off|status`. Pair devices, invite people, add or revoke runners, and configure a Public URL through the same server-provided actions. Solo stays on localhost by default. Only hashd-server opens to other devices; the managed Web service stays on loopback behind the server's HTTPS `/ui` and `/join` relay. The remote-access guide includes reverse-proxy and ALB deployment.
+
+- **Browser-trusted HTTPS over Tailscale, when available.** For this machine's own `*.ts.net` name, Network access can use the certificate supplied by local tailscaled, with no extra hashd setting or renewal service. Status says whether it works and how to repair a refusal. Other names keep the hashd CA certificate, and an unavailable Tailscale certificate falls back to that CA. Join links prefer the Tailscale address only while its browser-trusted certificate works.
+
+- **Runners execute complete stages where the checkout lives.** Local and remote runners use the same execution model, carrying command output, agent transcripts, test reports and failure evidence back to the server. Fleet shows placement, connection, compatibility, agent versions and sign-in status. Moving or reconnecting a runner no longer makes the server assume its checkout is local; files and diffs remain available through placement, and the REST `worktree` field is empty for runner-backed work.
+
+- **Code-intelligence tools are installed and checked on execution hosts.** Installs and upgrades carry the pinned codebase-memory-mcp runtime. Doctor and runner admission report a missing or wrong version, and a code-backed stage refuses before agent launch if the tools are unavailable. Codex receives its MCP configuration in the correct argument position, so its stages can actually call the code tools.
+
+- **Sign in on the machine that runs the agent.** Fleet supports owner-scoped agent sign-in on runners, with manual, push or proxy methods where the agent supports them. Claude, Codex and OpenCode use hashd-owned profiles; explicit instruction delivery keeps project guidance available without exposing unrelated host credentials. Model and effort choices use the same stage settings across agents, and lost sessions, model refusals and context failures have actionable recovery messages.
+
+- **Antigravity is selectable through its official ACP runtime.** Install the qualified runtime, then use Fleet's manual personal-Google sign-in or register a Gemini API key. Remote browser sign-in accepts the native return URL through the existing sign-in flow. Fleet shows the runtime's model and thinking choices, which are reapplied on resume; a listed model is not a guarantee of account access. Cloud/Enterprise and push/proxy sign-in are not enabled for Antigravity in this release.
+
+- **Azure Repos and Azure Boards are integrated.** Projects can use Azure Repos as their forge and read filtered, multiple Azure Boards sources. Native Entra sign-in stores owner credentials securely and requests narrower delegated scopes. Repository hints, work-item descriptions and story/PR links survive intake. Command credentials and named project secrets reach declared build, test and gate commands, including those on runners, without being placed in agent prompts.
+
+- **Tracker links and lifecycle moves are more useful.** `hashd story link` can find or create the corresponding Azure Boards work item or ClickUp task. Jira supports named lifecycle transitions and open-sprint filtering. Azure Boards, ClickUp and GitHub have default lifecycle moves, with completion tied to the story reaching a terminal state.
+
+- **Forge completion respects reviewed branches.** Projects can choose hashd completion, forge completion or supported forge auto-completion. Human reviews and approvals are evaluated against the relevant head; bot votes do not count as human approval. Reviewed branches require the appropriate acknowledgment before a rewrite, and externally completed PRs can finish their archive instead of getting stuck on an invalid transition.
+
+- **Rebase uses the story's prepared checkout.** `hashd rebase` works on the story branch in its own checkout, retaining its setup, dependencies and code index. Uncommitted changes are carried through the rebase and restored afterwards. Recovery refs protect the original work; if accepted conflict resolution adds or drops carried paths, the outcome names them and gives a recovery command instead of refusing the rebase. Provisioning also warns about untracked paths created by setup, with the ignore fix.
+
+- **Recovery preserves ownership and explains the next action.** Competing execution flows cannot take over the same workstream, and starts that never reached their first stage can be recovered. Workstream pause uses the same name throughout the API and interfaces. Review, test and merge stops retain their Diagnostics and supporting evidence; clarification questions carry the conclusions needed to answer them. FIX prompts also remind the implementer of defect classes found in earlier reviews of the same story.
+
+- **Build and test evidence follows the project's tools.** Build adapters can be automatic, disabled or explicitly selected. Go, pytest and Jest reporting handles their declared output paths, including container paths. Failure readers preserve failing-test evidence, and environment failures can stop with the repair needed instead of asking an unhelpful yes/no question. Post-rebase test policy is configurable, and baseline-only failures have a distinct continuation path.
+
+- **Planning, Arcs and lineage keep their context.** Arc children and dependencies appear together in the dashboard, planning claims survive retries, and deferred work remains a suggestion instead of disappearing. Stories can target a branch and follow team branch/commit conventions. Lineage supports cross-repository links, pinned historical reads and reproducible exports, while distinguishing integrity from attribution.
+
+- **Decisions are readable in the TUI and Web.** Decision text and options can be read in full, large diffs have Load More, and action labels and explanations come from the server. Dashboard titles wrap, Fleet and Settings layouts are clearer, and toasts move down when a lower toast disappears. Standing alerts and routed notifications retain the story and the action needed instead of relying on transient messages.
+
+- **Source builds and operations are more predictable.** Generated files are no longer tracked; source builds regenerate them. Agent stages use the configured filesystem fence to protect operations data, with explicit failures when the required protection is unavailable. Install, upgrade, service lifecycle and doctor checks report missing prerequisites rather than silently continuing.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.28...v0.9.29
+
 ## v0.9.28 - 2026-10-15
 
 v0.9.28 is one day of dev since v0.9.27: the fifteen findings of the first full soak of a packaged install (solo, team and GitHub PR mode on a fresh box), each fixed and landed the same day. A fresh install gets a working TUI again, a team server comes up and restarts the way the docs describe, Codex can resume its sessions under per-user credentials, and several diagnostics say what the operator actually has to do.

@@ -112,6 +112,67 @@ bkt auth login --kind cloud --web-token
 tea login add --name work --url https://git.example.com --token $TOKEN  # Gitea
 ```
 
+Azure Repos needs no CLI. Sign in to your organisation with Microsoft Entra:
+
+```bash
+hashd forge login --host dev.azure.com --scope <organisation>
+# no browser on this machine:
+hashd forge login --host dev.azure.com --scope <organisation> --device-code
+```
+
+The server looks up the organisation's tenant. If you already hold an account
+in that tenant it is used without asking (`--new-account` chooses another);
+otherwise the sign-in opens in your browser, or prints an address and a code
+to enter on any device when no browser can open or `--device-code` is passed.
+The server keeps the tokens, and a completed sign-in replaces a token stored
+for the same organisation. To store a personal access token with Code (Read &
+write) scope instead, pipe it:
+
+```bash
+printf '%s' "$PAT" | hashd forge login --host dev.azure.com --scope <organisation>
+```
+
+Inside a project, `hashd forge login` with no `--host` (and no token piped)
+goes through the project's credential keys: it signs in to, or stores a token
+for, each key that lacks a usable credential, and skips keys that are already
+usable. `--device-code` and `--new-account` apply to each of its Entra
+sign-ins. A key that cannot be given a credential is reported with its
+explicit command, and the command exits 0 only when every key ends usable.
+A token piped with no `--host` inside a project is stored for the one key that
+lacks a usable credential; when several keys lack one, or none does, nothing is
+stored and the command is refused, listing each key's command that pipes its
+token.
+
+`hashd forge status --host dev.azure.com --scope <organisation>` shows the
+organisation's credential and its source. For an Entra-backed key that is the
+bound account, its state and, when it needs a sign-in, the reason. Inside a
+project, `hashd forge status` with no `--host` lists the project's credential
+keys, each with the repos using it and its state, so you can see which
+organisations still need a sign-in.
+`hashd forge logout --host dev.azure.com --scope <organisation>` removes the
+key's credential, a stored token or an Entra binding. Inside a project,
+`hashd forge logout` with no `--host` removes the project's credential key when
+it has exactly one; when it has several, it removes nothing and refuses,
+listing the `hashd forge logout --host <host> --scope <organisation>` command
+for each key.
+
+Entra sign-in needs an app registration, set once by a server administrator:
+register an application in the Entra admin center with the **Mobile and
+desktop applications** redirect URI `http://localhost`, set **Allow public
+client flows** to Yes (for the device code flow), and add the **Azure DevOps**
+delegated permission **user_impersonation**. Then replace the shipped
+`coderica-hashd` placeholder:
+
+```bash
+hashd config set sso.entra.client_id <application-client-id>
+hashd config set sso.entra.tenant <tenant-id, domain, or organizations>
+```
+
+If your tenant does not let users consent to apps, a tenant administrator
+grants consent once under the app's **API permissions** > **Grant admin
+consent**, or at
+`https://login.microsoftonline.com/<tenant>/adminconsent?client_id=<application-client-id>`.
+
 #### AI Coding Agents
 
 Hashd uses AI agents for planning, implementation, and review. Claude is the default agent for every stage; any other supported agent can be swapped in per stage. You only need Claude to get started.
@@ -207,6 +268,11 @@ hashd project add /path/to/repo --clone https://bitbucket.org/team/repo
 # Multi-repo/container onboarding controls
 hashd project add /path/to/platform --primary backend --active frontend
 hashd project add /path/to/platform --all-active --repo-skip-test docs --repo-skip-build docs
+# Per-repo commands, fully scripted (NAME=CMD; --repo-config NAME=FILE.yaml
+# sets the same keys from a file, and a flag beats the file)
+hashd project add /path/to/platform --no-interview --primary backend --all-active \
+  --repo-test-cmd backend='go test ./...' --repo-test-cmd frontend='pnpm test' \
+  --repo-build-cmd frontend='pnpm build' --repo-merge-gate-test-cmd backend='task test:all'
 
 # The investigate pass prints canonical settings output such as:
 #   Running project add with the following settings:
@@ -222,7 +288,8 @@ hashd project add /path/to/platform --all-active --repo-skip-test docs --repo-sk
 # same canonical settings block again, and then executes project add.
 #
 # The wizard path still:
-# - Auto-detects forge from git remote (GitHub, Bitbucket, GitLab, Gitea)
+# - Auto-detects forge from git remote (GitHub, Bitbucket, GitLab, Gitea,
+#   Azure Repos)
 # - Auto-detects build systems (Makefile, package.json, Taskfile, etc.)
 # - Prefills description, tech preferences, and repo settings from
 #   stored defaults or fresh AI investigation when requested
@@ -383,6 +450,8 @@ hashd telegram start
 ```
 
 The bot also auto-starts when you run `hashd run`. Send `/` for the button menu.
+
+On a team server, the hashd credential the bot runs with must belong to the server owner or carry no user identity: the configured chat receives the alerts routed to that credential. Teammates who pair with `hashd telegram connect` get their own alerts in their private chat with the bot.
 
 ## Shell Completion
 

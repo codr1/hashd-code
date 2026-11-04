@@ -107,9 +107,9 @@ governed by the project's autonomy mode. See [how-hashd-works.md](how-hashd-work
 The per-project setting that decides which gates stop for a human:
 `supervised` (human approves every gate), `gatekeeper` (auto-continue commits when
 review confidence clears a threshold, human approves merge — the default), and
-`autonomous` (auto-continue commits and auto-merge when thresholds are met). All
-three still block to a human on failures; the modes differ only in the merge-time
-and per-commit gating.
+`autonomous` (auto-continue commits; merging still takes `hashd merge`, without
+`--confirm` for a local merge). All three still block to a human on failures; the
+modes differ only in the merge-time and per-commit gating.
 
 ### Dual-write event
 

@@ -36,16 +36,18 @@ The home screen. It lists the project's active Stories and Workstreams, each tag
 with its `<stage> / <runtime_status>`, so at a glance you see what is running,
 blocked, or waiting on you. Use it to triage: scan for anything `blocked` or
 `changes_required`, then drill in. Every Story and Workstream gets a row: when they
-don't all fit, each list scrolls on its own, and rows past the ninth have no
-shortcut key.
+don't all fit, each list scrolls on its own. Each list assigns up to nine
+shortcut keys in a window centered on its selection, clamped at the top and
+bottom. Moving either selection slides only that list's keys. Suggestions and
+collapsed children receive no key; header-only Arcs keep a key and open their Arc.
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` (or arrows) | move the selection in the focused list |
 | `Enter` | open the selected Story or Workstream |
 | `Tab` / `Shift+Tab` | switch between the Stories and Workstreams lists |
-| `1`–`9` | open one of the first nine Workstreams in **Workstream Detail** |
-| `a`–`i` | open one of the first nine Stories in **Story Detail** |
+| `1`–`9` | open the Workstream with the displayed key in **Workstream Detail** |
+| `a`–`i` | open the Story or Arc with the displayed key in **Story Detail** |
 | `p` | open the **Plan** screen |
 | `m` | change **autonomy mode** |
 | `o` | team mode only: list only your own Stories and Workstreams, or all again |
@@ -63,7 +65,7 @@ The panels share one window, 24 hours to start. `Ctrl+r` steps all three through
 
 The two history panels draw a filled Braille plot: each value lights every dot row from the baseline up to its own level, so the series reads as a mass rather than a line of scattered dots. Traces that share a scale stack, bottom trace first, so the top edge is the running total; Tokens instead mirrors its two traces about a centre line, each on its own scale, as described below. The legend beside a plot names each trace's colour.
 
-**Tokens** — the project's input and output tokens over the strip's window, from `GET /reports/series` at that range. Each read sends the plot's width in dot columns as `buckets`, and the server picks the finest bucket width that gives every bucket a dot column of its own, so a wider terminal shows a finer day; a resize that changes the fit reads again. The plot is mirrored about a centre line: output stands up from it and input hangs down from it, each on its own scale, beside a legend of `out` and `in` window totals. The number in each half's outer corner is that half's largest bucket, the value its outermost dot row stands for. The figures count every agent call of the project in the window, calls with no workstream included, and a token counter a call did not report counts as 0. They are the raw input and output counters with no cache counters, so these totals differ from the Activity panel's normalized tokens. On a real day fresh input is a fraction of a percent of output, which is why input has a half and a scale of its own: on output's scale it would be a hairline.
+**Tokens** — the project's uncached input and output tokens over the strip's window, from `GET /reports/series` at that range. Each read sends the plot's width in dot columns as `buckets`, and the server picks the finest bucket width that gives every bucket a dot column of its own, so a wider terminal shows a finer day; a resize that changes the fit reads again. The plot is mirrored about a centre line: output stands up from it and input hangs down from it, each on its own scale, beside a legend of `out` and `in` window totals. The number in each half's outer corner is that half's largest bucket, the value its outermost dot row stands for. The figures count every agent call of the project in the window, calls with no workstream included, and a token counter a call did not report counts as 0. The input half is uncached input, the input served neither from nor to a cache, and the output half is the raw output counter. On a real day fresh input is a fraction of a percent of output, which is why input has a half and a scale of its own: on output's scale it would be a hairline.
 
 **Stories** — the historical peak number of distinct stories whose implementation work overlapped at one instant, per block over the strip's window, from `GET /reports/active-stories` at that range with the plot's dot columns as `buckets`, as the Tokens panel reads. The server owns the window, the bucket width it fits to the plot, the dense zero-filled buckets and the coverage counters; the panel draws each returned bucket exactly as returned, oldest at the left, beside a legend laid out like the Tokens panel's: `max`, the window's most stories at once and the value the plot's top dot row stands for; `total`, the distinct stories the window touched; and `now`, the stories with an agent working at the read. `now` comes from the live invocation rows the workstreams' `running` status reads, since the history cannot tell a stage running now from a run that died without recording its end, and the row is left out when those rows could not be read.
 
@@ -83,7 +85,7 @@ The stage column is as wide as the longest name it shows and no narrower than it
 
 Hovering a plot puts the stretch of time under the pointer and its figures on the panel's title line. The rightmost bucket is drawn faint while the window's end falls inside it, since it has had only part of its time, and each plot's top-right corner says `now` where nothing is drawn there.
 
-Each workstream row carries an activity line: eight Braille cells of its raw tokens over the strip's window, from `GET /reports/workstream-series`, read with the panels and on the same terms. Each line is on its own scale, so it shows when a workstream worked, not how much beside another; a workstream with no call in the window shows its baseline, and the lines are blank while the strip is not shown.
+Each workstream row carries an activity line: eight Braille cells of its tokens (uncached input plus output, as the project Tokens panel counts them) over the strip's window, from `GET /reports/workstream-series`, read with the panels and on the same terms. Each line is on its own scale, so it shows when a workstream worked, not how much beside another; a workstream with no call in the window shows its baseline, and the lines are blank while the strip is not shown.
 
 Every panel shows a loading state until its first read, an empty state when its window counted nothing — `no agent calls in the last 24 hours`, `no story implementation counted in the last 24 hours`, `no agent calls in the last 24 hours`, each naming the window shown — and an unavailable state with the reason when a read fails; for Activity, a server too old to group the window by activity is one of those reasons. They read when the strip is shown (on opening the Dashboard, with `Ctrl+g` or `Ctrl+r`, when room returns, and on returning to the Dashboard), after the event stream reconnects, and every 30 seconds while shown. None reads while graphs are hidden, the terminal has no room for them, another screen or dialog is on top, or the event stream is disconnected.
 
@@ -155,8 +157,9 @@ it.
 | merge | `acquire_lock`, `checkout`, `pre_merge_tests`, `merge_attempt`, `post_rebase_test`, `push_branch`, `create_pr`, `await_pr_approval`, `pr_merge`, `finalize` | the merge workflow's steps. The rail places a workstream here by its status alone -- `ready_to_merge`, `pr_open` or `pr_approved` waiting, `merging` running -- since a merge step a finished merge left behind must not place a workstream that has moved on. The Gantt draws no merge row: its intervals count the runner's work, which ends at final review |
 
 The caption under the rail names the recorded substage, how long it has stood
-and the commit in hand, with the story's criteria in one line at its right end
-(`ACs 12 ✓ · 1 ⊘ · 10 ng`). The strip is the dashboard's Tokens figure for this
+and the commit in hand, with the story's criteria at its right end
+(`12 criteria · 1 descoped · 10 non-goals`). When they cannot share a row, the
+counts appear below the caption; both wrap as needed. The strip is the dashboard's Tokens figure for this
 workstream over its life, from `GET /reports/workstream-series?workstream=`,
 beside its start, age and agent calls. `Ctrl+g` hides the area for the session,
 as it hides the dashboard's strip, and the area gives way on a screen under 32
@@ -256,8 +259,8 @@ The `hashd watch` TUI provides context-sensitive keybindings based on workstream
 | `j` / `k` (or arrows) | Move the selection in the focused list |
 | `Enter` | Open the selected Story or Workstream |
 | `Tab` / `Shift+Tab` | Switch between the Stories and Workstreams lists |
-| `1-9` | Open one of the first nine workstreams |
-| `a-i` | Open one of the first nine stories |
+| `1-9` | Open the workstream with the displayed key |
+| `a-i` | Open the story or Arc with the displayed key |
 | `p` | Open plan screen |
 | `m` | Change autonomy mode (supervised/gatekeeper/autonomous) |
 | `o` | Team mode only: list only your own stories and workstreams, or all again |
@@ -376,6 +379,7 @@ and cannot be selected. Reaching the last row loads the next page.
 | `r` | Rescope selected descoped criterion (moves back to AC) |
 | `G` | Create workstream and run (Shift+G) |
 | `C` | Open pair programmer chat (Shift+C) |
+| `t` | Tracker: open, unlink or link the story's tracker story |
 | `X` | Close/abandon story (Shift+X) |
 | `v` | View full story markdown |
 | `Esc` | Back to dashboard |
@@ -389,8 +393,8 @@ and cannot be selected. Reaching the last row loads the next page.
 | `Ctrl+t` | Toggle dark/light theme |
 | `Ctrl+s` | Save screenshot |
 | `Ctrl+p` | Switch project |
-| `1-9` | Open one of the first nine workstreams (dashboard) |
-| `a-i` | Open one of the first nine stories (dashboard) |
+| `1-9` | Open the workstream with the displayed key (dashboard) |
+| `a-i` | Open the story or Arc with the displayed key (dashboard) |
 | `p` | Open plan screen (dashboard) |
 | `q` | Back / Quit |
 | `Esc` | Back to previous screen |

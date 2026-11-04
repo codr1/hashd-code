@@ -646,7 +646,7 @@ browser_install_status() {
 # copies this run's outcome to BROWSER_INSTALL_RESULT, private to this run:
 # concurrent installers share the tools dir's record, so it may be another's.
 install_external_tools() {
-    local base_url="$1" tools_os="$2" tools_arch="$3" browser_lock
+    local base_url="$1" tools_os="$2" tools_arch="$3" browser_lock cbm_bin_dir
     local tools_args=()
     BROWSER_INSTALL_FAILURE= BROWSER_INSTALL_RESULT="$WORK_DIR/browser-install-result"
     mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/vendor/playwright"
@@ -659,7 +659,21 @@ install_external_tools() {
         if [ "${WITHOUT_BROWSER:-0}" != 1 ] && ! remote_server_paired; then
             record_browser_install_failure "$BROWSER_INSTALL_FAILURE"
         fi
-        return 0
+        die "Code tools could not be verified" "install.cbm" \
+            "$BROWSER_INSTALL_FAILURE" "Re-run the hashd installer after restoring access to the release."
+    fi
+    if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+        "$base_url/vendor/cbm.lock" -o "$WORK_DIR/vendor/cbm.lock"; then
+        die "Code tools could not be verified" "install.cbm" \
+            "The release's vendor/cbm.lock could not be downloaded." "Re-run the hashd installer after restoring access to the release."
+    fi
+    # The wheel already carries CBM beside hashd. Verify/repair that copy,
+    # without downloading a second binary into the shared tools directory.
+    cbm_bin_dir="$(dirname "$(hashd_install_path "$HASHD_BIN")")"
+    # uv/pipx supply Python beside hashd; a bare host need not have python3.
+    if ! PATH="$cbm_bin_dir:$PATH" bash "$WORK_DIR/scripts/install-tools.sh" cbm --dest "$cbm_bin_dir/codebase-memory-mcp"; then
+        die "Code tools could not be installed" "install.cbm" \
+            "The pinned codebase-memory-mcp binary could not be installed and verified." "Resolve the installer failure above, then re-run the hashd installer."
     fi
     if [ "${WITHOUT_BROWSER:-0}" = 1 ]; then
         tools_args=(--without-browser)
@@ -673,7 +687,7 @@ install_external_tools() {
             fi
         done
     fi
-    if ! HASHD_BROWSER_INSTALL_RESULT="$BROWSER_INSTALL_RESULT" HASHD_TOOLS_OS="$tools_os" HASHD_TOOLS_ARCH="$tools_arch" bash "$WORK_DIR/scripts/install-tools.sh" "${tools_args[@]}"; then
+    if ! PATH="$cbm_bin_dir:$PATH" HASHD_PACKAGE_BIN_DIR="$cbm_bin_dir" HASHD_BROWSER_INSTALL_RESULT="$BROWSER_INSTALL_RESULT" HASHD_TOOLS_OS="$tools_os" HASHD_TOOLS_ARCH="$tools_arch" bash "$WORK_DIR/scripts/install-tools.sh" "${tools_args[@]}"; then
         warn_external_tools "installer script failed"
     fi
 }
@@ -1001,19 +1015,8 @@ step "Installing external tools (gitleaks, git-delta, ripgrep, forge CLIs, brows
 ensure_tools_dir_on_path
 install_external_tools "https://raw.githubusercontent.com/$REPO/$RELEASE_TAG" "$TOOLS_OS" "$TOOLS_ARCH"
 
-step "Migrating local databases"
-# Before anything opens a database. A checkout upgraded across a schema bump
-# has databases at the old version, and every command that opens one --
-# starting with the owner check below -- fails closed on the mismatch. Its
-# advice then points at a command that cannot run until this has, so the
-# install dies with the real fix buried inside a nested error.
-if "$HASHD_BIN" internal migrate-dbs >/dev/null 2>&1; then
-    ok "Databases migrated"
-else
-    # Non-fatal: a fresh install has nothing to migrate, and a genuine
-    # failure surfaces with its own diagnostic at the next open.
-    ok "No databases to migrate"
-fi
+# Existing databases stay untouched until restart has passed its read-only
+# prechecks and stopped the old server. Fresh owner bootstrap creates its DB.
 
 step "Configuring owner identity"
 # hashd-server fails closed when no user is configured, so the first user -- the
@@ -1028,8 +1031,8 @@ step "Configuring owner identity"
 # say why.
 if remote_server_paired; then
     ok "Paired to a remote server ($HASHD_SERVER_URL) -- no local owner needed"
-elif "$HASHD_BIN" admin user list 2>/dev/null | grep -q '@'; then
-    ok "Owner already configured"
+elif [ -f "$OPS_ROOT/hashd.db" ]; then
+    ok "Existing server database -- restart checks and migrates it after stopping the old server"
 else
     OWNER_NAME="$(git config --global user.name 2>/dev/null || true)"
     OWNER_EMAIL="$(git config --global user.email 2>/dev/null || true)"
@@ -1045,16 +1048,6 @@ else
         # Hard-fail: hashd-server fails closed without an owner, so a swallowed
         # failure here just surfaces later as a dead server. Better to abort the
         # install loudly with the exact recovery command.
-        # A schema-version mismatch is a local checkpoint lagging the build,
-        # not a missing owner -- surface its fix at the top rather than
-        # leaving it nested inside the inner error, and never advise
-        # "run this on the server host" to a client-only machine.
-        if printf '%s' "$OWNER_ERR" | grep -q 'schema version mismatch'; then
-            die "the local databases are behind this build" \
-                "install.schema_behind" \
-                "Owner provisioning opened a database at an older schema version than this build expects.\n${OWNER_ERR}" \
-                "Migrate them, then re-run the installer: $HASHD_BIN internal migrate-dbs"
-        fi
         die "could not provision the hashd owner" \
             "install.owner" \
             "hashd-server fails closed until an active owner exists, so the install is not usable without one.\n${OWNER_ERR}" \
@@ -1079,7 +1072,7 @@ step "Starting hashd services"
 #                       A packaged install never trips the manual-upgrade gate,
 #                       but this flag is also what tells a refusal that it
 #                       leaves an INCOMPLETE UPGRADE -- by this line the new
-#                       binaries are in place and migrate-dbs has run -- so the
+#                       binaries are in place -- so the
 #                       refusal names the command that finishes it.
 #   --reclaim-port      authorizes killing an unrecognized process that still
 #                       holds the hashd-server port as the server starts. The
@@ -1094,9 +1087,11 @@ step "Starting hashd services"
 # The first attempt's output is also kept, because two different failures come
 # out of this line and only one of them is worth a retry:
 #   - a refusal: the restart hold could not be put in force
-#     (restart.hold_unavailable), or --force was asked for without a terminal
-#     (restart.force_headless). Not a convergence failure; re-running the
-#     identical command refuses again. Print nothing more (the refusal is
+#     (restart.hold_unavailable), --force was asked for without a terminal
+#     (restart.force_headless), or this upgrade replaces the Temporal store
+#     and open work it would lose must finish first
+#     (upgrade.M024_temporal_store_wipe). Not a convergence failure; re-running
+#     the identical command refuses again until that work is done. Print nothing more (the refusal is
 #     already on screen and names the command that finishes this install) and
 #     stop. Detected on the Diagnostic's source tag rather than its prose.
 #   - anything else. Retry once with output, exactly as before.
@@ -1110,7 +1105,7 @@ set +e
 restart_status=${PIPESTATUS[0]}
 set -e
 if [ "$restart_status" -ne 0 ]; then
-    if grep -q 'restart\.hold_unavailable\|restart\.force_headless' "$restart_log"; then
+    if grep -q 'restart\.hold_unavailable\|restart\.force_headless\|upgrade\.M024_temporal_store_wipe' "$restart_log"; then
         rm -f "$restart_log"
         exit 1
     fi

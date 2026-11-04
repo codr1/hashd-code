@@ -44,7 +44,7 @@ pieces of work safe to start against the current `main`:
 
 ```bash
 hashd plan          # discovery; proposes suggestions
-hashd plan list     # view them, numbered
+hashd plan list     # view them, each with its S-<id> label
 ```
 
 Claim the one you want. Claiming turns a Suggestion into a **Story** — a feature
@@ -52,8 +52,40 @@ Claim the one you want. Claiming turns a Suggestion into a **Story** — a featu
 conditions for "done"):
 
 ```bash
-hashd plan claim 1  # or claim it from the TUI plan screen
+hashd plan claim S-12  # or claim it from the TUI plan screen
 ```
+
+A list position (`hashd plan claim 1`) also works, but positions renumber after
+every claim, so a second position read from the same listing can name a
+different suggestion. The `S-<id>` label never changes.
+
+Dismiss unwanted work as not planned, preserving who dismissed it, when, and
+the complete optional reason:
+
+```bash
+hashd plan dismiss S-12 --reason "Already implemented by BUG-0414" -y
+```
+
+A current actionable position also works (`hashd plan dismiss 1 -y`). Blocked
+available suggestions require their S-id. Claimed, done, and already dismissed
+suggestions are refused by the server. Without `-y`, dismiss asks for interactive
+confirmation; without a terminal it fails before changing anything. Inspect
+the recorded decisions with `hashd plan list --dismissed`.
+
+Restore a dismissal using its stable S-id:
+
+```bash
+hashd plan restore S-12 -y
+```
+
+Dismissed suggestions have no actionable position, so restore accepts only
+S-id labels. `hashd plan list --dismissed` shows the newest 100 S-ids first;
+use `--limit <count>` for a different window or `--limit all` to inspect every
+dismissal. Restore resolves labels even outside these windows and returns the
+suggestion to the working list with its contents preserved. Prior dismissal
+events remain in history. Restoring an available, claimed, or done suggestion
+is refused by the server. Without `-y`, restore asks for interactive confirmation
+and fails without a terminal.
 
 ## 2b. Or create a Story directly (skip discovery)
 
@@ -199,7 +231,7 @@ hash chain:
 ```bash
 hashd lineage export <sha> --format slsa     # SLSA v1.0 provenance
 hashd lineage export <sha> --format in-toto  # in-toto statement, hashd predicate
-hashd lineage verify                         # validate the commit hash chain
+hashd lineage verify                         # validate the hash chain; report coverage
 ```
 
 For the full provenance story — what's captured, the standards it maps to, and why
@@ -240,7 +272,7 @@ commit.
 | `hashd list [--mine]` | List stories and workstreams (`--mine`: only your own in team mode; solo mode lists everything) |
 | `hashd show <id>` | Show story or workstream details |
 | `hashd approve <id>` | Accept story or approve gate |
-| `hashd reject [id] [-f "feedback"] [--reset] [--include-forge \| --findings-file FILE]` | Reject a gate and fold review findings into the next FIX commit. `-f` is optional additive operator guidance and takes precedence over folded findings. Use `@directive <text>` in feedback to add durable constraints (e.g. `hashd reject ws-1 -f "fix X @directive do not modify RBAC"`) |
+| `hashd reject [id] [-f "feedback"] [--reset] [--include-forge \| --findings-file FILE]` | Reject a gate and fold review findings into the next FIX commit; at `pr_open` and `pr_approved` that includes the PR's open forge threads and current changes-requested review bodies by default, other gates fold internal findings only unless `--include-forge` is given. `-f` is optional additive operator guidance and takes precedence over folded findings. Use `@directive <text>` in feedback to add durable constraints (e.g. `hashd reject ws-1 -f "fix X @directive do not modify RBAC"`) |
 | `hashd assign <id> [user]` | Assign a story/workstream to a user by handle (default: yourself); ownership is open -- anyone can (re)assign |
 | `hashd unassign <id>` | Clear the owner of a story/workstream |
 | `hashd admin user rename <email> <name>` | Rename a user's unique display-name handle (team-server; the solo owner defaults from `git config user.name`) |
@@ -248,8 +280,8 @@ commit.
 | `hashd pr feedback [id]` | View PR/MR review comments |
 | `hashd review findings ID [--include-forge]` | Export editable findings without dispatching; accepts a workstream or linked story ID |
 | `hashd merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main and archive (`--confirm`/`-y` required in supervised/gatekeeper mode, `--pr` forces PR workflow) |
-| `hashd close [id] [--force] [--keep-branch] [--no-changes] [-r ".."]` | Abandon workstream (-r reason required with --no-changes) |
-| `hashd skip [id] [commit] [-m ".."]` | Mark commit as done without changes |
+| `hashd close [story] [-y] [--keep-branch] [--no-changes \| --ref <ref>] [-r ".."]` | Close a story and its linked workstream, one of three ways. Plain: abandon; the requirement returns to REQS as open work. `--no-changes -r ".."`: no changes needed; the requirement is met and its REQS sections are burned. `--ref <ref> -r ".."`: closed by person, for work done outside hashd; the server first verifies the ref (`#<number>` or URL of a merged or closed PR, a commit SHA on the target branch, or an implemented story), the story ends `closed_by_person`, the requirement is met and burned, and the branch is kept |
+| `hashd skip [id] [commit] [-m ".."] [--discard]` | Mark commit as done without changes; skipping the next commit over its uncommitted work needs `--discard`, which saves that work (index and working files, separately) under `runs/<project>/skipped/` and discards it |
 | `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
 | `hashd replan [id] [-f ".."]` | Regenerate the plan from a clean base (resets the worktree to baseline, clears the plan; `-f`: why the plan is wrong) |
 
@@ -302,7 +334,7 @@ root to operate on its workstreams.
 
 | Command | Description |
 |---------|-------------|
-| `hashd project add <path> [--no-interview] [--primary name] [--active name ...\|--all-active] [--repo-skip-test name] [--repo-skip-build name] [--commit-root-dirs]` | Register a new project |
+| `hashd project add <path> [--no-interview] [--primary name] [--active name ...\|--all-active] [--repo-skip-test name] [--repo-skip-build name] [--repo-test-cmd name=cmd] [--repo-build-cmd name=cmd] [--repo-merge-gate-test-cmd name=cmd] [--repo-config name=file.yaml] [--commit-root-dirs]` | Register a new project |
 | `hashd project list` | List registered projects |
 | `hashd project use [name] [--clear]` | Set, show, or clear the current project |
 | `hashd project show [name]` | Show project configuration (defaults to the current project) |
@@ -373,8 +405,8 @@ them.
 | `hashd doctor` | Validate setup and diagnose issues |
 | `hashd restart [component] [-y] [--auto-rebuild]` | Restart infrastructure (server, Temporal sidecar, event forwarder, messengers); `--in-place-upgrade` takes no component, `--reclaim-port` takes none or `server` |
 | `hashd lineage <target> [--line N] [--lines N-M] [--format table\|json\|markdown]` | Trace code lineage (auto-detects file/SHA/STORY/BUG) |
-| `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--format slsa\|in-toto]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story |
-| `hashd lineage verify` | Validate hash chain integrity for project commits |
+| `hashd lineage export <sha\|STORY-xxxx\|BUG-xxxx> [--format slsa\|in-toto] [--details[=N]]` | Export attestation (SLSA v1.0 or in-toto) for SHA or story; with in-toto, `--details` expands every review with its stored record, `--details=N` only review N |
+| `hashd lineage verify` | Validate hash chain integrity for project commits and report their coverage separately; only the chain decides the exit status |
 | `hashd system-log` | View system event log |
 | `hashd prompts list` | List prompt templates |
 | `hashd prompts show <name>` | Show prompt content |
