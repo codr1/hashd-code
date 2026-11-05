@@ -4,6 +4,36 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.30 - 2026-11-05
+
+v0.9.30 improves secret-scan recovery, agent controls and the decisions around closing or merging a story. It also makes automated reviews more focused and restores familiar action names and keyboard hints.
+
+### What's Changed
+
+- **Secret scans use the repository's rules and keep runner evidence.** The merge gate honours the scanned checkout's `.gitleaks.toml`. Findings, source context and scan-time ignore entries remain readable from the server when the checkout lives on a runner. Gitleaks `allow` and `remove` use `--workstream <story>` to update that story's `.gitleaksignore` on its assigned runner; failed or missing scans are distinct from clean scans.
+
+- **`hashd merge` recognises PRs already merged on the forge.** It reads the PR state before preparing another merge and reconciles a person's completed merge into the story's closure and archive. A stale final review no longer strands that reconciliation, and hashd does not rebase, test or push the already-merged branch again.
+
+- **Close dialogs offer the right ending.** TUI and Web story and workstream dialogs offer the server-permitted choices: **Abandon**, **Done outside hashd** with a reference and reason, or **No changes needed** with a reason. Each choice explains its consequences, and a refused close keeps the dialog and entered values available for correction.
+
+- **An unmerged PR closure waits for your decision.** Closing a PR on the forge leaves its story parked as **PR closed**, with the branch intact. The CLI, TUI, Web and Telegram show the closure and its context. **Rework** continues on the same branch with your guidance; the close and abandon choices remain available where permitted.
+
+- **Enable or disable each agent in Settings.** **Settings > Agents > Agent Properties** has a server-wide **Enabled/Disabled** control for every declared agent, available to owners and administrators. Disabled agents cannot be selected for new assignments or launched, while existing assignments stay visible and running work continues.
+
+- **Merge conflicts can be resolved automatically.** The project setting `merge.ai_rebase` defaults to enabled. Hashd can use the configured conflict-resolution agent during merge preparation, then run the full configured verification before continuing. A failed resolution or verification stops with its evidence and recovery guidance; projects can disable automatic resolution.
+
+- **Reviews judge the story's changes.** Per-commit and final reviews distinguish branch changes from newer work on the target branch. Upstream movement alone no longer creates findings or lowers confidence, and reviewers leave rebase and migration alignment to the merge stage while still reporting concrete defects in the branch.
+
+- **Merge-gate recovery skips judgments it cannot act on.** When neither automatic repair nor a judge-requested re-run is available, hashd stops with the existing failure evidence instead of making another adjudicator call. If a judgment requests a repair that is not allowed, the stop preserves its reason and explains why no automatic FIX was started.
+
+- **Familiar action names and clearer keyboard hints.** Workstream controls again say **Reject**, **Add guidance** and **Approve**, with their footer shortcuts restored. History hints show the actual `ctrl+y` binding, and other Ctrl shortcut hints use lowercase letters too.
+
+- **Code tools install on older Linux hosts.** Linux installs now use the statically linked codebase-memory-mcp build, so Debian 12, Ubuntu 22.04 and Amazon Linux hosts no longer stop with "Code tools could not be installed". The public installer applies the same fix when it installs v0.9.29.
+
+- **CI and timing fixes.** More reliable login-status and Arc workflow checks, plus faster disposable workflow stores, reduce flaky CI runs.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.29...v0.9.30
+
 ## v0.9.29 - 2026-11-04
 
 v0.9.29 brings Network access and link-based pairing, whole-stage execution on runners, Azure DevOps integration, and Antigravity support. It also improves recovery when a rebase, sign-in, review or merge stops, and keeps the evidence needed to make a decision visible across the CLI, TUI and Web.

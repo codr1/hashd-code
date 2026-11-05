@@ -38,7 +38,17 @@ That runs the same investigation, stores the defaults, and then opens the wizard
 hashd agents
 ```
 
-Shows all 7 registered agents (Claude, Codex, Gemini, OpenCode, Kimi, Qwen, Copilot): whether each binary is installed, where it was found, and the health of any credential registered with the server. It does not list stages -- `hashd project config get stage_agents` shows the effective per-stage assignments.
+Shows every declared agent: whether each binary is installed, where it was found, and the health of any credential registered with the server. It does not list stages -- `hashd project config get stage_agents` shows the effective per-stage assignments.
+
+Owners and administrators can disable an agent server-wide with
+`hashd config set agents.<name>.enabled false`, and re-enable it with `true`.
+Every declared agent is enabled by default, including in solo mode. Project
+settings cannot override this property. `hashd agents` reports disabled agents;
+`hashd agents --suggest` considers only agents the server enables. Assignments
+are preserved and running stages continue. Selecting a disabled agent, resetting
+to a disabled inherited assignment, or starting the next stage on it is refused
+with the setting to change. The same decision applies to local and remote runners.
+
 
 ### Per-stage assignment
 
@@ -62,7 +72,9 @@ Validation prevents incompatible assignments: an agent must support the shape of
 
 ### The web Settings > Agents panel
 
-The panel is a grid with one table per role. The default groups are `planner`, `coder`, `reviewer` and `reviewer_adjudicator`, in that order; any other role the server reports gets a table after them, and stages no role covers are listed last in a table with no role row. Each role table opens with the role's own row, then lists the stages the server places in that role (the `stage_role` field of `GET /projects/{name}/stage-agents`). Every row has agent, model and effort cells. Rendering the panel writes nothing; each cell is edited in place.
+Settings > Agents has **Agent properties** and **Stages**. Agent properties shows one Enabled/Disabled toggle per declared agent; owners and administrators can change it. The TUI offers the same properties and opens the existing stage configuration editor from Stages. Disabled assignments remain visible, with the setting to change before the next stage.
+
+The Web Stages section keeps the grid with one table per role. The default groups are `planner`, `coder`, `reviewer` and `reviewer_adjudicator`, in that order; any other role the server reports gets a table after them, and stages no role covers are listed last in a table with no role row. Each role table opens with the role's own row, then lists the stages the server places in that role (the `stage_role` field of `GET /projects/{name}/stage-agents`). Every row has agent, model and effort cells. Rendering the panel writes nothing; each cell is edited in place.
 
 A scope control above the grid chooses where writes go: **this project** (the project layer) or **every project on this server** (the system layer, which every project inherits unless it sets its own entry). The grid always shows this project's effective table. The chosen scope decides which layer every cell's set and reset writes, which layer's entry decides whether a cell offers a reset, and the layer the roster card's "Use for every stage" writes. Where the entry in force for a cell is not the chosen scope's own entry for it (the key or layer `/stage-agents` reports differs, or for a role cell the layer holding the entry differs), the cell names the winning entry by its key and layer, for example "in force: stage_agents.implement · project" at system scope: a system write does not change what that project runs while the project entry stands.
 
