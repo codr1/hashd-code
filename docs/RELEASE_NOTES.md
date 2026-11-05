@@ -4,6 +4,34 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.31 - 2026-11-06
+
+v0.9.31 makes test failures from projects without a build adapter count everywhere, settles runner work cut off by a restart, and fixes a merge-start deadlock, a stranded-dependents bug and runner moves to a runner whose repository is behind.
+
+### What's Changed
+
+- **Failing tests named from your output are used everywhere.** When no build adapter reads a project's test results (Nx/jest, for example), hashd's failing-test reader names the failing tests from the output, and those names are now used exactly like mechanically parsed ones: in the failure list, the judge's input, the question you're asked, the record, baselines and go-anyway. If hashd can't mechanically verify the names (for example, several summary lines), it records "named by model; not mechanically verified" with the reason and carries on. A clarification no longer says no test was named when the output names one (#3107).
+
+- **Closing a story by person releases what was waiting on it.** `hashd close <story> --ref` now releases pending dependent stories the same way an implemented story does, with no `hashd plan reset` needed (#3101).
+
+- **A refused forge-merge archive recovers.** A PR merged on the forge whose archive was refused is retried automatically and, if it still can't finish, stops with a visible, actionable reason instead of being stranded (#2956).
+
+- **Runner work cut off by a restart settles itself.** A runner records when a stage's work has finished cleaning up and reports it when it reconnects, so a story whose runner restarted can move again without manual recovery. Where the runner can't prove it, hashd says what proof is missing.
+
+- **Moving a story to a runner whose repository is behind works.** Provisioning fetches the story's recorded base when the runner doesn't have it yet, and refuses clearly, naming the commit, branch and runner, if that commit is gone.
+
+- **Merges no longer stall on a runner answer.** A merge start no longer waits on its own database connection while asking the runner about the branch.
+
+- **"orphaned" is now "interrupted".** A workstream whose run stopped without a result shows as interrupted. Saved automation conditions are updated automatically on upgrade.
+
+- **Arc proposals show a plain label in lists again.** Story lists on the CLI, TUI and Web show the plain Arc label; a pending question stays marked separately.
+
+- **Settings > Account > Labs.** A per-browser switch page for preview features, starting with "New design".
+
+- **Recorded instruction authorship.** Lineage records who gave each instruction, including retry feedback.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.30...v0.9.31
+
 ## v0.9.30 - 2026-11-05
 
 v0.9.30 improves secret-scan recovery, agent controls and the decisions around closing or merging a story. It also makes automated reviews more focused and restores familiar action names and keyboard hints.
