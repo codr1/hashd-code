@@ -670,6 +670,38 @@ install_external_tools() {
     # The wheel already carries CBM beside hashd. Verify/repair that copy,
     # without downloading a second binary into the shared tools directory.
     cbm_bin_dir="$(dirname "$(hashd_install_path "$HASHD_BIN")")"
+    # v0.9.29's tagged lock pins a glibc-2.38 Linux build. Remove this repair
+    # when installs/upgrades from that published release are no longer supported.
+    if [ "$tools_os" = linux ]; then
+        PATH="$cbm_bin_dir:$PATH" python3 - "$WORK_DIR/vendor/cbm.lock" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lock = json.loads(path.read_text(encoding="utf-8"))
+if lock.get("version") == "v0.8.1":
+    hashes = {
+        "linux-amd64": (
+            "dbd3b92ea870ef240b63059f26bda15015f76ef9978931bebc3a0f9d09470973",
+            "6ab87a6c05d049dde57700803ca0ab4199fcf25973a0606618af0fcee73f5abd",
+        ),
+        "linux-arm64": (
+            "d2f842d1365da5c35d9c5796f57a821c9745267350994346735e1e6e04d46091",
+            "13526acc2a6a0697dff3c763fb443a416589bc10ad8b12015b63d87e515dd72b",
+        ),
+    }
+    changed = False
+    for platform, (regular_sha, portable_sha) in hashes.items():
+        url = f"https://github.com/codr1/codebase-memory-mcp/releases/download/v0.8.1/codebase-memory-mcp-{platform}"
+        entry = lock.get("platforms", {}).get(platform)
+        if entry == {"url": f"{url}.tar.gz", "sha256": regular_sha}:
+            entry.update(url=f"{url}-portable.tar.gz", sha256=portable_sha)
+            changed = True
+    if changed:
+        path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    fi
     # uv/pipx supply Python beside hashd; a bare host need not have python3.
     if ! PATH="$cbm_bin_dir:$PATH" bash "$WORK_DIR/scripts/install-tools.sh" cbm --dest "$cbm_bin_dir/codebase-memory-mcp"; then
         die "Code tools could not be installed" "install.cbm" \
