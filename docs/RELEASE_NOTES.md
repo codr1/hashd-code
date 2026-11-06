@@ -4,6 +4,18 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.33 - 2026-11-06
+
+v0.9.33 fixes a v0.9.32 crash in AI conflict resolution when it renumbers a migration, and brings short status labels to the TUI and the CLI.
+
+### What's Changed
+
+- **AI conflict resolution no longer crashes on a migration.** In v0.9.32, `hashd merge --ai-resolve` stopped with "commit operation does not belong to this merge leg" when the story's migration had to be renumbered. The resolve now renumbers it like every other merge path.
+
+- **Status labels in the TUI and the CLI.** Stories and workstreams show short labels ("Ready To Merge", "Implementing / Idle", "Approved") from the same table the Web uses. Where a badge already names the stage, the line beside it shows only the runtime. `--json` output keeps the raw values.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.32...v0.9.33
+
 ## v0.9.32 - 2026-11-06
 
 v0.9.32 renumbers migrations automatically when two branches both add one, adds a .NET build adapter, keeps implementers' commit messages, and tells same-named tests in different files apart.
