@@ -4,6 +4,32 @@ Release notes follow the same markdown structure used by GitHub releases:
 version heading, date, categorized "What's Changed" bullets, and a full
 changelog compare link.
 
+## v0.9.32 - 2026-11-06
+
+v0.9.32 renumbers migrations automatically when two branches both add one, adds a .NET build adapter, keeps implementers' commit messages, and tells same-named tests in different files apart.
+
+### What's Changed
+
+- **Migrations both branches added merge without a hand rescue.** When a story and its target both add a migration, merge preparation renumbers the story's migration as a whole (every file of it) after the target's newest and follows the rename in its references. Anything less clear-cut (a migration the merge removed, one both sides added under the same name with different content, a changed body) stops for review with a reason naming the migration. If the target moves during the merge, hashd prepares again before landing.
+
+- **.NET build adapter.** hashd reads the TRX files `dotnet test` writes. Add `--logger trx` (VSTest) or `--report-trx` (Microsoft.Testing.Platform) to the test command configured in hashd; the project and its CI need no change (#3109).
+
+- **Build cleanup also removes ignored files.** Paths listed under `build_side_effects.clean` (or an adapter's defaults) are removed after a command even when the repository ignores them, so old report files no longer read as stale on the next run. Files that were there before the command are left alone.
+
+- **Implementers' commit messages are kept.** The body an implementer writes is recorded with each micro-commit and FIX commit, survives retries and checkpoint resets, and reaches the final reviewer. Commit messages are written as UTF-8 whatever `i18n.commitEncoding` says (#3097).
+
+- **Same-named tests in different files stay apart.** A failing test is identified by its file and its name everywhere, so `TestLogin` in two files is two tests. A "go anyway" accepted on an earlier run needs accepting again after the next run.
+
+- **Every failing test is listed.** The failure summary no longer stops at ten failing tests, ten compile errors or five build errors.
+
+- **Recorded test results are reused.** When a commit's tests already ran and were recorded (at provisioning or an earlier merge attempt), the merge reuses that result instead of running the same tests again, and the base's standing known failures are shown with it.
+
+- **`hashd log` shows why something stopped.** A one-line entry whose detail was empty now shows the explanation the server recorded.
+
+- **Status labels in the new design.** With Settings > Account > Labs > New design on, the Web shows short status labels ("Ready To Merge", "Human Review") with the raw value on hover.
+
+**Full Changelog**: https://github.com/codr1/hashd/compare/v0.9.31...v0.9.32
+
 ## v0.9.31 - 2026-11-06
 
 v0.9.31 makes test failures from projects without a build adapter count everywhere, settles runner work cut off by a restart, and fixes a merge-start deadlock, a stranded-dependents bug and runner moves to a runner whose repository is behind.

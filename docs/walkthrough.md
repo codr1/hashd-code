@@ -156,6 +156,8 @@ hashd watch STORY-0001    # live TUI, or:
 hashd show <workstream>   # status snapshot
 ```
 
+A non-empty structured commit body takes precedence over git-body fallback; the sources are never appended together. When the structured field is absent or empty, hashd preserves all non-empty bodies from implementer-created commits in that implementation attempt, in commit order. When both sources are empty, hashd adds no implementer prose or placeholder. Hashd owns the subject and lineage trailers. Forge squash-merge settings and behavior decide how source commit bodies combine in the merged commit; that is outside hashd's body-preservation contract.
+
 ## 5. Hit an approval gate
 
 When the loop pauses for you, the Workstream's `runtime_status` reads `blocked` (or

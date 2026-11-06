@@ -115,16 +115,66 @@ version. If migration 180 lands before migration 172 from another branch, a
 database already at 180 silently skips 172. Hand-assigned numbers do not survive
 parallel branches.
 
-At the final rebase, compare the branch's new migrations with the base's highest
-version. If **any** new migration is at or below that version, renumber **all** of
-the branch's new migrations from highest + 1, in their original order, keeping
-up/down pairs together. For example, with base 180, branch migrations 179 and 185
-become 181 and 182. If all new migrations are already above the base's highest,
-leave them alone; gaps are harmless.
+**What hashd does.** Every merge preparation, and the merge gate, first reads from
+git whether the base and the branch both added migrations since they parted: files
+whose names start with a number (an integer or a timestamp) in the same directory,
+or any file in the project's `migration_dir` when it is set. When they did:
 
-Set the project's `migration_dir` to have hashd apply this rule at merge, after
-the rebase and before verification, and commit the renames. Teams without that
-setting should apply the same rule in their own CI at the final rebase.
+- With `migration_dir` set, before the rebase hashd handles exactly two cases
+  itself, each for a whole migration (all its up/down files together). A branch
+  migration that is an exact copy of a base migration under another name (every
+  file, byte for byte) is dropped. If any migration only the branch added is at
+  or below the base's newest, hashd renumbers **all** of those from newest + 1 in
+  their original order, keeping up/down pairs together and each number's width.
+  A migration the base also added under the same name is never moved: an exact
+  copy is already the base's, and anything else goes to review. With base 180, branch migrations 179 and 185 become 181 and 182;
+  already-higher migrations are left alone (gaps are harmless). Files in that
+  directory whose names do not start with a number are left as they are, and the
+  merge says so. This renumber is mechanical and final.
+- The merge agent assesses the migrations: whether they are migrations, whether
+  order matters, whether the base changed the schema they were written against. It
+  does so whenever the rebase conflicts, and after a clean rebase when hashd
+  renumbered something (references to the old names may need updating) or no
+  `migration_dir` is set; with one set and nothing renamed, the numbers are in order
+  and the full test run is the check. It may rename the branch's migration files in
+  those directories and update references to their old names; nothing else beyond
+  its conflict. A base
+  change that breaks a branch migration (the base renamed a column the branch
+  alters) stops the merge for a fix; a compatible one is noted on the workstream's
+  timeline.
+- Graph tools (Alembic, Django) are supported best-effort: when the merge leaves
+  two heads, the agent runs the project's own tool (`alembic merge heads`,
+  `python manage.py makemigrations --merge`) in the story's checkout. If the tool
+  cannot run there, the merge stops and asks for a merge migration. A graph-tool
+  merge migration always gets a review. Changelog tools (Liquibase and the like) are
+  not supported.
+- The merge always runs the project's full test command, never the light check a
+  clean rebase may otherwise use.
+- hashd decides from the diff, never from the agent's account, whether the review
+  still stands. Migrations whose content is unchanged after a renumber, with
+  references and version numbers updated to match, keep the story's review, as
+  does a dropped exact copy. Anything else in those directories stops the merge,
+  with the migration named and why: a migration the merge added, removed, or
+  changed the files or body of, one of the base's it removed, or one both sides
+  added under the same name. hashd then runs the final review again by itself; a
+  person is involved only if that review finds problems.
+- Just before the merge itself, hashd reads the base again. If it moved outside
+  hashd meanwhile, the branch is prepared again, inside the same merge lock, as
+  often as the base moves.
+
+Hash-named revisions (Alembic) and `V`-prefixed files (Flyway) are not recognised
+by name: set `migration_dir` for them to fire the assessment. `+1` on a timestamp
+only orders the files; it does not stand for a time.
+
+**What we recommend (never require).**
+
+- Set `migration_dir` if you have numbered migrations.
+- Add a migration-order lint to your own CI for merges that bypass hashd: refuse a
+  duplicate version, and a new migration at or below the target branch's newest.
+- Test that the full migration chain applies to a fresh database and as an upgrade
+  from your last release.
+- Reset any database that ran a migration from a branch that was not merged as it
+  stood: the renumbered migration is a different version.
 
 ## The dual-write event log
 

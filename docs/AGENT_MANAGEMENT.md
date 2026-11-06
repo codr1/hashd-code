@@ -756,6 +756,18 @@ Prompts are loaded and rendered by `server/internal/prompts`:
 prompt, err := prompts.Render(promptsDir, overridesDir, "implement", vars)
 ```
 
+A non-empty structured commit body takes precedence over git-body fallback; the sources are never appended together. When the structured field is absent or empty, hashd preserves all non-empty bodies from implementer-created commits in that implementation attempt, in commit order. When both sources are empty, hashd adds no implementer prose or placeholder. Hashd owns the subject and lineage trailers. Forge squash-merge settings and behavior decide how source commit bodies combine in the merged commit; that is outside hashd's body-preservation contract.
+
+The shipped agents declare the optional `commit_body` string field through
+`agents.<agent>.commit_body_field`. Implementation prompts render that declaration
+for ordinary, FIX, review-retry and crash-resume attempts. Put body content
+requested through `hashd reject -f` or `hashd answer` in that field of the final
+status object. Use JSON escapes for paragraph breaks, for example:
+
+```json
+{"status":"changes_made","files":["server/internal/example.go"],"summary":"Preserved operator guidance","changes":["Passed the requested body to the commit stage"],"commit_body":"Preserve operator-requested commit prose.\n\nValidation: the focused body handoff test passed."}
+```
+
 ### Composing prompts
 
 Strongly prefer `include_<role>_<concern>.md` for reusable sections, or

@@ -2744,7 +2744,7 @@ final_review_started  Final review started
 final_review_outcome  Final review approved: 0 findings
 pr_publication        PR create: PR #7 created (parser -> main, https://forge.example/acme/demo/pull/7, head facade01)
 merge_started         Merge started: parser -> main (PR merge)
-merge_landed          Merge landed: parser -> main (PR merge, https://forge.example/acme/demo/pull/7)
+merge_landed          Merge landed: parser -> main (PR merge, https://forge.example/acme/demo/pull/7, commit decaf001)
 archive               Archive: started
 archive               Archive: completed
 ```
@@ -2960,6 +2960,8 @@ acknowledges that the owning workflow has finished its work.
 | `pr_merged_externally` | `await_pr_approval` -> `finalize` |
 | `post_rebase_test_pass_pr` | `post_rebase_test` -> `pr_merge` |
 | `pr_merge_pass` | `pr_merge` -> `finalize` |
+| `base_moved` | `checkout` -> `pre_merge_tests` (the base moved outside hashd during the merge: prepared again) |
+| `base_moved` | `post_rebase_test` -> `pre_merge_tests` (the same, before the forge merge) |
 
 | Exit trigger | From | Result returned to parent |
 |---|---|---|
