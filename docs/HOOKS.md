@@ -56,13 +56,34 @@ Called from:
 ## HASHD_* Environment Variables
 
 A hook runs repository code, so it does not inherit the server's
-environment. It receives the same allowlisted environment as an agent
-(see AGENT_MANAGEMENT.md, "Environment variables"): the base names (`PATH`,
-`HOME`, locale, `TERM`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, the
-proxy and CA variables), any name the project lists in `exec.env_allow`,
-the values the project sets in `exec.env`, and these context variables last.
-A hook never receives an `exec.credentials` credential; only project
-commands do:
+environment. It receives the allowlisted environment a project command
+receives (`server/internal/childenv`): the base names (`PATH`, `HOME`,
+locale, `TERM`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, the proxy and CA
+variables), then the project environment, then these context variables last.
+
+The project environment is the project's entries, with the target repo's
+over them by name, resolved right before the hook starts, so a changed entry
+or a replaced secret is the next hook's (docs/AGENT_MANAGEMENT.md,
+**The project environment**, says how entries are set). Every entry type
+reaches a hook:
+
+- a **value** entry as written;
+- a **secret** entry's secret, or with `as_file` the path of a read-only file
+  holding it, written for this one hook outside the worktree and removed once
+  it ends;
+- a **credential** entry's value: the work owner's own credential for its
+  forge credential key;
+- a **host** entry's variable, read from the environment of the machine that
+  runs the hook (the server, or the runner the workstream is placed on): an
+  exact name, or every variable a `PREFIX_*` pattern matches. A variable
+  that machine lacks is not set.
+
+Every secret and credential value is replaced by `[REDACTED]` in the hook's
+output. A project environment that cannot be had -- an owner with no
+credential for a credential entry's key, a secret that does not open -- stops
+the hook before it starts; its failure names the entry and what to do.
+
+The context variables:
 
 | Variable | Description | Always set? |
 |----------|-------------|-------------|
@@ -200,22 +221,24 @@ Hook failed: exit status 1
 - Path assumptions (always use `$HASHD_WORKTREE_PATH` or relative paths)
 - Missing tool (the hook inherits the parent's PATH -- confirm the tool is on it)
 - Missing variable (a toolchain variable such as `JAVA_HOME` is not inherited
-  unless the project lists it in `exec.env_allow`; `hashd doctor` lists what a
-  hook receives and what it does not)
+  unless the project environment has a host entry for it; `hashd doctor` lists
+  what a hook receives and what it does not)
 
 ## Call Flow
 
-The hooks run only at their lifecycle points, inside the server's own flows;
-no endpoint runs one on request.
+The hooks run only at their lifecycle points, inside the stages of the
+runner that holds the story's checkout (the server's local runner or a
+remote one); no endpoint runs one on request.
 
 ```
 setup     provisioning's environment build    server/internal/runflow/environment.go
 teardown  the merge archive's checkout removal server/internal/mergeflow/archive.go
-teardown  close / remove / archive delete      server/internal/api/mutations_state.go
-                                               (teardownWorkstreamArtifacts)
+teardown  close / remove / archive delete      server/internal/runnerconnect/teardown_worktree_stage_body.go
+          (the teardown_worktree stage)
                  |
                  v
-     server/internal/hooks (Run / RunContext)
+     server/internal/hooks (RunContext), with the project
+     environment the server answers for the stage's assignment
                  |
                  v
      bash -c "<hook>" in the story's checkout

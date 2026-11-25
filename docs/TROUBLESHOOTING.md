@@ -1,5 +1,116 @@
 # Troubleshooting
 
+## Installer migration failures
+
+A restart Diagnostic tagged `restart.migration_failed` stops the published
+installer without its second restart. Source setup also exits unsuccessfully
+at its restart phase. Neither invocation reports installation success. The
+original migration Diagnostic below the tag retains the affected projects,
+explanation, facts, causes, and repair suggestions. The tag identifies the
+migration failure regardless of whether any services are available; it does
+not by itself promise recovery, backup, or restoration.
+
+For a protected full or server-component restart, automatic recovery keeps the
+lifecycle lock, confirms the server and Temporal process groups stopped, restores
+only this attempt's archive without replacement migrations, then starts the
+retained previous build at the recovered operations root. An unconfirmed stop
+prevents publication and either build's startup; failed restoration starts
+neither build. The diagnostic names the exact archive, retained carrier, recovered
+root and any stop, restore or startup failure paths. Excluded repository clones
+and local-runner checkouts survive recovery and any prior root relocation.
+
+Read the recovered-server startup-release report separately: work may be released,
+still held, or unknown if readiness cannot be read. Successful recovery still
+leaves the upgrade unsuccessful. A confirmed released recovery makes its archive
+eligible for configured retention (including removal with keep=0); failed or
+unconfirmed recovery keeps it protected. `--skip-backup` leaves
+manual recovery only; no older archive is searched for.
+
+Health does not confirm startup release. If release is held or unknown, keep the
+exact archive and retained-build directory named in the report, even with
+`upgrade.backup.keep=0`. A standing hold refuses mutating requests and keeps held
+work paused. An unknown release means requests may already be accepted and work
+may already have resumed; do not assume the installation is quiescent. Resolve
+the reported readiness reason; if credentials prevent reading release, re-join the host as directed by
+the startup report before starting again. Do not retry the failed migration merely
+to clear a hold. A later successful attempt does not release an older protected
+archive. Backup retention or cleanup errors supplement the migration and recovery
+reports; resolve every reported path without discarding those recovery artifacts.
+
+Follow the migration's repair suggestions before retrying. For a packaged
+installation, rerun the original installer invocation directly. For a source
+installation, rerun setup from the source checkout:
+
+```bash
+./setup.sh
+```
+
+The installer supplies the retained previous-build handoff required by the
+replacement build's restart; a plain restart from a new shell lacks that handoff.
+Unrelated convergence failures still get the
+published installer's one retry; restart-hold and destructive-upgrade refusals
+still require the action named in their Diagnostic before retrying.
+
+The packaged installer preserves the previous local build before uv/pipx
+replaces its wheels or external tools are refreshed. Source setup preserves it
+before syncing dependencies, refreshing tools, generating code, or rebuilding. If preparation or
+restart fails, it prints `Previous runnable build retained at:` followed by a directory
+under `~/.local/state/hashd/retained/build.*`. That directory contains
+`build-identity` and `handoff.sh`, independently of the checkout and temporary
+installer files. A preservation refusal includes the complete
+`install.preserve_previous` Diagnostic and stops before replacement.
+
+Protected local full and server-component restarts require that previous runnable
+build before auto-rebuild, shutdown or migration. Restart validates the installer
+handoff against the installation's operations root and executable fingerprint;
+source setup preserves it before replacement. Direct source restarts without that
+pre-replacement handoff refuse; copying binaries after a manual build cannot
+recover the overwritten build. Restore the previous installation before rerunning
+setup if no handoff exists. Auto-rebuild requires a retained build and archive for
+existing local source installations even when the executing CLI sees no pending migrations.
+A `restart.recovery_build` refusal stops before rebuilding or stopping services.
+Restore the named executable, resource, interpreter or infrastructure prerequisite
+from the existing installation, correct any filesystem error, then rerun the installer.
+A newly built replacement alone is insufficient. `--skip-backup` deliberately bypasses
+this prerequisite as well as archive creation, leaving automatic restoration unavailable.
+
+Recovery records its selected carrier beside the installation receipt in
+`hashd-install-recovery`. The next source or packaged installer preserves that
+carrier, even though the installed launcher still points at the failed candidate.
+A completed installation clears the selection; a failed attempt keeps it.
+Even confirmed, released recovery is a failed installation: restart may release
+archive protection, but preserves the installer-owned retained build and its
+handoff. Direct restarts consume that same installer handoff and do not own its
+cleanup. A healthy replacement with unresolved startup or workflow release returns
+`restart.release_unconfirmed`: both installers stop unsuccessfully and preserve
+the retained build; the packaged installer does not retry that outcome.
+
+Keep that directory while recovery remains unresolved. A later explicit
+packaged install or `./setup.sh` creates its own retained build; successful
+installation removes only that attempt's payload. Temporary wheel-directory
+cleanup leaves retained builds in place. Fresh installations and remote clients
+need no prior local build.
+
+If automatic recovery did not start the previous build, first resolve the
+reported stop or restoration failure. After explicitly restoring the selected
+archive and confirming the database
+is suitable for the previous build, use the exact retained location printed by
+the installer to start it manually. In a subshell, the handoff selects its runtime,
+tools, interpreter, and recorded operations root:
+
+```bash
+retained="$HOME/.local/state/hashd/retained/build.ABC123" # use the printed location
+(
+    source "$retained/handoff.sh"
+    "$retained/bin/hashd" start
+)
+```
+
+The source and packaged installer harnesses exercise this handoff and
+manual-start command, including a later explicit upgrade attempt. Preserving
+the build alone does not restore the database; protected restart recovery performs
+that restoration before automatically starting it.
+
 ## Baseline Test Failures
 
 ### What it means
@@ -212,8 +323,9 @@ the worktree was removed. Run cleanup from outside the worktree path.
 Close is one of three kinds, and each decides what happens to the story's
 requirement in REQS:
 
-- `hashd close <story>` abandons the story; its requirement returns to REQS
-  as open work.
+- `hashd close <story> [--reason "..."]` abandons the story; its requirement
+  returns to REQS as open work, and an optional reason is recorded as the
+  story's closure.
 - `hashd close <story> --no-changes --reason "..."` closes it as no changes
   needed; the requirement is met and its REQS sections are burned.
 - `hashd close <story> --ref <ref> --reason "..."` closes it as

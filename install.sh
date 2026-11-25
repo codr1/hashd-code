@@ -172,6 +172,359 @@ hashd_install_record() (
     mv -f "$staged" "$receipt"
 )
 
+# Preserve before rebuilding a checkout or asking a wheel manager to replace it.
+# Prints only a completed payload's location; no output means a fresh/client
+# install. Callers must check the status before publishing an upgrade handoff.
+# The retained layout is a Go carrier, understood by even older bootstrap code.
+hashd_install_preserve() (
+    local preferred="${1:-}" launcher target root legacy data="" bin item cause recovered receipt installed_launcher
+    local staged="" published=0 tools="${HASHD_TOOLS_DIR:-$HOME/.hashd/tools/bin}"
+    local store="$HOME/.local/state/hashd/retained" digest python="${HASHD_PYTHON:-}" python_bin
+    umask 077
+    trap '[ "$published" = 1 ] || { [ -z "$staged" ] || rm -rf "$staged"; }' EXIT
+    launcher=""
+    while IFS= read -r item; do
+        if [ -e "$item" ] || [ -L "$item" ]; then
+            launcher="$item"
+            break
+        fi
+    done < <(hashd_install_launchers "$preferred")
+    [ -n "$launcher" ] || return 0
+
+    if root="$(hashd_install_receipt_root "$launcher")"; then
+        :
+    else
+        local rc=$?
+        if [ "$rc" = 1 ]; then
+            root="$(hashd_install_legacy_root "$launcher")" || root=""
+        fi
+        [ -n "$root" ] || hashd_install_preserve_error "$launcher" \
+            'The prior installation ownership or operations root could not be identified.'
+    fi
+    installed_launcher="$launcher"
+    # Recovery runs a retained carrier while the installed launcher still points
+    # at the failed candidate. Keep that selection across later installer attempts.
+    receipt="$(dirname "$launcher")/hashd-install-recovery"
+    if [ -f "$receipt" ]; then
+        recovered="$(cat "$receipt")" || hashd_install_preserve_error "$receipt" 'Cannot read the recovered build selection.'
+        [ "$(hashd_install_receipt_root "$recovered/bin/hashd")" = "$root" ] ||
+            hashd_install_preserve_error "$receipt" 'The recovered build does not belong to this installation.'
+        launcher="$recovered/bin/hashd"
+        tools="$recovered/tools"
+        python="$recovered/bin/python"
+    fi
+    target="$(hashd_install_path "$launcher")" || hashd_install_preserve_error "$launcher" 'Cannot resolve the prior executable.'
+    legacy="$(hashd_install_legacy_root "$launcher")" || legacy=""
+    if [ -n "$legacy" ] && [ -f "$legacy/server/go.mod" ]; then
+        data="$legacy"
+        bin="$legacy/bin"
+        python="${python:-$legacy/.venv/bin/python}"
+    else
+        bin="$(dirname "$target")"
+        python_bin="$bin"
+        for item in "$python_bin/python" "$python_bin/python3" "$python_bin/python.exe" "$python_bin"/python3.[0-9]*; do
+            if [ -f "$item" ] && [ -x "$item" ]; then
+                python="$item"
+                break
+            fi
+        done
+        for item in "$(dirname "$bin")"/lib/python*/site-packages/hashd_data \
+            "$(dirname "$bin")"/lib64/python*/site-packages/hashd_data \
+            "$(dirname "$bin")"/Lib/site-packages/hashd_data; do
+            if [ -d "$item/prompts" ] && [ -d "$item/templates" ] && [ -d "$item/schemas" ]; then
+                data="$item"
+                break
+            fi
+        done
+        # Some earlier carriers keep their executables beside the resources.
+        [ ! -f "$data/bin/hashd" ] || bin="$data/bin"
+    fi
+    [ -n "$python" ] || hashd_install_preserve_error "$target (adjacent Python)" 'The prior helper interpreter is missing.'
+    # Match restart's effective client connection, including saved settings,
+    # and its host-local decision. The old CLI is never executed. Use its Python
+    # environment for YAML, before requiring any server-only payloads.
+    cause="$("$python" - <<'CONNECTION' 2>&1
+import ipaddress
+import os
+from pathlib import Path
+import socket
+import sys
+from urllib.parse import urlsplit
+
+endpoint = os.environ.get('HASHD_SERVER_URL', '').strip()
+if not endpoint:
+    config_home = (Path.home() / 'Library/Application Support' if sys.platform == 'darwin'
+                   else Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config'))
+    config = config_home / 'hashd/config.yaml'
+    if config.is_file():
+        import yaml
+        endpoint = (yaml.safe_load(config.read_text()) or {}).get('server_url', '').strip()
+
+# An invalid endpoint is reported by restart's normal start path; it must not
+# silently opt out of preservation.
+try:
+    host = urlsplit(endpoint).hostname
+except ValueError:
+    host = None
+
+def local_address(family, address):
+    ip = ipaddress.ip_address(address[0].split('%')[0])
+    if ip.is_loopback or ip.is_unspecified:
+        return True
+    # Binding an ephemeral port asks the kernel whether this host owns the
+    # address, without contacting the server or depending on its availability.
+    candidates = [address]
+    # An IPv6 link-local address binds only through its interface, and a
+    # resolver may name it without one: nss-myhostname does, for the host's
+    # own name. Restart counts such an address local when any interface holds
+    # it, so each interface is asked.
+    if family == socket.AF_INET6 and ip.is_link_local and not address[3]:
+        candidates = [address[:3] + (index,) for index, _ in socket.if_nameindex()]
+    for candidate in candidates:
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind(candidate)
+            return True
+        except OSError:
+            continue
+    return False
+
+if not host:
+    local = True
+else:
+    try:
+        addresses = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM)
+        local = bool(addresses) and all(local_address(family, address)
+                                       for family, _, _, _, address in addresses)
+    except socket.gaierror:
+        local = False
+print('local' if local else 'remote')
+CONNECTION
+)" || hashd_install_preserve_error "$python (client connection)" "$cause"
+    [ "$cause" != remote ] || return 0
+    [ "$cause" = local ] || hashd_install_preserve_error "$python (client connection)" 'The prior interpreter did not classify the server endpoint.'
+    [ -n "$data" ] || hashd_install_preserve_error "$target" 'The prior runtime data directory is missing.'
+    for item in "$python" "$target" "$bin/hashd-server" "$tools/temporal-server" "$tools/temporal-sql-tool"; do
+        [ -f "$item" ] && [ -x "$item" ] || hashd_install_preserve_error "$item" 'Required executable is missing or is not executable.'
+    done
+    for item in prompts templates schemas agent_policies docs; do
+        [ -d "$data/$item" ] || hashd_install_preserve_error "$data/$item" 'Required runtime resource directory is missing.'
+    done
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        digest='shasum -a 256'
+    else
+        hashd_install_preserve_error 'SHA-256 tool' 'Neither sha256sum nor shasum is available; install one with the system package manager.'
+    fi
+    cause="$(mkdir -p "$store" 2>&1)" || hashd_install_preserve_error "$store" "$cause"
+    staged="$(mktemp -d "$store/build.XXXXXX" 2>&1)" || hashd_install_preserve_error "$store" "$staged"
+    local retained_data="$staged/lib/python3.11/site-packages/hashd_data"
+    cause="$(mkdir -p "$staged/bin" "$retained_data" "$staged/tools" 2>&1)" || hashd_install_preserve_error "$staged" "$cause"
+    # Dereference links: wheel managers and source builds may remove or overwrite
+    # their targets. Never retain hard links to mutable installation bytes.
+    hashd_install_preserve_copy "$target" "$staged/bin/hashd"
+    for item in hashd-server hashd-web codebase-memory-mcp; do
+        if [ -e "$bin/$item" ]; then
+            hashd_install_preserve_copy "$bin/$item" "$staged/bin/$item"
+        fi
+    done
+    for item in prompts templates schemas agent_policies docs; do
+        hashd_install_preserve_copy "$data/$item" "$retained_data/$item"
+    done
+    hashd_install_preserve_copy "$tools/." "$staged/tools/"
+    # The Playwright wrapper resolves assets relative to its own location.
+    # Recreate its launcher link into the independently copied runtime instead
+    # of leaving the dereferenced wrapper detached at the tools root.
+    if [ -L "$tools/playwright-cli" ]; then
+        local browser tools_root browser_link
+        browser="$(hashd_install_path "$tools/playwright-cli")" || hashd_install_preserve_error "$tools/playwright-cli" 'Cannot resolve the browser runtime.'
+        tools_root="$(hashd_install_path "$tools")" || hashd_install_preserve_error "$tools" 'Cannot resolve the tools directory.'
+        case "$browser" in
+            "$tools_root"/*) browser_link="${browser#"$tools_root"/}" ;;
+            *)
+                cause="$(mkdir -p "$staged/browser" 2>&1)" || hashd_install_preserve_error "$staged/browser" "$cause"
+                hashd_install_preserve_copy "$(dirname "$browser")/." "$staged/browser/"
+                browser_link="../browser/$(basename "$browser")"
+                ;;
+        esac
+        cause="$(rm -f "$staged/tools/playwright-cli" && ln -s "$browser_link" "$staged/tools/playwright-cli" 2>&1)" || hashd_install_preserve_error "$tools/playwright-cli" "$cause"
+    fi
+    hashd_install_preserve_python "$python" "$staged"
+    cause="$(hashd_install_record "$staged/bin/hashd" "$root" 2>&1)" || hashd_install_preserve_error 'retained installation receipt' "$cause"
+    # Fingerprint the retained executables, without executing the old CLI.
+    cause="$(cd "$staged/bin" && $digest hashd hashd-server 2>&1)" || hashd_install_preserve_error 'build identity' "$cause"
+    printf '%s\n' "$cause" > "$staged/build-identity" || hashd_install_preserve_error "$staged/build-identity" 'Cannot write the build identity.'
+    # Bash-quoted metadata can be sourced by the entry-point handoff. Keep the
+    # operations root separate from the relocated immutable runtime resources.
+    {
+        printf 'HASHD_PREVIOUS_LAUNCHER=%q\n' "$installed_launcher"
+        printf 'HASHD_PREVIOUS_EXECUTABLE=%q\n' "$target"
+        printf 'HASHD_PREVIOUS_OPS_ROOT=%q\n' "$root"
+        printf 'HASHD_PREVIOUS_BUILD_ID=%q\n' "$staged/build-identity"
+        printf 'HASHD_PREVIOUS_LOCATION=%q\n' "$staged"
+        printf 'export HASHD_OPS_ROOT=%q\n' "$root"
+        printf 'export HASHD_ROOT=%q\n' "$retained_data"
+        printf 'export HASHD_PACKAGE_BIN_DIR=%q\n' "$staged/bin"
+        printf 'export HASHD_TOOLS_DIR=%q\n' "$staged/tools"
+        printf 'export HASHD_PYTHON=%q\n' "$staged/bin/python"
+        printf 'export PATH=%q:"$PATH"\n' "$staged/bin"
+    } > "$staged/handoff.sh" || hashd_install_preserve_error "$staged/handoff.sh" 'Cannot write the retained build handoff.'
+    published=1
+    printf '%s\n' "$staged"
+)
+
+hashd_install_preserve_copy() {
+    local cause
+    cause="$(cp -RLp "$1" "$2" 2>&1)" || hashd_install_preserve_error "$1" "$cause"
+}
+
+# Copy Python's runtime and helper packages without keeping virtualenv symlinks
+# or editable .pth paths into a checkout that setup.sh is about to replace.
+hashd_install_preserve_python() {
+    local cause
+    cause="$("$1" - "$2" <<'PYTHON' 2>&1
+from pathlib import Path
+import shutil
+import sys
+import sysconfig
+
+root = Path(sys.argv[1])
+runtime = root / 'python-base'
+stdlib = runtime / sys.platlibdir / ('python' + sysconfig.get_python_version())
+environment = root / 'python-env'
+packages = environment / 'lib' / ('python' + sysconfig.get_python_version()) / 'site-packages'
+(runtime / 'bin').mkdir(parents=True)
+shutil.copy2(Path(sys.executable).resolve(), runtime / 'bin/python')
+# The stdlib is outside a virtualenv. Exclude its unrelated global packages;
+# the helper environment's own purelib/platlib are copied below.
+shutil.copytree(sysconfig.get_path('stdlib'), stdlib,
+                ignore=shutil.ignore_patterns('site-packages', 'dist-packages'))
+libdir = Path(sysconfig.get_config_var('LIBDIR'))
+# Keep the shared Python library beside the relocated runtime as well. The
+# managed interpreters uv uses resolve this via their executable's rpath.
+for name in ('LDLIBRARY', 'INSTSONAME'):
+    library = sysconfig.get_config_var(name)
+    if library and (libdir / library).is_file():
+        (runtime / 'lib').mkdir(exist_ok=True)
+        shutil.copy2(libdir / library, runtime / 'lib' / Path(library).name)
+packages.mkdir(parents=True)
+(environment / 'bin').mkdir()
+(environment / 'bin/python').symlink_to('../../python-base/bin/python')
+(environment / 'pyvenv.cfg').write_text(
+    'home = ' + str(runtime / 'bin') + '\ninclude-system-site-packages = false\n')
+paths = {}
+for key in ('purelib', 'platlib'):
+    original = Path(sysconfig.get_path(key)).resolve()
+    if original in paths:
+        continue
+    paths[original] = packages
+    shutil.copytree(original, packages, dirs_exist_ok=True)
+
+# uv/setuptools workspace installs use path-only .pth entries for their src
+# directories. Snapshot these bytes too; copying just site-packages would keep
+# importing the newly replaced checkout. Leave executable .pth hooks intact.
+for original in list(paths):
+    for pth in original.glob('*.pth'):
+        lines = []
+        for line in pth.read_text().splitlines():
+            if not line.strip() or line.startswith(('#', 'import ', 'import\t')):
+                lines.append(line)
+                continue
+            source = (original / line).resolve()
+            if source not in paths:
+                destination = environment / 'editable' / str(len(paths))
+                shutil.copytree(source, destination)
+                paths[source] = destination
+            lines.append(str(paths[source]))
+        (packages / pth.name).write_text('\n'.join(lines) + '\n')
+
+# An adjacent launcher lets packaged bootstrap resolve the retained interpreter
+# by its existing rules. PYTHONHOME is private to this helper process, so it
+# cannot redirect a different Python launched by an agent.
+(root / 'bin/python').write_text('''#!/bin/bash
+root="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONHOME="$root/python-base"
+export LD_LIBRARY_PATH="$root/python-base/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export DYLD_LIBRARY_PATH="$root/python-base/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+exec "$root/python-env/bin/python" "$@"
+''')
+(root / 'bin/python').chmod(0o755)
+PYTHON
+)" || hashd_install_preserve_error "$1 (Python runtime and helper packages)" "$cause"
+    cause="$("$2/bin/python" -c 'import hashd_client.connector_host' 2>&1)" || \
+        hashd_install_preserve_error "$2/bin/python (retained helper environment)" "$cause"
+}
+
+hashd_install_preserve_error() {
+    die 'Could not preserve the previous runnable hashd build' \
+        'install.preserve_previous' \
+        "Prerequisite: $1\nCause: $2" \
+        'Restore the named prerequisite from the existing installation, or correct the reported filesystem error, then rerun this installer.' \
+        'Keep the existing installation in place until preservation succeeds; no retained build handoff was published.'
+}
+
+hashd_install_preserved_outcome() {
+    local status=${1:-$?}
+    [ -n "$PREVIOUS_LOCATION" ] || return "$status"
+    if [ "$status" -eq 0 ]; then
+        # Restart returns restart.release_unconfirmed while startup or workflow
+        # release is unresolved, so success also authorizes payload cleanup.
+        # The operations root may have moved during this successful upgrade.
+        # Clear only selection records for the carrier this attempt preserved.
+        (
+            local failures=() cause selection recovered launcher receipt
+            source "$PREVIOUS_LOCATION/handoff.sh" || die \
+                'Could not read the retained build handoff' 'install.recovery_cleanup' \
+                "Path: $PREVIOUS_LOCATION/handoff.sh" \
+                'Restore read access to the handoff before retrying selection cleanup.'
+            recovered="$(dirname "$(dirname "$HASHD_PREVIOUS_EXECUTABLE")")"
+            recovered="$(hashd_install_path "$recovered")" || die \
+                'Could not resolve the recovered build path' 'install.recovery_cleanup' \
+                "Path: $HASHD_PREVIOUS_EXECUTABLE" \
+                'Correct the retained build path before retrying selection cleanup.'
+            while IFS= read -r launcher; do
+                receipt="$(dirname "$launcher")/hashd-install-recovery"
+                [ -f "$receipt" ] || continue
+                if selection="$(cat "$receipt" 2>&1)"; then
+                    if ! selection="$(hashd_install_path "$selection" 2>&1)"; then
+                        failures+=("Could not resolve selection in $receipt: $selection")
+                        continue
+                    fi
+                    if [ "$selection" = "$recovered" ]; then
+                        if cause="$(rm -f "$receipt" 2>&1)"; then
+                            :
+                        else
+                            failures+=("Could not remove $receipt: $cause")
+                        fi
+                    fi
+                else
+                    failures+=("Could not read $receipt: $selection")
+                fi
+            done < <(hashd_install_launchers "$HASHD_PREVIOUS_LAUNCHER")
+            if [ "${#failures[@]}" -gt 0 ]; then
+                printf -v cause '%s\n' "${failures[@]}"
+                die 'Could not clear recovered build selections' 'install.recovery_cleanup' \
+                    "$cause" \
+                    'Correct the reported filesystem errors and retry selection cleanup before installing again.' \
+                    "Previous runnable build retained at: $PREVIOUS_LOCATION"
+            fi
+        ) || return 1
+        rm -rf "$PREVIOUS_LOCATION"
+    else
+        printf '\nPrevious runnable build retained at: %s\n' "$PREVIOUS_LOCATION" >&2
+        printf 'Recovery environment: %s/handoff.sh\n' "$PREVIOUS_LOCATION" >&2
+    fi
+    return "$status"
+}
+
+# Keep wheel cleanup independent of retained payloads and the attempt's status.
+hashd_install_packaged_outcome() {
+    local status=$?
+    rm -rf "$WORK_DIR"
+    hashd_install_preserved_outcome "$status"
+}
+
 REPO="codr1/hashd-code"
 COMPLETION_MARKER="# hashd/wf completions (managed by hashd install scripts -- drop after v1.0 once everyone has migrated)"
 
@@ -986,6 +1339,16 @@ ok "Downloaded wheels" "CLI + server + client SDK + bot + figma/github/jira/conf
 # Nothing between here and there needs one.
 
 # --- Install hashd wheels ---
+# Snapshot the actual prior installation before either wheel replacement or
+# external-tool refresh. Only restart receives this handoff; normal startup
+# continues to resolve the replacement installation.
+if [ "$INSTALL_VIA" = uv ]; then
+    previous_launcher="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}/hashd"
+else
+    previous_launcher="${PIPX_BIN_DIR:-$HOME/.local/bin}/hashd"
+fi
+PREVIOUS_LOCATION="$(hashd_install_preserve "$previous_launcher")"
+trap hashd_install_packaged_outcome EXIT
 # Either pipx (healthy existing toolchain) or uv (provides Python 3.11+ and the
 # install mechanism on a bare box). Both land entry points in ~/.local/bin.
 if [ "$INSTALL_VIA" = "uv" ]; then
@@ -993,7 +1356,6 @@ if [ "$INSTALL_VIA" = "uv" ]; then
 else
     install_via_pipx
 fi
-ok "hashd installed"
 
 mkdir -p "$OPS_ROOT"/{projects,workstreams,worktrees,runs,locks,cache,secrets,config}
 if [ "$INSTALL_VIA" = "pipx" ]; then
@@ -1093,7 +1455,7 @@ step "Starting hashd services"
 # infrastructure, including the housekeeping cron, on this first pass -- it
 # waits for Prefect's deployment API to accept writes before reporting success,
 # so a fresh install no longer needs a warm second restart to land housekeeping.
-# First attempt is quiet; on failure we retry once with output, and `set -e`
+# On convergence failure we retry once with output, and `set -e`
 # makes a second failure abort the install with the restart diagnostic. A failed
 # restart means the install-owned infrastructure did not converge -- that is a
 # genuinely broken install, so we stop here rather than print a misleading
@@ -1116,8 +1478,19 @@ step "Starting hashd services"
 # output is streamed rather than captured -- a captured wait would look like a
 # frozen install for as long as a merge or an agent stage takes.
 #
-# The first attempt's output is also kept, because two different failures come
-# out of this line and only one of them is worth a retry:
+# Pending upgrade work is backed up online under the same lifecycle lock and
+# restart hold. Start and completed-archive reports precede shutdown; snapshot
+# verification, compression and durable publication finish before services stop.
+# The archive restores databases/checkpoint/markers only: keep this installation's
+# keys, configuration, project files and retained previous build for recovery.
+#
+# The first attempt's output is also kept so terminal failures can be
+# distinguished from convergence failures, which are worth a retry:
+#   - a migration failure (restart.migration_failed): stop this invocation.
+#     Repeating a migration immediately can undo recovery; its classification
+#     does not depend on whether any services are available.
+#   - startup or workflow release remains unresolved
+#     (restart.release_unconfirmed): preserve the retained build and stop.
 #   - a refusal: the restart hold could not be put in force
 #     (restart.hold_unavailable), --force was asked for without a terminal
 #     (restart.force_headless), or this upgrade replaces the Temporal store
@@ -1133,19 +1506,25 @@ step "Starting hashd services"
 # either invocation style.
 restart_log="$(mktemp)"
 set +e
-"$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null 2>&1 | tee "$restart_log"
+HASHD_PREVIOUS_LOCATION="$PREVIOUS_LOCATION" \
+HASHD_PREVIOUS_BUILD_ID="${PREVIOUS_LOCATION:+$PREVIOUS_LOCATION/build-identity}" \
+    "$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null 2>&1 | tee "$restart_log"
 restart_status=${PIPESTATUS[0]}
 set -e
 if [ "$restart_status" -ne 0 ]; then
-    if grep -q 'restart\.hold_unavailable\|restart\.force_headless\|upgrade\.M024_temporal_store_wipe' "$restart_log"; then
+    if grep -Eq '^[[:space:]]*--> restart\.(migration_failed|release_unconfirmed)[[:space:]]*$' "$restart_log" ||
+        grep -q 'restart\.hold_unavailable\|restart\.force_headless\|upgrade\.M024_temporal_store_wipe' "$restart_log"; then
         rm -f "$restart_log"
         exit 1
     fi
     printf '%s   first restart did not converge; retrying with output...%s\n' "$C_DIM" "$C_RESET"
     rm -f "$restart_log"
-    "$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null
+    HASHD_PREVIOUS_LOCATION="$PREVIOUS_LOCATION" \
+    HASHD_PREVIOUS_BUILD_ID="${PREVIOUS_LOCATION:+$PREVIOUS_LOCATION/build-identity}" \
+        "$HASHD_BIN" restart --in-place-upgrade --reclaim-port </dev/null
 fi
 rm -f "$restart_log"
+ok "hashd installed"
 ok "Services started"
 
 printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C_RESET"

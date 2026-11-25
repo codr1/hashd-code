@@ -112,6 +112,14 @@ bkt auth login --kind cloud --web-token
 tea login add --name work --url https://git.example.com --token $TOKEN  # Gitea
 ```
 
+A workstream's forge operations (opening, watching and merging its PR) never
+use the CLI's own login: they act as the workstream's owner, with the
+credential that owner stored for the host. Store yours before the first PR:
+
+```bash
+hashd forge login --host github.com   # or your GitLab, Bitbucket or Gitea host
+```
+
 Azure Repos needs no CLI. Sign in to your organisation with Microsoft Entra:
 
 ```bash
@@ -399,7 +407,7 @@ hashd watch
 #   Esc           - Back to dashboard
 
 # Story Detail:
-#   A             - Approve story (draft -> accepted)
+#   A             - Approve story (draft -> approved)
 #   E             - AI edit story
 #   G             - Create workstream and run
 #   C             - Close/abandon story
@@ -441,17 +449,16 @@ Manage your full workflow from mobile:
 # 1. Create a bot via @BotFather on Telegram, copy the token
 hashd telegram bot <YOUR_TOKEN>
 
-# 2. Get your user ID from @userinfobot, then authorize
-hashd telegram allow <YOUR_USER_ID>
-hashd telegram chat-id <YOUR_USER_ID>
-
-# 3. Start the bot
+# 2. Start the bot
 hashd telegram start
+
+# 3. Pair your account, then open the bot privately, tap Start and send the code
+hashd telegram connect
 ```
 
 The bot also auto-starts when you run `hashd run`. Send `/` for the button menu.
 
-On a team server, the hashd credential the bot runs with must belong to the server owner or carry no user identity: the configured chat receives the alerts routed to that credential. Teammates who pair with `hashd telegram connect` get their own alerts in their private chat with the bot.
+Each user runs `hashd telegram connect`, opens the project’s bot privately, taps Start, and sends the code. Notifications go to that recipient’s bound account only while they can still read the project. Unbound users receive no Telegram notifications; there is no shared-chat fallback. This applies in solo mode too.
 
 ## Shell Completion
 

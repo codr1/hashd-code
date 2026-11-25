@@ -4,51 +4,24 @@
 
 Import and reference Figma design artifacts in hashd planning, stories, implementation, and review. Designs become first-class context alongside REQS.md and SPEC.md.
 
-## CLI Commands
+## Setup
 
 ```
-hashd figma connect <figma-url>           # Link a Figma file/project to hashd project
-hashd figma list                          # Browse frames, components, pages
-hashd figma import <node-id-or-name>      # Import specific frames/components
-hashd figma status                        # Show changes since last import
-hashd figma sync                          # Pull updates for imported artifacts
-hashd figma show <artifact>               # Display a specific imported artifact
+hashd connector figma configure --set file_id=<file key>   # Link a Figma file to the project
+hashd connector figma configure --set profile=<name>       # Choose the API rate limit profile
+hashd connector figma status                               # Show the settings
+hashd connector login figma                                # Store your Figma account
+hashd connector figma check                                # Check Figma access with your account
 ```
 
-## Example Session
+The file key is the segment after `/design/` or `/file/` in the Figma URL:
+`https://figma.com/design/abc123/HBC-Designs` has the key `abc123`.
 
-```
-$ hashd --project hbc figma connect https://figma.com/file/abc123/HBC-Designs
-Connected: "HBC Designs" (14 pages, 87 frames, 23 components)
-Stored Figma file ID in projects/hbc/config.yaml
-
-$ hashd --project hbc figma list
-Pages:
-  1. Onboarding (6 frames)
-  2. Job Browsing (12 frames)
-  3. Candidate Profile (8 frames)
-  4. Components (23 components)
-
-$ hashd --project hbc figma list --page "Job Browsing"
-Frames:
-  job-list          Job List (Mobile)         1200x2400
-  job-detail        Job Detail View           1200x2400
-  job-filter        Filter Panel              800x1600
-  job-apply         Apply Flow (3 steps)      3600x2400
-
-$ hashd --project hbc figma import job-list job-detail job-filter
-Imported 3 frames -> projects/hbc/design/
-  design/frames/job-list.md        (structured description + layout)
-  design/frames/job-detail.md      (structured description + layout)
-  design/frames/job-filter.md      (structured description + layout)
-  design/tokens.md                 (updated: 4 new colors, 2 text styles)
-
-$ hashd --project hbc figma status
-job-list       up to date
-job-detail     modified 2 hours ago (layout change)
-job-filter     up to date
-3 unimported frames in "Job Browsing" page
-```
+To bring a frame in, reference it as `@figma:<frame>` in a story or acceptance
+criterion: planning and preview fetch a frame that is not cached yet. That fetch
+fills only the request's own cache. Nothing fills or refreshes the shared
+project cache (`.cache/figma`) yet, which implementation-stage `@figma:` reads,
+the `figma_fetch` tool and cached listings use.
 
 ## Local Storage
 
@@ -139,10 +112,10 @@ Follow the design tokens in @figma:tokens for all UI work.
 Component names should match @figma:components where applicable.
 ```
 
-### In hashd workstream add-commit
+### In hashd story add-commit
 
 ```
-$ hashd workstream add-commit my_ws "Add filter panel per @figma:job-filter"
+$ hashd story add-commit STORY-0042 "Add filter panel per @figma:job-filter"
 ```
 
 ## Prompt Injection Points
@@ -171,49 +144,39 @@ One resolver function used by gather_context(), build_full_implement_prompt(), c
 ## End-to-End Flow
 
 ```
-1. Connect Figma
-   $ hashd --project hbc figma connect https://figma.com/file/abc123
+1. Link the Figma file
+   $ hashd --project hbc connector figma configure --set file_id=abc123
 
-2. Browse and import relevant frames
-   $ hashd figma list --page "Job Browsing"
-   $ hashd figma import job-list job-detail job-filter
-
-3. Reference in REQS.md
+2. Reference in REQS.md
    ## Job Browsing
    5. **Job list** -- @figma:job-list @figma:job-filter
 
-4. Plan discovers designs automatically
+3. Plan discovers designs automatically
    $ hashd plan
    -> Discovery prompt includes design inventory
    -> Suggestions reference specific frames
 
-5. Story gets design refs in source_refs + ACs
+4. Story gets design refs in source_refs + ACs
    $ hashd watch   # claim a suggestion from the plan screen
    -> source_refs: "REQS.md Section 5, @figma:job-list, @figma:job-filter"
    -> AC: "Job cards match layout in @figma:job-list"
 
-6. Breakdown includes design context
+5. Breakdown includes design context
    -> COMMIT-JOBLIST-001: "Build job card component per @figma:job-list"
    -> COMMIT-JOBLIST-002: "Add filter panel per @figma:job-filter"
 
-7. Implementation agent sees the frame description
+6. Implementation agent sees the frame description
    -> implement.md includes ## Design Reference
    -> Agent knows: 48x48 rounded logo, 16pt bold title, etc.
 
-8. Review checks design compliance
+7. Review checks design compliance
    -> Reviewer sees design spec alongside diff
    -> Can flag mismatches
-
-9. Designs change, catch and sync
-   $ hashd figma status
-   $ hashd figma sync
-   -> Next run picks up changes
 ```
 
 ## Phasing
 
 ### Phase 1 (first cut)
-- `hashd figma connect` / `list` / `import` / `show` / `status` / `sync`
 - Local storage in `design/` with structured markdown
 - `@figma:` resolution in gather_context() and build_full_implement_prompt()
 - Design section injection into planning + implementation prompts
@@ -224,7 +187,7 @@ One resolver function used by gather_context(), build_full_implement_prompt(), c
 - Design token extraction as CSS variables / language-specific constants
 - Image export alongside structured descriptions
 - Figma webhook for push-based updates
-- `hashd figma diff` showing visual before/after
+- A visual before/after diff of a changed frame
 
 ## Config Changes
 
@@ -234,14 +197,14 @@ figma:
   file_id: "abc123def456"
   file_name: "HBC Designs"
   last_sync: "2026-03-02T14:30:00Z"
-  token_env: FIGMA_TOKEN          # env var holding personal access token
 ```
+
+The token is never in config: store your account with `hashd connector login figma`.
 
 ## Key Implementation Files
 
 ```
 orchestrator/
-  commands/figma.py               # CLI commands
   integrations/figma_client.py    # Figma API client
   integrations/figma_import.py    # Node-to-markdown converter
   lib/figma_refs.py               # @figma: reference resolver

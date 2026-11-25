@@ -22,20 +22,25 @@ never reopens one.
 3. Configure hashd:
 
 ```bash
-hashd project config set jira.url https://your-company.atlassian.net
-hashd project config set jira.project_key PROJ
-hashd project config set jira.email you@company.com
-hashd project config set jira.api_token <your-api-token>
-hashd jira setup
+hashd connector jira configure --set url=https://your-company.atlassian.net
+hashd connector jira configure --set project_key=PROJ
+# Your account. Search, preview, planning, notes/tracker writes and `check`
+# use it; solo chat references do not use it yet.
+hashd connector login jira --destination https://your-company.atlassian.net \
+    --method "API token" --field email=you@company.com
+hashd connector jira check
 ```
 
 ### Jira Server/Data Center
 
 ```bash
-hashd project config set jira.url https://jira.company.local
-hashd project config set jira.project_key PROJ
-hashd project config set jira.pat <your-personal-access-token>
-hashd jira setup
+hashd connector jira configure --set url=https://jira.company.local
+hashd connector jira configure --set project_key=PROJ
+# Your account. Search, preview, planning, notes/tracker writes and `check`
+# use it; solo chat references do not use it yet.
+hashd connector login jira --destination https://jira.company.local \
+    --method "Personal access token"
+hashd connector jira check
 ```
 
 ### Issue creation settings
@@ -49,28 +54,22 @@ Creating a Jira issue for a hashd story uses these settings:
 | `jira.link_back` | `true` or `false`: whether a created issue links to the story's page in hashd's Web UI. Unset is `true`. |
 
 ```bash
-hashd project config set jira.issue_type Story
-hashd project config set jira.link_back false
+hashd connector jira configure --set issue_type=Story
+hashd connector jira configure --set link_back=false
 ```
 
 ## Environment Variables
 
-Secrets can be set via env vars instead of config:
+The connector host can supply these settings through the environment, without
+writing them to disk:
 
 | Variable | Overrides |
 |---|---|
 | `JIRA_URL` | `jira.url` |
-| `JIRA_EMAIL` | `jira.email` |
-| `JIRA_API_TOKEN` | `jira.api_token` |
-| `JIRA_PAT` | `jira.pat` |
 | `JIRA_PROJECT_KEY` | `jira.project_key` |
 
-A nonempty variable wins over `config.yaml`, so the connector host can supply
-credentials without writing them to disk. When one displaces a value that
-`config.yaml` did set, that is logged by name at load, marked in
-`hashd jira status`, and named in a 401/403 from Jira -- an ambient `JIRA_EMAIL`
-shadowing the configured account reports as an override, not as a bad token.
-Variable names only are ever logged; values never are.
+Authentication is your own account, signed in with
+`hashd connector login jira --destination <jira.url>` as in [Setup](#setup).
 
 ## Usage
 
@@ -157,9 +156,10 @@ jira:
 - **Done statuses are untouched.** An issue in Jira's done category is left
   alone whatever the event: nothing reopens an issue or moves it between two
   done statuses.
-- **Only terminal events reach done.** `story_implemented` and
-  `story_abandoned` must map to a status in the done category, and every other
-  event to one outside it; a workstream milestone never finishes an issue.
+- **Only terminal events reach done.** `story_implemented`, `story_abandoned`
+  and `story_closed_by_person` must map to a status in the done category, and
+  every other event to one outside it; a workstream milestone never finishes
+  an issue.
 - **`attachment_shared`.** A terminal event moves the issue only when the event
   says no other unfinished story is attached to it (`"false"`). `"true"` leaves
   it as is; a missing or other value is refused with nothing changed.

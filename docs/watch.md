@@ -53,13 +53,13 @@ collapsed children receive no key; header-only Arcs keep a key and open their Ar
 | `o` | team mode only: list only your own Stories and Workstreams, or all again |
 | `Ctrl+g` | hide or show the graph strip (`[ctrl-g]raphs`), when the terminal has room for it |
 | `Ctrl+r` | step the graph strip's window: 1h, 8h, 24h, 7d, 30d, then 1h again |
-| `Ctrl+p` | switch project |
+| `Ctrl+j` | switch project (not while a text entry has focus: there it is the entry's own, the chat composer's newline) |
 | `A` · `C` · `/` · `?` | artifacts (view SPEC, view/edit REQS) · chat · command palette · help |
 | `q` | quit |
 
 ### Graph strip
 
-When the terminal has room, a shallow strip of three compact panels sits above the lists — **Tokens**, **Stories**, then **Activity**. Each panel is a title line over its figures, drawn at the width and height the strip gives it; the lists stay the Dashboard's main content. The strip is shown and hidden whole, and the owner filter (`o`) changes no panel.
+When the terminal has room, a shallow strip of three compact panels sits above the lists — **Tokens**, **Stories**, then **Activity**. Each panel is a title line over its figures, drawn at the width and height the strip gives it; the lists stay the Dashboard's main content. As the terminal narrows, the strip drops the panels that no longer fit, Activity first and then Stories; Tokens stays while the terminal holds its own minimum width, and below that the strip is hidden whole. The owner filter (`o`) changes no panel.
 
 The panels share one window, 24 hours to start. `Ctrl+r` steps all three through 1h, 8h, 24h, 7d and 30d for the rest of the session, and each names the window on its own title line (`Tokens · last 7d`). The key is listed under `?`, not in the footer, which has no room for it.
 
@@ -67,9 +67,9 @@ The two history panels draw a filled Braille plot: each value lights every dot r
 
 **Tokens** — the project's uncached input and output tokens over the strip's window, from `GET /reports/series` at that range. Each read sends the plot's width in dot columns as `buckets`, and the server picks the finest bucket width that gives every bucket a dot column of its own, so a wider terminal shows a finer day; a resize that changes the fit reads again. The plot is mirrored about a centre line: output stands up from it and input hangs down from it, each on its own scale, beside a legend of `out` and `in` window totals. The number in each half's outer corner is that half's largest bucket, the value its outermost dot row stands for. The figures count every agent call of the project in the window, calls with no workstream included, and a token counter a call did not report counts as 0. The input half is uncached input, the input served neither from nor to a cache, and the output half is the raw output counter. On a real day fresh input is a fraction of a percent of output, which is why input has a half and a scale of its own: on output's scale it would be a hairline.
 
-**Stories** — the historical peak number of distinct stories whose implementation work overlapped at one instant, per block over the strip's window, from `GET /reports/active-stories` at that range with the plot's dot columns as `buckets`, as the Tokens panel reads. The server owns the window, the bucket width it fits to the plot, the dense zero-filled buckets and the coverage counters; the panel draws each returned bucket exactly as returned, oldest at the left, beside a legend laid out like the Tokens panel's: `max`, the window's most stories at once and the value the plot's top dot row stands for; `total`, the distinct stories the window touched; and `now`, the stories with an agent working at the read. `now` comes from the live invocation rows the workstreams' `running` status reads, since the history cannot tell a stage running now from a run that died without recording its end, and the row is left out when those rows could not be read.
+**Stories** — the historical peak number of distinct stories running at one instant, as the workstream list's Running counts them, per block over the strip's window, from `GET /reports/active-stories` at that range with the plot's dot columns as `buckets`, as the Tokens panel reads. Merges, resolves, provisioning and PR creation count as running; waiting on a person, a pause or idle does not. The server owns the window, the bucket width it fits to the plot, the dense zero-filled buckets and the coverage counters; the panel draws each returned bucket exactly as returned, oldest at the left, beside a legend laid out like the Tokens panel's: `max`, the window's most stories at once and the value the plot's top dot row stands for; `total`, the distinct stories the window touched; and `now`, the stories whose workstreams the list reports Running at the read. `now` comes from the server's own derivation of the list's `running` status rather than from the history, which cannot tell a stage running now from a run that died without recording its end; it is null, and its row left out, when that derivation cannot answer.
 
-This is history, not a status board. It is not a current count of stories, a count by status, starts or completions per day, or merges. A block whose peak is 0 is a stretch in which no implementation work was counted; a 0 beside a nonzero coverage count is incomplete history rather than a quiet stretch. A workstream the rows link to no story is excluded from the count and reported as excluded coverage, a stretch of work nothing closed — a stage running now, or a run that died without recording its end — is in no bucket and counted as an interval with no end, and the history of a deleted workstream is not recoverable.
+This is history, not a status board. It is not a current count of stories, a count by status, starts or completions per day, or a count of merges. A block whose peak is 0 is a stretch in which no running work was counted; a 0 beside a nonzero coverage count is incomplete history rather than a quiet stretch. A workstream the rows link to no story is excluded from the count and reported as excluded coverage, a stretch of work nothing closed — a stage running now, or a run that died without recording its end — is in no bucket and counted as an interval with no end, and the history of a deleted workstream is not recoverable.
 
 **Activity** — each recorded activity's share of the project's agent time and tokens over the strip's window, from `GET /cost?scope=project&by_stage=true`: the same figures as the Web Reports page gives that window, folded into the activity groups its By stage table shows. There is no time axis — each row covers the whole window:
 
@@ -87,11 +87,11 @@ Hovering a plot puts the stretch of time under the pointer and its figures on th
 
 Each workstream row carries an activity line: eight Braille cells of its tokens (uncached input plus output, as the project Tokens panel counts them) over the strip's window, from `GET /reports/workstream-series`, read with the panels and on the same terms. Each line is on its own scale, so it shows when a workstream worked, not how much beside another; a workstream with no call in the window shows its baseline, and the lines are blank while the strip is not shown.
 
-Every panel shows a loading state until its first read, an empty state when its window counted nothing — `no agent calls in the last 24 hours`, `no story implementation counted in the last 24 hours`, `no agent calls in the last 24 hours`, each naming the window shown — and an unavailable state with the reason when a read fails; for Activity, a server too old to group the window by activity is one of those reasons. They read when the strip is shown (on opening the Dashboard, with `Ctrl+g` or `Ctrl+r`, when room returns, and on returning to the Dashboard), after the event stream reconnects, and every 30 seconds while shown. None reads while graphs are hidden, the terminal has no room for them, another screen or dialog is on top, or the event stream is disconnected.
+Every panel shows a loading state until its first read, an empty state when its window counted nothing — `no agent calls in the last 24 hours`, `no story running in the last 24 hours`, `no agent calls in the last 24 hours`, each naming the window shown — and an unavailable state with the reason when a read fails; for Activity, a server too old to group the window by activity is one of those reasons. They read when the strip is shown (on opening the Dashboard, with `Ctrl+g` or `Ctrl+r`, when room returns, and on returning to the Dashboard), after the event stream reconnects, and every 30 seconds while shown. None reads while graphs are hidden, the terminal has no room for them, another screen or dialog is on top, or the event stream is disconnected.
 
 When the read shown carries notes, that panel's title line shows a marker and `?` lists them in full under the panel's name. Tokens notes a token-semantics warning, and the workstreams whose calls could not be read — the one case where its totals leave whole workstreams' calls out; its third note, calls whose timestamp could not be read, belongs to an unbounded window and so never reaches a bounded read. Stories carries no warning field, so its marker means a coverage count: intervals with no recorded end, or workstreams with counted work and no linked story. Activity notes a token-semantics warning, calls whose timestamp could not be read or was zone-less and read as UTC, and the calls whose agent time or token terms the window's own totals are missing, since those totals are what every share divides by. `?` also lists Activity's rows whole, since a shallow strip can cut them, and the full reason while a panel is unavailable. A panel too narrow for its figures says in one line how many cells they need.
 
-The strip carries its own control: `[ctrl-g]raphs`, at the right of the status line under the header. Clicking it does what `Ctrl+g` does — hide or show the strip for the rest of the session — and the footer offers the same `[ctrl-g]raphs` entry. Both appear only while there is room for the strip: on a terminal too short for it, or too narrow for the three panels side by side, it hides itself, and it comes back when room returns unless you hid it with `Ctrl+g`.
+The strip carries its own control: `[ctrl-g]raphs`, at the right of the status line under the header. Clicking it does what `Ctrl+g` does — hide or show the strip for the rest of the session. The footer has no entry for it. The strip and its control remain available while Tokens fits and the terminal is tall enough for the strip: on a terminal too short for it, or too narrow for Tokens, both hide; when room returns, the control reappears and the strip comes back unless you hid it with `Ctrl+g`.
 
 ## Story Detail — shape the work
 
@@ -100,9 +100,9 @@ becomes code — grooming a Story, or intervening while it is being planned.
 
 | Key | Action |
 |-----|--------|
-| `A` | **approve** the story (`draft → accepted`) so it can run |
+| `A` | **approve** the story (`draft → approved`) so it can run |
 | `E` | AI-edit the story |
-| `e` · `d` · `D` · `r` | edit · delete · descope · rescope an acceptance criterion |
+| `e` · `d` · `D` | edit · delete · descope an acceptance criterion |
 | `a` | answer the planner's pending questions |
 | `G` | **Go** — create a Workstream and start the run |
 | `R` · `X` | retry · close the story |
@@ -121,7 +121,7 @@ action.
 |-----|--------|
 | `G` · `!` | run the workstream (or retry) · run anyway |
 | `A` · `r` | **approve** · **reject** at the human review gate |
-| `R` · `N` | reset (redo from baseline) · replan |
+| `R` · `N` | reset (redo from baseline) · replan (rewind commit picked on the dialog's list, optional instruction for the planner) |
 | `a` | answer a clarification the agent raised |
 | `d` `l` `L` `v` `t` | diff · log · transcript · review · timeline |
 | `m` · `P` | **merge** · create a PR at `ready_to_merge` |
@@ -131,6 +131,18 @@ action.
 
 > **Approve is `A` (capital).** Lowercase `a` answers a clarification — they are
 > different keys, in both Story and Workstream Detail.
+
+`L` opens the story transcript at its newest entries. Scrolling near either
+edge loads the next page while keeping your place; `k` before the first entry
+and `j` after the last do the same. The load-older and load-newer lines are also
+clickable. The view keeps at most 200 entries and fetches discarded pages again
+when you return to them. New entries follow while you are at the bottom;
+otherwise an “N new entries” control takes you to the newest page. Opening an
+entry fetches its complete evidence, and Back returns to your window and place.
+Large agent bodies and test results sit behind that link, with their recorded
+outcome and stored size in the list. Human decisions and stop errors remain
+visible. If recorded history or log-retirement facts change, the view starts
+at the newest page and says so.
 
 Across the top sits the graph area: the run rail over the activity strip. The
 rail places the runner on the phases of a run -- the micro-commit cycle (plan,
@@ -143,35 +155,54 @@ A phase is one or more stages. No stage is dropped: a short stage is
 folded into the phase whose work it begins or finishes, and the caption still
 names the stage itself, so a commit that fails reads `commit · failed` on a red
 review segment. The server owns the grouping (`runflow.RunnerStagePhases`, sent
-as `phases` on `GET /reports/workstream-stages`); the rail and the Gantt draw
+as `phases` on `GET /reports/story-stages`); the rail and the Gantt draw
 it.
 
 | Phase | Stages | Folded in because |
 |---|---|---|
+| provision | `resolve_base_sha`, `worktree_create`, `setup_hook`, `baseline_tests`, `plan_generate` | provisioning's steps, which ready the worktree and seed the plan before the first micro-commit. The Gantt draws them on their own row, first, all but `plan_generate`: provisioning finishes it by making the workstream active, which records no end of the stage. The rail, which begins at plan, does not place them |
 | plan | `breakdown`, `preflight`, `select`, `clarification_check`, `concern_triage` | breakdown makes or re-makes the plan; the others pick the next micro-commit and check it can start, and take no time of their own |
 | implement | `implement` | |
 | test | `test`, `adjudicate` | adjudication rules on the test result |
 | review | `review`, `qa_gate`, `commit` | the QA gate signs off the review (tests green, change approved), and the commit records what it signed off; both take seconds |
 | merge gate | `merge_gate` | |
 | final review | `final_review` | |
-| merge | `acquire_lock`, `checkout`, `pre_merge_tests`, `merge_attempt`, `post_rebase_test`, `push_branch`, `create_pr`, `await_pr_approval`, `pr_merge`, `finalize` | the merge workflow's steps. The rail places a workstream here by its status alone -- `ready_to_merge`, `pr_open` or `pr_approved` waiting, `merging` running -- since a merge step a finished merge left behind must not place a workstream that has moved on. The Gantt draws no merge row: its intervals count the runner's work, which ends at final review |
+| merge | `acquire_lock`, `checkout`, `pre_merge_tests`, `conflict_resolution`, `merge_attempt`, `post_rebase_test`, `push_branch`, `create_pr`, `await_pr_approval`, `pr_merge`, `finalize`, and the whole stages `merge_begin`, `merge_check_pr_open`, `merge_push_for_pr`, `merge_rebase_pr_branch`, `merge_resume`, `merge_push_branch`, `merge_sync_local_main`, `merge_local`, `merge_approved`, `merge_record_external`, `merge_ready_reconcile`, `merge_archive`, `resolve_attempt`, `resolve_recover`, `resolve_rollback`, `pr_create_push`, `pr_create_publish` | the merge workflow's steps, and the whole stages a merge, an AI conflict resolve and a PR creation run on the runner. The rail places a workstream here by its status alone -- `ready_to_merge`, `pr_open` or `pr_approved` waiting, `merging` running -- since a merge step a finished merge left behind must not place a workstream that has moved on. The Gantt draws a bar for every merge step except `await_pr_approval`, which is a wait on the forge, not work, and for every whole stage, from its command's reservation to the consumption of its result, a stretch that encloses the merge steps the stage runs |
 
 The caption under the rail names the recorded substage, how long it has stood
 and the commit in hand, with the story's criteria at its right end
-(`12 criteria · 1 descoped · 10 non-goals`). When they cannot share a row, the
+(`12 criteria · 11 non-goals (1 descoped)`). When they cannot share a row, the
 counts appear below the caption; both wrap as needed. The strip is the dashboard's Tokens figure for this
 workstream over its life, from `GET /reports/workstream-series?workstream=`,
-beside its start, age and agent calls. `Ctrl+g` hides the area for the session,
-as it hides the dashboard's strip, and the area gives way on a screen under 32
-rows. `c` opens the story's criteria card read-only.
+beside the story's start and elapsed time and the agent calls. Start and elapsed
+are the story's lifecycle clock from its read (`started_at`, `ended_at`,
+`terminal`): its first planning start, then elapsed to now while it is
+unfinished and fixed at its end once both are recorded. With no recorded start,
+or a finished story with no recorded end, they read `—`; nothing stands in for
+them. The area's control, `[ctrl-g]raphs`, sits at the right of the header,
+as the dashboard's does. `Ctrl+g` opens the graphs menu: `g` hides or shows
+the area for the session, as it hides the dashboard's strip, `t` switches the
+Timeline to the stage Gantt, and `u` opens Reports. The area gives way on a
+screen under 32 rows. `c` (in the footer) opens the story's criteria card
+read-only.
 
-The Timeline panel has two views: the event list, and a stage Gantt (`g`) with a
+The Timeline panel has two views: the event list, and a stage Gantt (`Ctrl+g t`) with a
 row per phase that ran, in the run's order, and a bar per visit -- the stages of
-a phase that run back to back are one visit, and the row's `×N` counts visits --
-from `GET /reports/workstream-stages`. The stage the history leaves open is shaded to
+a phase that run back to back, or inside one another as a merge's steps run
+inside their whole stage, are one visit, and the row's `×N` counts visits --
+from `GET /reports/story-stages?story=` for the workstream's story (a story has
+one workstream). Historical coverage is best effort: a story with native stage
+records uses those records, so its chart can begin later than its story clock;
+older stories without native records use reconstructed event history.
+The stage the history leaves open is shaded to
 the read and footnoted, since the history cannot tell a stage running now from a
 run that died without recording its end; an attempt a later run broke off is
-shaded up to that run's start, which proves it over but not when it stopped. The
+shaded up to that run's start, which proves it over but not when it stopped, and
+a whole stage never consumed is shaded up to the next whole stage's reservation
+or run's start, whichever comes first. An attempt known stopped with no recorded
+end and nothing later to bound it (`over_by` null) is a `╎` mark where it
+started, footnoted: no bar, nothing drawn to now, and never the open stage. A
+recorded step inside a shaded stage is drawn solid. The
 strip is re-read every 30 seconds while the screen is on top; the stages follow
 the screen's event-driven refreshes and the criteria line follows story events,
 as all entity state does. The open bar and the rail's clock are drawn against
@@ -192,8 +223,9 @@ server offers the pause.
   `pausing…` until it has stopped.
 - While the pause stands the server refuses the requests that would start,
   resume, cancel or close the workstream's execution, or rewrite its plan. The
-  footer offers `u` alone, and commands that standing records or run hints
-  printed before the pause stay plain text, not keys.
+  footer offers `u`, and once the pause reads ready also replan and reset,
+  which close the held run and end the pause; commands that standing records
+  or run hints printed before the pause stay plain text, not keys.
 
 `u` unpauses. Unpausing continues the runs the pause parked and dispatches
 nothing new; it answers no gate or clarification. When someone else paused the
@@ -250,7 +282,10 @@ common path. For the complete, state-by-state tables, see
 
 ## Watch UI Keybindings
 
-The `hashd watch` TUI provides context-sensitive keybindings based on workstream status:
+The `hashd watch` TUI provides context-sensitive keybindings based on workstream status.
+Every screen's footer ends the same way, after a `|`: `esc` (back, where it leaves the
+screen), `q` (back, or quit on the first screen), `/` (command palette) and `?` (help).
+A footer too crowded for its line drops the screen's own keys first, never these.
 
 ### Dashboard
 
@@ -279,8 +314,7 @@ Available on any workstream detail screen:
 | `G` | Go - run workstream |
 | `a` | Answer pending clarifications (bundle modal -- one answer applies to all) |
 | `c` | Open the story's criteria card (read-only) |
-| `g` | Switch the Timeline between the event list and the stage Gantt |
-| `Ctrl+g` | Hide or show the run rail and activity strip |
+| `Ctrl+g` | Graphs menu: `g` hide or show the run rail and activity strip, `t` switch the Timeline between the event list and the stage Gantt, `u` open Reports |
 | `d` | View diff |
 | `l` | View log |
 | `1` | Toggle status section |
@@ -305,7 +339,7 @@ When the diff panel is active (`d`):
 | `a` | Approve changes, continue to next micro-commit |
 | `r` | Reject with feedback, iterate on current commit |
 | `R` | Reset -- keep the plan, redo the implementation from the baseline |
-| `N` | Re-plan -- regenerate the plan from a clean base (prompts for guidance) |
+| `N` | Re-plan -- open the replan dialog: pick the rewind commit on the list (everything above it is kept, it and everything after is discarded), optionally add an instruction for the planner |
 
 ### Stage: ready_to_merge / final_review_with_concerns
 
@@ -370,13 +404,12 @@ and cannot be selected. Reaching the last row loads the next page.
 
 | Key | Action |
 |-----|--------|
-| `A` | Approve story (Shift+A, draft -> accepted) |
+| `A` | Approve story (Shift+A, draft -> approved) |
 | `a` | Answer open questions |
 | `E` | Edit story with AI (Shift+E) |
 | `e` | Edit selected acceptance criterion |
 | `d` | Delete selected criterion |
 | `D` | Descope selected criterion (Shift+D, moves to descoped list) |
-| `r` | Rescope selected descoped criterion (moves back to AC) |
 | `G` | Create workstream and run (Shift+G) |
 | `C` | Open pair programmer chat (Shift+C) |
 | `t` | Tracker: open, unlink or link the story's tracker story |
@@ -392,7 +425,7 @@ and cannot be selected. Reaching the last row loads the next page.
 | `/` | Open command palette |
 | `Ctrl+t` | Toggle dark/light theme |
 | `Ctrl+s` | Save screenshot |
-| `Ctrl+p` | Switch project |
+| `Ctrl+j` | Switch project (not while a text entry has focus) |
 | `1-9` | Open the workstream with the displayed key (dashboard) |
 | `a-i` | Open the story or Arc with the displayed key (dashboard) |
 | `p` | Open plan screen (dashboard) |
@@ -405,19 +438,20 @@ and cannot be selected. Reaching the last row loads the next page.
 
 In Story Detail the criteria list is the story's whole scope, drawn as the
 Web story page's criteria card: active criteria (`✓`, success-toned, over
-muted text), then `descoped · N` with each descoped criterion as a faint `⊘`
-over faint, struck-through text, then `non-goals · N` with each non-goal as a
-faint `⊘` over muted text, not struck, since a non-goal is a constraint in
-force. The group headings are skipped by the cursor. Criteria keys act on
-criteria only; a non-goal is read-only. Enter expands or collapses a long
-row.
+muted text), then `⊘ NON-GOALS · N`, which counts every exclusion once and
+names the descoped among them (`⊘ NON-GOALS · 7 (2 descoped)`). Under it come
+the hand-written non-goals, each a faint `⊘` over muted text, not struck,
+since a non-goal is a constraint in force; then the descoped criteria, each a
+faint `⊘` and a faint `descoped` label over faint, struck-through text. The
+heading is skipped by the cursor. Criteria keys act on active criteria only: both
+descoped entries and hand-written non-goals under Non-Goals are read-only. Enter
+expands or collapses a long row.
 
 | Selection | Key | Action |
 |-----------|-----|--------|
-| Active criterion | `D` | Descope (with confirmation) |
+| Active criterion | `D` | Descope (with confirmation; on a draft, returns its REQS prose directly) |
 | Active criterion | `e` | Edit |
 | Active criterion | `d` | Delete |
-| Descoped criterion | `r` | Rescope (immediate) |
 
 See the [scope lifecycle](../WF.md#story-scope-management).
 

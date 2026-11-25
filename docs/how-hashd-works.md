@@ -130,15 +130,26 @@ or any file in the project's `migration_dir` when it is set. When they did:
   copy is already the base's, and anything else goes to review. With base 180, branch migrations 179 and 185 become 181 and 182;
   already-higher migrations are left alone (gaps are harmless). Files in that
   directory whose names do not start with a number are left as they are, and the
-  merge says so. This renumber is mechanical and final.
+  merge says so. This renumber is mechanical and final. It is one commit at the
+  branch's tip, so the rebase replays it last: a conflict in an earlier commit
+  still shows the old names, and hashd tells the merge agent the final ones to
+  use in any reference it resolves there. It reads them from the branch at each
+  stop, so a renumber an earlier merge attempt left on the branch, or the
+  branch's own rename, counts as well.
 - The merge agent assesses the migrations: whether they are migrations, whether
   order matters, whether the base changed the schema they were written against. It
   does so whenever the rebase conflicts, and after a clean rebase when hashd
   renumbered something (references to the old names may need updating) or no
   `migration_dir` is set; with one set and nothing renamed, the numbers are in order
-  and the full test run is the check. It may rename the branch's migration files in
+  and the full test run is the check. The merge gate does the same after its
+  own renumber: when either of the gate's migration steps renamed a migration
+  and its rebase then completes without a conflict, the same assessment runs
+  on the rebased branch before the gate's build and tests, and a refusal
+  stops the gate before them. It may rename the branch's migration files in
   those directories and update references to their old names; nothing else beyond
-  its conflict. A base
+  its conflict. A version stamp that names the newest migration counts as such a
+  reference: moving it from the base's newest number to the branch's final
+  newest is accepted, even at a stop where the file is not in conflict. A base
   change that breaks a branch migration (the base renamed a column the branch
   alters) stops the merge for a fix; a compatible one is noted on the workstream's
   timeline.

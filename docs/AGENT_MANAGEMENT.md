@@ -292,17 +292,32 @@ All stage overrides can also be set by editing `config.yaml` directly. See `../c
 
 ### ACP agents
 
-`agy` uses the official Antigravity ACP runtime, `agy_acp_server.par`, with
-`localharness_external` beside it. Install the runtime yourself on each runner;
-hashd checks the declared minimum version (1.4.5). It is listed as `available`,
-so selecting it uses the existing force rule. Inspect-only shell shapes remain
-unavailable; the native transport cannot enforce them.
+`agy` is Google's Antigravity CLI, which serves ACP itself (`agy acp`). Install
+it yourself on each runner (`curl -fsSL https://antigravity.google/cli/install.sh | bash`,
+into `~/.local/bin`); hashd checks the declared minimum version (1.5.1) and
+never installs or updates it. The CLI takes its profile as `--gemini-dir`, which
+the declaration fills from the run's `GEMINI_HOME`. It is listed as
+`available`, so selecting it uses the existing force rule. Inspect-only shell
+shapes remain unavailable; the native transport cannot enforce them.
 
-Use Fleet or an interactive `hashd agents login agy` on the runner for personal
-Google sign-in, or register a Gemini API key through the existing credential
-form. Fleet opens the native Google page and privately accepts its complete
-127.0.0.1 return URL when the browser is on another machine. Native login files
-stay in that owner's runner profile. Cloud/Enterprise's additional license
+The CLI reports an upstream API failure as an ordinary reply and records it in
+the session's own log. hashd reads that log (read-only, only the steps the
+prompt added) and fails the attempt with the provider's status. Only a spent
+quota -- the provider's `QUOTA_EXHAUSTED`, or the runtime's `refusal` stop -- is
+an account usage limit. A plain rate limit (429)
+or an outage (5xx) is retried like any harness's, after the retry delay the
+provider recorded; an error the log does not render as the provider's is not
+retried. When the
+runtime does not advertise `_meta.antigravity.systemPrompt.append`, the stage's
+instructions lead the prompt instead (docs/ARCHITECTURE.md, **Agent harnesses**).
+
+Use Fleet or `hashd agents login agy` for personal Google sign-in, or register a
+Gemini API key through the existing credential form. The CLI's ACP sign-in
+refuses a machine with no display, so both run its own `agy acp --login`: open
+the link Fleet shows in any browser, sign in, and submit the code Google's page
+shows in Fleet's **Code** field (or paste it at the terminal). On a desktop the
+CLI's browser sign-in runs as before. Native login files stay in that owner's
+runner profile. Cloud/Enterprise's additional license
 picker still needs qualification; push and proxy sign-in are not declared.
 
 Fleet's bounded login observation reads the native session's model catalogue
@@ -357,23 +372,30 @@ Each agent handles the OAuth/API-key conflict differently:
 
 ### Per-user credentials (team servers)
 
-On a team server, agents run on the server but the work belongs to individual users -- so runs act as the **workstream owner**, using a credential that user registered:
+On a team server, agents run on the server but the work belongs to individual users -- so runs act as the **story owner**, using a credential that user registered:
 
 ```bash
 hashd agents login <agent>     # register your credential with the server
-hashd agents logout <agent>    # remove it
+hashd agents logout <agent>    # remove it, and sign the agent out on this machine
+hashd agents logout <agent> --runner <id-or-name>   # sign the agent out on that runner only
 hashd agents                   # shows your registered credentials and their health
 ```
 
+The two logout forms have distinct effects:
+
+- `hashd agents logout <agent>` removes your registered credential for the agent from the server, then runs the agent's own sign-out (its declared `logout_args`) in your hashd login folder on the machine you run it on. The server's result line also says that runs already going may keep a copy they were given until they end, and that removal stops no run.
+- `hashd agents logout <agent> --runner <id-or-name>` is Fleet's Sign out on that runner. It sends one `DELETE /agents/{agent}/login?runner_id=<id-or-name>`; the server resolves the runner (an unknown or ambiguous name is refused with the server's Diagnostic) and the runner runs the agent's own sign-out in your hashd login folder there. The command then follows that attempt through `GET /agents/{agent}/login?runner_id=...`, printing its progress and the agent's output, and succeeds only when the attempt ends with the agent confirming it is signed out; a failed sign-out exits non-zero with the runner's Diagnostic, as does one it cannot confirm. It never removes or changes a registered credential: when one remains that runs still receive, the result says so and names `hashd agents logout <agent>`. It needs no terminal.
+- Removing a registered credential in TUI or Web Settings also runs the agent's own sign-out in the login folder that row names as "Your sign-in on <machine>": your hashd login folder on the server machine, through Fleet's Sign out on the server's local runner. Settings reports the two outcomes separately: the server's removal result line, then the sign-out's outcome.
+
 Login harvests the credential from your own machine where the agent has a sanctioned artifact, and prompts for a paste otherwise. Secrets are read hidden on a TTY or piped on stdin -- never passed as flags. The server validates the credential shape at registration (a wrong paste fails immediately with the fix named), stores it encrypted at rest, and never returns it.
 
-The TUI has the same surface: press `s` on the dashboard for Settings -- view credential health, register or replace a credential (paste into a masked field, or Lift to pull it from this machine's env vars / agent credential files / the gh CLI), remove one, and change the autonomy mode.
+The TUI has the same surface: press `s` on the dashboard for Settings -- view credential health, register or replace a credential (paste into a masked field, or Lift to pull it from this machine's env vars / agent credential files / the gh CLI), remove one (which also runs the agent's own sign-out in your hashd login folder on the server machine, the row's "Your sign-in on <machine>", and reports the removal and the sign-out as two outcomes), and change the autonomy mode.
 
 | Agent | What you register | Subscription supported? |
 |-------|-------------------|------------------------|
 | **Claude** | An Anthropic API key with `--method api-key`, or a push sign-in (`hashd agents login claude --push`) | Yes: Claude's own sign-in on each runner (`hashd agents login claude`, hashd never sees the token), or pushed from the server (below) |
 | **Codex** | A push sign-in (`hashd agents login codex --push`), your `~/.codex/auth.json` (run `codex login` first), or `--method api-key` | Yes, as push (below). An uploaded `auth.json` is refreshed by the server from then on: run `codex login` again locally, since sharing one login between laptop and server breaks both |
-| **Gemini** | Your `~/.gemini/oauth_creds.json`, or `--method api-key`. Workspace accounts add `--project <id>` | Yes; agent runs burn quota fast, so expect a paid tier |
+| **Gemini** | Your `~/.gemini/oauth_creds.json`, or `--method api-key`. Workspace accounts add `--options google_cloud_project=<id>` | Yes; agent runs burn quota fast, so expect a paid tier |
 | **Copilot** | `gh auth token` output (harvested automatically), or a fine-grained PAT with the "Copilot Requests" permission | Yes; classic `ghp_` tokens are rejected -- the Copilot CLI silently ignores them |
 | **Qwen** | An API key plus `--base-url` (Coding Plan or any OpenAI-compatible endpoint) | Key-based only; the free OAuth tier was discontinued upstream |
 | **Kimi** | A Moonshot platform API key plus `--model` | Key-based only today |
@@ -387,12 +409,14 @@ Behavior at run time (registered-credential-wins):
 - `hashd agents login claude --proxy` is the same sign-in, kept and refreshed on the server the same way, but its runs never hold the access token (#2893 step 4). A run gets a placeholder key and the address of a forwarder on its own host (claude: `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, pointing at `127.0.0.1`); the forwarder admits only that placeholder and only the paths the agent declares (`proxy.paths` in `defaults.yaml`), and sends each request over the runner's paired connection to the server, which puts the access token on it and sends it to the provider. What the provider answers, a usage limit included, comes back unchanged. The placeholder is worthless anywhere else and ends with the run; the server refuses the request once the run's attempt ends. A sign-in the server cannot keep current answers the run with an authentication error naming `hashd agents login claude --proxy`. There is no fallback to push or to another credential. Only agents that declare `proxy:` take it; codex stays on push, since its ChatGPT sign-in keeps a token codex reads itself.
 - Each agent with a sign-in the server can keep (claude, codex) has a sign-in mode (#2893 step 5), stored on that sign-in (`delivery` in its non-secret settings): `manual` (runs use your own sign-in on each machine that runs them; the server sign-in stays kept, unused, and never leaves the server), `push`, or `proxy` (claude). With no mode set it is `auto`: push when the server keeps a sign-in for you, manual when it does not, shown as `auto — using push now` or `auto — using manual now`. `hashd agents mode <agent>` shows it and `hashd agents mode <agent> <auto|manual|push|proxy>` sets it; without a server sign-in there is nothing to set, and push or proxy is refused naming `hashd agents login <agent> --push`. `hashd agents login <agent> --push`, `--proxy` and `--manual` sign in and set the mode in one act (`--manual` signs in on this machine). Plain `hashd agents login <agent>` never changes the mode; when it is push or proxy, it ends naming `hashd agents mode <agent> manual` and `--manual`. `hashd agents`, the Web Agent logins row and the TUI settings modal (`m`) name the two sign-ins by where they are ("Server sign-in: kept / none", "Your sign-in on <machine>: signed in / not signed in"), show the mode and set it among the modes the server offers (`GET /agents/credentials` `modes`, `PUT /agents/{agent}/mode`). An API-key registration has no mode.
 - Where a browser likely cannot reach the agent's localhost sign-in callback -- an SSH session (`SSH_CONNECTION`/`SSH_TTY`), WSL, a terminal multiplexer (`HERDR_ENV`, `TMUX`, `STY`, `ZELLIJ`), a container, or Linux with no `DISPLAY`/`WAYLAND_DISPLAY` -- `hashd agents login` says so and runs the agent's declared `headless_sign_in` instead: codex's device code (`codex login --device-auth`: a link and a one-time code for a browser on any device), claude's paste-the-code sign-in (`claude auth login` prints a link whose page shows a code to paste back). An agent declaring none gets its browser sign-in, with the reason it may not finish. A device-code sign-in the account refuses is reported and, on a terminal, the browser sign-in starts in its place, saying why; with no terminal the refusal (`agents.login.headless_refused`) is the result, and no browser sign-in is left waiting. The sign-in still lands in the same per-owner agent home.
-- Claude, codex and OpenCode runs never use the server host's own login or configuration, in either mode. Every run starts from a home of its own under the runner's `runnerlayout.AgentHomesRoot(ops, serverID, runnerID)`, set as `HOME` (claude also gets `CLAUDE_CONFIG_DIR` inside it; OpenCode gets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` inside it, and an empty `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`), holding only a `.gitconfig` with the project's `git_name`/`git_email` and `safe.directory` for the worktree. The home is removed after its sessions are saved. Startup salvages abandoned Claude sessions before sweeping run homes; a failed save retains the source for recovery. So the host user's plugins, skills, settings, hooks, MCP servers, `~/.gitconfig` and `gh` login never reach a stage. A claude resume finds its session because hashd keeps each run's session files (only those) for the owner and copies the one being resumed into the next run's home. OpenCode keeps every session in one database, which hashd keeps in the owner's agent home (`OPENCODE_DB`), together with OpenCode's cache of the fetched model list (`XDG_CACHE_HOME`).
-- With nothing registered, a claude or codex run proceeds only when a credential variable survives the project's auth-mode filtering and `agents.<name>.env` precedence (claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`; codex: `CODEX_API_KEY`). Otherwise the stage is refused with `hashd agents login <agent>`, in single-user mode too. An OpenCode run always needs a registered credential: its provider keys have no single variable name. On a single-user server, unowned work such as detect uses the server owner's registered credential.
-- Package caches and toolchains that live in the server user's home (`~/go`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`) are not reachable from a claude, codex or OpenCode run's home. Export `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `CARGO_HOME` or `RUSTUP_HOME` in the server's environment to share them.
-- Claude keeps the existing MCP behavior: strict configuration when hashd injects servers, no MCP flags otherwise. The isolated run home removes host-user MCP configuration; repository `.mcp.json` admission remains the harness's behavior until #2228.
+- Claude, codex, OpenCode, Copilot, Qwen, Kimi and Gemini runs never use the server host's own login or configuration, in either mode. Every run starts from a home of its own under the runner's `runnerlayout.AgentHomesRoot(ops, serverID, runnerID)`, set as `HOME` (claude also gets `CLAUDE_CONFIG_DIR` inside it; OpenCode gets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` inside it, and an empty `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`; Copilot gets an empty `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`, so neither its config nor its gh login fallback points back at the host; Qwen gets an empty `QWEN_RUNTIME_DIR`, `QWEN_CODE_TRUSTED_FOLDERS_PATH`, `QWEN_CODE_MCP_APPROVALS_PATH`, `QWEN_CODE_HOOK_APPROVALS_PATH` and `QWEN_CODE_MEMORY_BASE_DIR`, so its state and config files all fall under `QWEN_HOME`; Kimi reads its config and state only from `KIMI_CODE_HOME`; Gemini gets an empty `GEMINI_CLI_TRUSTED_FOLDERS_PATH`, so its config and state all fall under `GEMINI_CLI_HOME`, and an empty `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI`, `CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC` and `GOOGLE_APPLICATION_CREDENTIALS`, so no auth selector or credential file admitted from the server turns a `GEMINI_API_KEY` run into the host's Google login), holding only a `.gitconfig` with the project's `git_name`/`git_email` and `safe.directory` for the worktree. The home is removed after its sessions are saved. Startup salvages abandoned Claude sessions before sweeping run homes; a failed save retains the source for recovery. So the host user's plugins, skills, settings, hooks, MCP servers, `~/.gitconfig` and `gh` login never reach a stage. A claude resume finds its session because hashd keeps each run's session files (only those) for the owner and copies the one being resumed into the next run's home. OpenCode keeps every session in one database, which hashd keeps in the owner's agent home (`OPENCODE_DB`); only that database, with its SQLite WAL files, is kept there between runs. `XDG_CACHE_HOME` is left to follow the run's `HOME`, as for the other agents: every tool reads it, so the caches tools build in it (go, uv, pip) go with the run, and OpenCode fetches its model list again on each run. A project that wants its runs to share the server's cache admits `XDG_CACHE_HOME` through a host entry of its environment. On those runs Copilot's `COPILOT_HOME` is the owner's agent home, and only its `session-state/` (what `copilot --resume <id>` reads) is kept there between runs. Qwen's `QWEN_HOME` is the owner's agent home the same way, and only each project's `projects/<cwd>/chats/` (whose `<id>.jsonl` is what `qwen --resume <id>` reads) is kept there between runs; the project memory and metadata beside it are not. Kimi's `KIMI_CODE_HOME` is the owner's agent home too, and only its `sessions/` (whose `<workdir>/<id>/` is what `kimi --session <id>` reads) is kept there between runs; the `config.toml` each run's credential writes goes with the rest. Gemini's `GEMINI_CLI_HOME` is the owner's agent home as well; Gemini nests its state in `.gemini/`, and only each project's `.gemini/tmp/<project>/chats/` (what `gemini --resume <id>` reads) and the `.project_root` beside it (which checkout the project folder belongs to) are kept there between runs. The `.gemini/settings.json` and `.gemini/oauth_creds.json` each run's credential writes go with the rest.
+- With nothing registered, a claude, codex, Copilot or Gemini run proceeds only when a credential variable survives the project's auth-mode filtering and `agents.<name>.env` precedence (claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`; codex: `CODEX_API_KEY`; Copilot: `COPILOT_GITHUB_TOKEN`; Gemini: `GEMINI_API_KEY`). Otherwise the stage is refused with `hashd agents login <agent>`, in single-user mode too. An OpenCode run always needs a registered credential: its provider keys have no single variable name. So does a Qwen run: `DASHSCOPE_API_KEY` alone selects no auth type (Qwen Code 0.27.0 refuses "No auth type is selected" from a home with no settings), so it does not count. Nor does a Kimi run's `KIMI_API_KEY`: it binds no model (Kimi Code 2.5.2 refuses "No model configured" from a home with no `config.toml`), so a Kimi run needs a registered credential too. Gemini's `GOOGLE_API_KEY` does not count either: alone it selects no auth type (Gemini CLI 0.49.0 asks for an auth method from a home with no settings). Project-level work such as detect uses the registered credential of the person who asked for it, the server owner on a single-user server.
+- Package caches and toolchains that live in the server user's home (`~/go`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`) are not reachable from a claude, codex, OpenCode, Copilot, Qwen, Kimi or Gemini run's home. Export `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `CARGO_HOME` or `RUSTUP_HOME` in the server's environment to share them.
+- When hashd injects MCP servers for Claude, it passes `--mcp-config` without `--strict-mcp-config`, so Claude's own MCP discovery stays on; only the `browser_classify` launch keeps an empty strict config (`--mcp-config {"mcpServers":{}} --strict-mcp-config`), and launches with no injected servers pass no MCP flags. The isolated run home removes host-user MCP configuration. When `mcp.project_servers` is on, hashd injects the servers the repository's root `.mcp.json` defines at the story's pinned base commit: an absent file, a file with no servers, or a launch with no pinned source injects none, while a refused read (malformed or non-regular file, missing pinned commit, or unreadable repository) refuses the launch before the agent starts with no fallback to the working tree, lane, or branch tip. Servers the harness discovers on its own come from the working tree and its other sources, not the pinned base, and the harness's own precedence decides a shared name.
+- Every agent attempt's transcript meta records the MCP configuration hashd delivered as `mcp_delivery`: `project_servers` and its config layer (`project_servers_source`), `project_source_outcome` (`disabled`, `absent`, `no_servers`, `servers`, or `no_pinned_source`, with `repository` and full `commit` when a pinned read ran), and every delivered server in `servers` (`name`, `origin` as `project` or `hashd`, `transport` as `stdio` or the definition's declared type, and for `stdio` servers `command` and sorted `env_keys`). It records env variable names only — never env values, header values, args, or harness-substituted values — and launches refused for MCP reasons record no attempt. `agent_profile` remains the agent's own report of what it loaded or connected.
 - Every claude run records what the agent itself reported loading: plugins, skills, MCP servers, slash commands, subagents and the settings files in its config directory. The record goes on the run's transcript as `agent_profile`. `hashd doctor` lists, per stage agent, the most recent run's record with that run's stage, id and time, or "not reported yet" before any run has made one. Doctor starts no agent. A field the agent version does not report reads "not reported by this agent version", never "none".
-- The other agents (gemini, copilot, qwen, kimi) are not yet isolated this way: single-user mode with nothing registered keeps the host's own agent auth for them, as do unowned runs on a team server.
+- Every run acts for a person. A launch that names nobody (no acting user, and no workstream or story to read an owner from) is refused before it starts, with a Diagnostic that names the launch (`ownership.launch_without_owner`); a launch of unassigned work is refused naming `hashd assign` (`ownership.unassigned`). Project-level stages that a user asks for act for that user: discovery and its tech tree, project description and build detection have no story or workstream to read an owner from, so their agent acts for the requesting user (`RunStageOptions.ActingOwner`) and runs from a run home on that user's credential like any owned run. Only then can the stage fence hold the launch to what its shape allows; a launch left on the host's own profile is not contained by shape, and an agent with an OS sandbox of its own (codex) cannot run commands there.
+- The run home keeps the host's configuration out of a run, not the repository's. Gemini, Copilot, Qwen and Kimi still read their config files committed in the worktree (for example `.gemini/settings.json` or `.qwen/settings.json`), and hashd does not yet check those for a setting that would send the run's credential somewhere else, the way Claude's credential guard checks Claude's project settings (`server/internal/agents/claude_settings.go`; [Project settings and the run's credential](#project-settings-and-the-runs-credential)). That check is follow-up work, held the same way as OpenCode's (#1775).
 - Team-server runs on an owned workstream **refuse to dispatch** when the owner has no live credential for the run's agents. The refusal names the exact command to fix it.
 - When a run proves a credential dead (expired, revoked, or a token-rotation conflict), the server records it: the next dispatch fails instantly with the recovery steps instead of burning another run. Re-registering clears the state.
 
@@ -416,6 +440,201 @@ A startup verification has been proposed: confirm which credential and endpoint 
 - `opencode providers list` shows only the auth store and environment variables.
 
 The server never installs, pins, or updates agent binaries -- installing agents on the server is the operator's job, and a dispatch whose agent is missing is refused with the install command.
+
+### Shared project and server API keys
+
+Use `--scope project|server` on the same three commands to select a shared
+registration. Omitting `--scope` keeps the personal behavior above. Only a server
+owner or admin may list, set, replace or remove shared credentials. Only API keys
+can be shared; subscription sign-ins, credential files and harvested tokens belong
+to a person.
+
+```bash
+hashd project use my-project
+hashd agents --scope project --project my-project
+printf '%s' "$ANTHROPIC_API_KEY" | hashd agents login claude --scope project --method api-key
+hashd agents logout claude --scope project --project my-project
+hashd agents --scope server
+```
+
+`hashd agents --scope ...` lists the agent, scope (project name or server), method,
+health, who set the key and when, without returning any secret. Scoped login only
+stores the shared key and prints the project it was registered for; it never runs
+an agent sign-in. It refuses `--push`, `--proxy`, `--manual` and any resolved method
+other than API key before reading a secret. Supply `--method api-key` for agents
+whose default method is a subscription. The key is still read hidden on a TTY or
+from stdin, never from a flag, and cleartext remote servers are refused before
+the key is read.
+
+For project scope, `hashd agents`, `hashd agents login` and `hashd agents logout`
+select the hashd project from `--project`, then the saved current project
+(`hashd project use <name>`), then `HASHD_PROJECT`, then the only configured local
+project. Agent-specific settings go in `--options key=value` on `hashd agents login`,
+repeated for more (Gemini's Google Cloud project is
+`--options google_cloud_project=<id>`). A remote client does not use its local project
+list as a fallback. Project scope is refused when no hashd project resolves;
+server scope needs no project selection.
+
+Storing a shared key does not activate it. `agents.credential_source` defaults to
+`owner`, preserving personal registrations, runner sign-ins and existing personal
+credential selection. The Web and TUI show it as **Agents run on**, naming the
+values `owner` **User's account**, `project` **Project key** and `server`
+**Team key** (solo offers Team key only when a project already stores it).
+Everyone with access to the project sees it; a server owner or admin selects
+shared delivery per project there or from the CLI:
+
+```bash
+hashd project config set agents.credential_source project --project my-project
+# Or use the server-wide key for runs of this project:
+hashd project config set agents.credential_source server --project my-project
+# Restore personal credential selection:
+hashd project config set agents.credential_source owner --project my-project
+```
+
+`project` uses only that hashd project's shared key; `server` uses only the server
+registration. A missing, removed or dead key refuses the run, with no fallback to
+personal credentials, harness logins or environment keys. Shared keys stay on the
+server and are delivered only through the agent's API-key proxy: the agent receives
+a local forwarder address and placeholder credential. Agents without a declared
+API-key proxy form are refused, naming their affected stage assignments; choose
+an agent with that form or restore `owner` source.
+
+Scoped logout sends only the selected shared registration's DELETE and prints
+the server's message. It leaves personal registrations and personal and runner
+sign-ins intact. `--scope` and `--runner` cannot be combined.
+
+The REST selector uses query parameters on the existing credential routes:
+
+| Operation | Project scope | Server scope |
+|-----------|---------------|--------------|
+| List | `GET /agents/credentials?scope=project&project=<name>` | `GET /agents/credentials?scope=server` |
+| Register | `PUT /agents/{agent}/credentials?scope=project&project=<name>` | `PUT /agents/{agent}/credentials?scope=server` |
+| Remove | `DELETE /agents/{agent}/credentials?scope=project&project=<name>` | `DELETE /agents/{agent}/credentials?scope=server` |
+| Test | `POST /agents/{agent}/credentials/test?scope=project&project=<name>` | `POST /agents/{agent}/credentials/test?scope=server` |
+
+**Testing a shared key.** An agent's API-key proxy may declare `key_check`: a
+no-cost authenticated GET (claude and codex list their models). Registering a
+shared key runs it at once, and Test runs it again; neither makes a model call.
+It goes through the key's own `base_url` when set, with the proxy's
+authentication header. The provider's answer is recorded on that registration:
+a success verifies it (`ok`), a 401 or 403 (401 only for Bedrock) marks it
+`revoked` so runs refuse it early, and any other answer records nothing and reports `unknown`. An agent
+with no `key_check` has no Test.
+
+**In the Web.** Settings > Server > **Team keys** (server administrators on a
+team server only) lists each agent that can take a shared key, whether its
+server-scope key works, who set it and its `base_url`, with Add key or Replace
+(stored and tested at once), Test and Remove. `GET /agents` marks those agents
+`shared_key`, and `key_check` where a key can be tested.
+
+**Whether the project's key works.** `GET /projects/{name}/agents/key-status`
+tells anyone who can open the project, for the key its `agents.credential_source`
+selects, whether each shared-key agent's key is `working`, `broken`,
+`not_tested` or `not_set`, and nothing else about it. Under `owner` it lists no
+keys.
+
+Omit `scope` for personal credentials. Server scope takes no `project` parameter.
+The PUT body uses `method: "api_key"`, `secret` and optional `config`; the server
+also refuses non-API-key shared registrations and enforces owner/admin access.
+
+#### Custom upstream (`base_url`)
+
+A shared API key for an agent that declares an API-key proxy (`claude`, `codex`)
+accepts an optional `--base-url` (stored as `config.base_url`) to forward
+proxied requests to a custom gateway instead of the agent's default upstream:
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | hashd agents login codex --scope server --method api-key --base-url http://192.168.1.10:8317/v1
+```
+
+Only agents that declare an API-key proxy (`claude`, `codex`) take `base_url`
+here, and only on shared project or server API keys; personal registrations of
+those agents refuse `base_url`.
+`GET /agents` publishes it in each agent's `credential_config` with
+`shared_only`, so the Web and TUI personal forms leave it out.
+
+The URL must use `http` or `https` with a host and no userinfo, query, or
+fragment. Plain `http` is accepted for any host so LAN gateways work; using
+`http` sends the API key in cleartext between the hashd server and that
+endpoint.
+
+The `base_url` path is prefixed to each forwarded request path, and a trailing
+`base_path` declared by the agent (`codex`'s `/v1`) is trimmed before prefixing
+so it appears once:
+
+- `codex` with `http://192.168.1.10:8317/v1`: `/v1/responses` forwards to `http://192.168.1.10:8317/v1/responses`
+- `codex` with `http://192.168.1.10:8317/openai`: `/v1/responses` forwards to `http://192.168.1.10:8317/openai/v1/responses`
+- `claude` with `http://192.168.1.10:8317/anthropic`: `/v1/messages` forwards to `http://192.168.1.10:8317/anthropic/v1/messages`
+
+Replacing the shared key replaces its `config` as a whole, including `base_url`:
+re-registering without `--base-url` clears it and returns requests to the
+agent's default upstream.
+
+#### Amazon Bedrock (`provider=bedrock`)
+
+A shared claude API key can be an Amazon Bedrock API key instead of an
+Anthropic one. Set `provider=bedrock` and the key's AWS `region` in `--options`:
+
+```bash
+printf '%s' "$BEDROCK_API_KEY" | hashd agents login claude --scope server --method api-key \
+  --options provider=bedrock --options region=us-east-1
+```
+
+Optional `opus_model`, `sonnet_model` and `haiku_model` pin the Bedrock model
+or inference profile id each Claude model name runs (Claude Code's
+`ANTHROPIC_DEFAULT_*_MODEL`); without them Claude Code picks its own Bedrock
+defaults for the region. An ARN is refused: the proxy admits one model id per
+request path. `base_url` does not apply to a Bedrock key, and Bedrock settings
+do not apply without `provider=bedrock`. Bedrock is shared keys only.
+
+A run under a Bedrock key gets `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, its
+forwarder as `ANTHROPIC_BEDROCK_BASE_URL` and the forwarder's placeholder as
+`AWS_BEARER_TOKEN_BEDROCK`, which Claude Code sends as `Authorization: Bearer`.
+The server replaces it with the Bedrock key and forwards only
+`POST /model/<id>/invoke` and `/model/<id>/invoke-with-response-stream` to
+`https://bedrock-runtime.<region>.amazonaws.com`. Test lists the region's
+inference profiles on `https://bedrock.<region>.amazonaws.com` (no model
+call); only a 401 marks the key broken, because AWS answers 403 for a
+missing permission as well as a refused key.
+
+**With an IAM role instead of an API key.** Set `role_arn` (and the role's
+`external_id`, when its trust policy requires one). Nothing is pasted, and
+login reads no key:
+
+```bash
+hashd agents login claude --scope server --method api-key \
+  --options provider=bedrock --options region=eu-west-1 \
+  --options role_arn=arn:aws:iam::123456789012:role/hashd-bedrock
+```
+
+The server assumes that role with its own AWS identity, found through the AWS
+SDK's default credential chain: environment variables, a shared profile, an
+EKS service-account token or Pod Identity, ECS, or the EC2 instance profile.
+It calls `sts:AssumeRole` with session name `hashd` (and the external ID),
+keeps the session until five minutes before it expires, and signs each
+forwarded request with it (SigV4, service `bedrock`). The session never
+leaves the server; the run sees the same placeholder as with an API key. A
+role the server cannot assume refuses the run's request with a Diagnostic
+naming the role. Test assumes the role and signs the inference-profile list:
+AWS refusing the role (`AccessDenied`) marks the key broken; the role also
+needs `bedrock:ListInferenceProfiles` for Test to say working.
+
+The role's trust policy must allow the server's identity to call
+`sts:AssumeRole`; its permissions need `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the models it runs. Until agent
+runs are contained (#2202), an agent on an EC2 host can read the instance's
+own role from the metadata service, so give that identity nothing but
+`sts:AssumeRole` into the Bedrock role.
+
+The request shapes were taken from Claude Code 2.1.322 against a local stand-in
+endpoint; no live AWS account was used, for the API key or the role. The Web Team keys form offers the
+provider as a choice and shows only that provider's settings.
+
+Because a proxied run receives a loopback forwarder URL rather than the native
+provider endpoint, its cost is recorded with the provider unresolved
+(`custom_endpoint_provider_unresolved`) and no native-price figure. A Bedrock
+key's run is the exception: it is priced at Bedrock's rates for the key's
+region, from AWS's public price list or LiteLLM's (docs/design/cost-capture.md).
 
 ### Diagnostics
 
@@ -467,15 +686,12 @@ This opens the browser login flow and refreshes the token.
 
 ### Environment variables
 
-An agent does not inherit the server's environment. Its environment is
-allowlisted by `server/internal/childenv`, the one builder for every process
-hashd starts in a worktree: agents, workspace hooks, and every project
-command (build, test, fast check, merge gate and the provisioning
-baseline, all through `RunProjectCommand`). A project command and a hook get
-the base set, `exec.env_allow` and `exec.env` (below), plus their own context
-variables last; a project command also gets its `exec.credentials` (below)
-just before its context variables. A name reaches the agent only when one of these layers
-admits it, later layers winning:
+No child hashd starts in a worktree inherits the server's environment. Its
+environment is allowlisted by `server/internal/childenv`, the one builder
+for every such process: agent stages, every project command (build, test,
+fast check, merge gate and the provisioning baseline) and workspace hooks.
+A name reaches a child only when one of these layers admits it, later layers
+winning:
 
 1. **Base**: `PATH`, `HOME`, `LANG`, `LANGUAGE`, `LC_*`, `TERM`, `TZ`,
    `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, the proxy variables (`HTTP_PROXY`,
@@ -485,233 +701,161 @@ admits it, later layers winning:
    `HASHD_PACKAGE_BIN_DIR`, `HASHD_TOOLS_DIR`, `HASHD_CBM_BIN`). A run that
    starts from a hashd-owned profile gets that profile's `HOME` instead of
    the server's.
-2. **`exec.env_allow`**: names and `PREFIX_*` patterns a project admits from
-   the server's environment, for toolchains:
-
-   ```yaml
-   exec:
-     env_allow: [JAVA_HOME, MAVEN_*]
-   ```
-
-   It applies to agents, project commands and workspace hooks alike, and admits inherited names
-   only; it sets no value.
-3. **The agent's credential variables**: the `credential_env` its registry
-   entry in `defaults.yaml` declares (claude: `ANTHROPIC_API_KEY`,
-   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`; gemini:
-   `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`; and so on). A
-   run carrying a registered credential inherits none of them: the injected
-   credential sets its own.
-4. **`agents.<name>.env`**: values the operator declares in system config,
-   withheld from a run carrying a registered credential.
-5. **Prepared credential/profile**: hashd-owned credential values and profile
-   paths override configured values, including on solo env-credential runs.
-6. **Run variables**: `HASHD_STAGE`, `HASHD_AGENT_ROLE`, `HASHD_PROJECT`,
-   `HASHD_RUN_ID`, `HASHD_WORKSTREAM_ID`, `HASHD_SERVER_URL`,
-   `HASHD_SERVER_CA_CERT`, `HASHD_TOKEN` and `IS_SANDBOX=1`.
+2. **The project environment** (below): the one layer a project sets, the
+   same for an agent, a project command and a hook.
+3. **The agent's credential variables** (agents only): the `credential_env`
+   its registry entry in `defaults.yaml` declares (claude:
+   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`;
+   gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`; and so
+   on). A run carrying a registered credential inherits none of them, from
+   this layer or from the project environment: the injected credential sets
+   its own.
+4. **`agents.<name>.env`** (agents only): values the operator declares in
+   system config, withheld from a run carrying a registered credential.
+5. **Prepared credential/profile** (agents only): hashd-owned credential
+   values and profile paths override configured values, including on solo
+   env-credential runs.
+6. **The child's own context**, last: an agent's run variables
+   (`HASHD_STAGE`, `HASHD_AGENT_ROLE`, `HASHD_PROJECT`, `HASHD_RUN_ID`,
+   `HASHD_WORKSTREAM_ID`, `HASHD_SERVER_URL`, `HASHD_SERVER_CA_CERT`,
+   `HASHD_TOKEN` and `IS_SANDBOX=1`), a test command's handoff variables, a
+   hook's `HASHD_*` context.
 
 Some names are never admissible, from any layer but an injected credential:
 `HASHD_SECRET_KEY`, `HASHD_OPS_ROOT`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_SESSION_TOKEN`, `AZURE_CLIENT_SECRET`, `AZURE_FEDERATED_TOKEN_FILE`, and the forge token names the server's forge calls use (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `CI_JOB_TOKEN`, `BKT_TOKEN`, listed once in `server/internal/forge/forgecred`).
-Listing one in `exec.env_allow` refuses the project config with a diagnostic
-naming it.
+An entry of the project environment under one of these names is refused when
+it is written.
 
-**`exec.env`** optionally sets plain, non-secret values in every project
-command's and workspace hook's environment, over the inherited names, and
-never in an agent's. Values are stored as configuration; do not put passwords
-or tokens here. Existing build and CI definitions need no changes:
+#### The project environment
 
-```yaml
-exec:
-  env:
-    DOCKER_API_VERSION: "1.43"
-    MAVEN_ARGS: -B
-```
+A project has one environment: named entries, each setting one variable for
+every child hashd starts for the project. An entry belongs to the project or
+to one of its repos; a repo's entry overrides the project's entry of the same
+name, whatever either's type, for that repo's work. There is no system-wide
+scope: every project holds its own entries, and a project added later starts
+with none.
 
-In a multi-repo project a repo adds its own over the project's, by name
-(`hashd project repo edit <repo> --exec-file exec.yaml`, or an `exec:` key in
-the `--repo-config` file of `hashd project add`, each a YAML file holding
-`env:`); `exec.env_allow` stays the project's, since it also decides what
-agents inherit. Workspace hooks are project settings and take the project's
-`exec.env`. A name hashd sets (`HASHD_*`), a never-admissible name or a key
-that is not a variable name refuses the setting when it is written, and so
-does any other `exec` key: running commands in a container image is not
-supported yet. A test verdict records the `exec.env` it ran with by name and
-value hash, so a pass under one value never answers a run under another.
+An entry has a type, which says where its value comes from:
 
-**`exec.credentials`** gives a project command a forge credential without
-the server's environment: the credential of the person who owns the work,
-from hashd's own forge sign-in (`hashd forge login`, or an SSO sign-in where
-the forge has one). A binding names a variable and the forge credential key
-it receives a credential for, a host or, where one host serves many
-organisations, host and organisation, as `hashd forge status` lists it:
+| Type | The variable receives |
+|---|---|
+| `value` | The value as written. Plain configuration: not for passwords or tokens. |
+| `secret` | A value stored sealed in the project's database and never shown again. With `as_file`, the variable receives the path of a read-only file holding it instead. |
+| `credential` | The forge credential of the person who owns the work, for the forge credential key the entry names (`<host>`, or `<host>/<organisation>` where one host serves many, as `hashd forge status` lists it). Only the key is stored. |
+| `host` | The value of a variable in the environment of the machine that runs the child. The entry names that variable, or reads the one of its own name; a name ending in `*` (`MAVEN_*`) passes every variable it matches. |
 
-```yaml
-exec:
-  credentials:
-    FEED_TOKEN:
-      forge: <host>/<organisation>   # or <host> alone, as `hashd forge status` lists it
-```
+**A host entry comes from each runner's own environment.** A stage that runs
+on a runner reads the variable from that runner's process environment; a
+child the server starts itself reads the server's. hashd neither copies a
+host variable from one machine to another nor checks that a runner has it: a
+variable the machine lacks is simply not set for the child. Set it where the
+runner's service is configured.
 
-A binding can instead name a **project secret** (below) with `secret:` in
-place of `forge:`; a binding names exactly one of the two, and a value with
-surrounding whitespace is refused.
-
-Only names and keys are stored, never a value. A repo's binding replaces the
-project's of the same name (`credentials:` beside `env:` in the repo's exec
-file). A repo's forge bindings are written with exactly the authorization that
-writing its `test_cmd` and `exec.env` takes, since whoever sets what a command
-runs already decides what code runs with the owner's credential; the
-project's are in `config.yaml` on the server host (`hashd project config set`
-writes no `exec` section). A repo whose commands receive a project secret is
-an owner's or admin's to change (see Project secrets). Each repo edit leaves a `repo_edited` event naming
-the fields it changed and the user who made it. A name `exec.env` also sets, a name hashd sets (`HASHD_*`), a
-never-admissible name, a name every command inherits from the base set
-(`PATH`, `HOME`, locale, proxy and CA variables) and a forge value that is no
-credential key are refused.
-
-Right before each build, test, fast check, merge gate, baseline and
-comparison command launches, and before `browser.app_cmd` (the app started
-for review and planning browser checks), the server reads the work's owner
-(the workstream's, so a reassignment takes effect at the next command; the
-story's for the app a planning browser check starts, since planning has no
-workstream; solo uses the solo owner) and puts that owner's credential for
-the key in the variable for that one command: the owner's sign-in when the key is bound to
-one, otherwise the owner's stored token. Agents, MCP servers, workspace hooks
-and the repository's pre-commit hook never receive it. When the owner has no
-usable credential (never signed in, expired, a sign-in needed), when no owner
-can be determined (a failed owner lookup refuses in solo too; only work that
-has no owner on a solo server uses the solo owner), or when the credential
-cannot be read, the command never
-starts: it stops with a Diagnostic (`command.credentials.unavailable`,
-`command.credentials.owner_unknown`, `command.credentials.unreadable`, the
-source the CLI, Web and timeline show) naming
-the variable and the key, for example "Cannot start the project command: the
-work owner has no usable credential for <host>/<organisation> (FEED_TOKEN)".
-The run's failure record files them under a code spelled differently:
-failure_code `command.credential_unavailable`, failure_code
-`command.credential_owner_unknown` and failure_code
-`command.credential_unreadable`.
-The per-commit test stage fails once on it rather than handing the run to a
-fix, since no code change gives the owner a credential. Nothing falls back to another person, a service account, the host's own
-forge login or the server's environment, nothing signs in automatically, and
-nothing retries. Each occurrence of the value in what the command prints is
-replaced with `[REDACTED]` before the output leaves the runner, a value
-printed across several writes included; output is held in memory, so no raw
-copy reaches disk. The app `browser.app_cmd` starts runs for the whole
-stage and streams its output to its app log instead: the log receives that
-output with each credential value replaced by `[REDACTED]`, a value split
-across writes or across stdout and stderr included, and an app start that
-is refused leaves the browser check skipped with a warning carrying the
-whole Diagnostic. This catches accidental prints only: code the command runs
-is trusted with the credential and could still send it elsewhere. A
-credentialed command neither reuses nor records a test verdict; other
-commands keep their cache policy.
-
-**Project secrets** are values an owner or admin sets for the commands hashd
-runs for a project (gate, merge gate and baseline), for what no person's forge
-credential provides: a registry token, a signing key. They are stored sealed in
-the project's database and never shown again: the list shows each secret's
-name, kind, version, who last set it and when, never a value.
+Entries are read and written over the server's routes `GET /projects/<project>/env` and `PUT` / `DELETE
+/projects/<project>/env/<NAME>` (`?repo=<name>` for a repo's entry), and
+through three surfaces that list, set and remove entries: `hashd project env`,
+TUI Settings (the "Project environment" row) and Web Settings (the
+Environment section). A caller the server offers no write actions sees the
+table read-only. With `hashd project env`:
 
 ```sh
-printf %s "$NPM_TOKEN" | hashd project secret set npm-publish   # a value secret, from stdin
-hashd project secret set npm-publish                           # or typed at a hidden prompt
-hashd project secret set signing-key --file key.pem            # a file secret: the file's exact bytes
-hashd project secret list
-hashd project secret remove npm-publish
+# list: the project's own entries and every repo's; --repo <name> lists what that repo's work receives
+hashd project env list
+# set or replace; a secret is read from a hidden prompt, piped stdin or --from-file
+printf '%s' "$NPM_TOKEN" | hashd project env set NPM_TOKEN --secret
+hashd project env set SIGNING_KEY --secret --from-file signing.key --as-file
+hashd project env set MAVEN_ARGS -- -B    # -- so a value starting with - is not read as a flag
+hashd project env set FEED_TOKEN --credential <host>/<organisation> --repo api
+hashd project env set JAVA_HOME --host
+hashd project env remove NPM_TOKEN
 ```
 
-Settings > Command environment has the same list and form, for owners and
-admins only. A value is never taken from the command line: `hashd project
-secret set NAME VALUE` is refused without repeating it. Surrounding whitespace
-is trimmed from a value read from stdin or the form; a file's bytes are kept
-exactly. A secret holds at most 64 KiB; a value secret holds no NUL byte (store
-it as a file). Setting a name again replaces it at the next version, and the
-next command receives the new value: that is how a secret is rotated. Each set
-and remove leaves a `project_secret.set` / `project_secret.removed` row on the
-project timeline naming the secret, its kind, version and who acted.
+Every project member may list the environment; only an owner or admin may
+set or remove an entry. A listing shows each entry's name, type, scope and
+version, a value entry's value, a credential entry's key and the variable a
+host entry reads. It never shows a secret's value, and it shows a host entry
+as read from the runner, never a value read from one. A value or a secret
+holds at most 64 KiB; a secret delivered as a variable holds no NUL byte
+(deliver it as a file). A name hashd sets (`HASHD_*`), a never-admissible
+name, and for a secret or a credential a name every child inherits from the
+base set, are refused when the entry is written. Setting an entry again
+replaces it at a new version: that is how a secret is rotated, and the next
+launch receives the new value. Each set and remove leaves a
+`project_env_set` / `project_env_removed` row on the project timeline naming
+the entry, its scope, type and version and who acted, never a value.
 
-Bind one in `exec.credentials`:
+Right before a child launches, the server resolves the environment for the
+work it runs for: the repo's entries over the project's, a secret unsealed,
+and a credential as the work owner's own for its key (the workstream's
+owner, so a reassignment takes effect at the next launch; the story's for
+planning, which has no workstream; solo uses the solo owner): the owner's
+sign-in when the key is bound to one, otherwise the owner's stored token. A
+runner asks the server once per stage for its stage's environment and fills
+in the host entries itself. When the owner has no usable credential, when no
+owner can be determined, when the credential cannot be read or a secret does
+not open, the child never starts: it stops with a Diagnostic
+(`command.credentials.unavailable`, `command.credentials.owner_unknown`,
+`command.credentials.unreadable`, `command.secrets.unreadable`) naming the
+entry, for example "Cannot start: the work owner has no usable credential
+for <host>/<organisation> (environment entry FEED_TOKEN)". The run's failure
+record files the credential refusals as failure_code
+`command.credential_unavailable`, `command.credential_owner_unknown` and
+`command.credential_unreadable`. Nothing falls back to another person, a
+service account, the host's own forge login or the server's environment,
+nothing signs in automatically, and nothing retries.
 
-```yaml
-exec:
-  credentials:
-    NPM_TOKEN:
-      secret: npm-publish   # a value secret: the variable holds the value
-    SIGNING_KEY:
-      secret: signing-key   # a file secret: the variable holds the path of a read-only file
-```
+An `as_file` secret is written for the one launch to a read-only (0400) file
+in a directory of its own (0700), outside every worktree, and removed when
+the child ends. A runner's stages use
+`<runner-root>/worktrees/<server-runner-key>/runner-<runner-state-key>/workspaces/exec-secrets/run-<n>/`;
+the server's own launches use `<ops>/exec-secrets/run-<n>/`. Exclude both
+hierarchies from backups and monitoring. Under the stage fence the child can
+read its own file and nothing else there. The server removes any file left
+behind when it starts, and a run directory that cannot be removed is logged
+as an ERROR naming it.
 
-Right before each gate, merge gate and baseline command launches, a value
-secret is put in its variable, and a file secret is written for that one run
-to a read-only (0400) file in a directory of its own (0700). Runner commands use
-`<runner-root>/worktrees/<server-runner-key>/runner-<runner-state-key>/workspaces/exec-secrets/run-<n>/`.
-The keys are full SHA-256 hashes of the JSON arrays
-`["runner", "<server-id>", "<runner-id>"]` and `["runner-state", "<runner-id>"]`,
-respectively. `<runner-root>` is the runner's storage root; the local runner
-uses the sibling `<ops>-runner` directory (`~/.hashd-runner` by default).
-Server-run commands use `<ops>/exec-secrets/run-<n>/`, where `<ops>` is the
-installation's ops directory. Exclude both secret-file hierarchies from backups
-and monitoring. Both are outside every worktree, and the variable
-holds the file's path. Under the stage fence the command can read its own file and
-nothing else there. The file is removed when the command ends, and the server
-removes any left behind when it starts. A run directory that cannot be removed
-is never silent: the server log has an ERROR naming it, and the command's
-timeline row names the directory and how to clear it. Agents, MCP servers, workspace hooks,
-the repository's pre-commit hook and the agent's own `hashd test` never
-receive a secret, and `browser.app_cmd`, which runs for an agent stage, never
-resolves a secret binding. A command bound to a secret that is not set never
-starts: it stops with `command.secrets.missing` (the run's failure record
-files it as failure_code `command.secret_missing`), naming the variable, the
-secret and the fix (`hashd project secret set <name>`, or Settings > Command
-environment); no person's credential stands in. A command a runner runs is
-refused too, with `command.secrets.not_delivered`, until runners are handed
-secrets. Each occurrence of a value, or
-of a file's contents, in what the command prints is replaced with
-`[REDACTED]`, as for a forge credential, and a command bound to a secret
-neither reuses nor records a test verdict.
+What this means for secrets, plainly:
 
-Who may expose a secret: on a repo whose commands receive one, before or after
-the change, only an owner or admin may change what its gate runs (its
-commands, commit check, build adapters, build side effects, `exec.env`, any
-credential binding, adding or removing a secret binding included, and its
-checkout path), and on a project bound through its own exec or any repo's,
-only an owner or admin may change the project's own gate settings. Other
-repos keep their usual authorization.
-
-The limits, plainly:
-
-- Masking is best effort. A value is caught only when printed whole; an
-  encoded, split or transformed copy is not.
-- A command hashd runs can read the secrets bound to it, by design, and could
-  send them elsewhere. So whoever can change the code a gate runs, by pushing
-  to the branch it tests, can read the secrets bound to that gate: bind a
-  secret only to gates whose code you trust that far.
-- On a host where the stage fence cannot run, the file secret of a running
-  command is protected only by its file mode, so other processes of the server's
-  own user can read it while the command runs.
+- Agents receive the project's secrets and credentials, as project commands
+  and hooks do, and so do the MCP servers an agent starts and passes its
+  environment to. hashd does not scrub agent output of secret values.
+- A project command's and a hook's printed output is still masked: each
+  whole occurrence of a secret or credential value is replaced with
+  `[REDACTED]`. This catches accidental prints only; an encoded, split or
+  transformed copy is not caught.
+- Any code a child runs can read the entries it received and could send them
+  elsewhere. Whoever can change that code, by pushing to the branch a gate
+  tests, can read them: give a project only the secrets you trust its code
+  and its agents with.
+- A project command that ran with a secret or a credential entry neither
+  reuses nor records a test verdict. Other commands key their verdict on the
+  environment's entries (name, type and version), so a pass under one
+  environment never answers a run under another.
 
 `hashd doctor --project <name>` lists, by layer, the names an agent, a
-project command and a workspace hook receive, and the names in the server's environment they do
-not. It never prints a value. A build that broke on upgrade because a
-variable is no longer inherited shows here. The server-environment check
-separately names forbidden values withheld from agents, commands and hooks;
-`exec.env_allow` cannot restore them; a project command that needs a forge
-credential gets its work owner's through `exec.credentials`. Other names may
-be admitted through `exec.env_allow`. Each `exec.credentials` binding, the
+project command and a workspace hook receive, and the names in the server's
+environment they do not. The project environment's names carry their
+entry's type, for example `project environment: JAVA_HOME (host), NPM_TOKEN
+(secret)`; no value is ever printed. A build that broke on upgrade because a
+variable is no longer inherited shows here: a host entry admits it. The
+server-environment check separately names the forbidden values withheld
+from every child, which no entry can restore. Each credential entry, the
 project's and each repo's, is listed as `FEED_TOKEN <- <host>/<organisation>:
 present / missing for <owner>`, for the person running doctor: names, keys
-and status only. Project secret bindings are a row of their own,
-`project command secrets`: `NPM_TOKEN <- secret npm-publish: set / not set`.
+and status only.
 
-A command's executable (`argv[0]`) is looked up on the `PATH` its `exec.env`
-sets, and on the server's own `PATH` when it sets none. Doctor and the
-preflight stage look it up the same way: doctor reports, per repo, the
+A command's executable (`argv[0]`) is looked up on the `PATH` a value entry
+sets, and on the launching machine's own `PATH` when none does. Doctor and
+the preflight stage look it up the same way: doctor reports, per repo, the
 executable of each `test_cmd`, `merge_gate_test_cmd`, `fast_test_cmd` and
 `build_cmd` it would run (none under `tests_skipped`, no build under
 `build_skipped`), and names a missing one with its repo and the settings to
 change, for example ``repo `consumer`: `mvn` not found on the declared PATH``.
 It runs no command and never prints the `PATH` value.
+
+An installation upgraded from the earlier `exec` settings had them converted
+into entries once, at the upgrade; the release notes of that release say how.
 
 `HASHD_TOKEN` is the run's own token, never the server's internal token. It
 reaches only the run's project and, for a workstream run, its own
@@ -740,7 +884,6 @@ are withheld:
 |---------|-------|
 | `ANTHROPIC_API_KEY` | Claude |
 | `GEMINI_API_KEY` | Gemini |
-| `GOOGLE_API_KEY` | Gemini |
 
 ---
 
@@ -784,9 +927,10 @@ A `fix_generation` override without `{{ repair_ruling_section }}` refuses a ruli
 instead of dropping it. A FIX whose merge-gate binding stored its ruling gives
 its implementer and reviewer `include_repair_ruling_evidence.md`: the ruling,
 the failed command, the tested revision and the complete stored output. It
-rides the implementer's `{{ fix_requirements_section }}` and the reviewer's
-`{{ repair_ruling_section }}` (contextual and closed-list reviews), and an override
-without that placeholder refuses the FIX the same way. Both ruling sections
+rides the implementer's `{{ repair_ruling_section }}` (implement and
+implement_fix, directly after `implement_fix_requirements_section.md`) and the
+reviewer's (contextual and closed-list reviews), and an override without that
+placeholder refuses the FIX the same way. Both ruling sections
 include `include_repair_ruling.md`, so the FIX generator, implementer and
 reviewer read the same verdict directions. Findings and rulings are passed in
 full, not clipped to a size budget. Scope and severity filters select relevant records; they are not
@@ -894,9 +1038,16 @@ current when adding an entry point; do not copy the guidance into directives.
 | `review_round_resume.md` | review (resume) | Re-review round in the resumed reviewer session |
 | `review_repair.md` | review + final_review (resume) | Redraft of an unusable review response (schema/verifier) |
 | `review_closed_list.md` | review (judged retry) | Closed-list grading after the review-conflict judge's CARRY |
-| `review_history.md` | final_review | Previous review cycles section |
-| `final_review.md` | final_review | Holistic branch review before merge |
-| `final_review_delta.md` | final_review (after a FIX) | Delta round: checks the FIX commits answer the last verdict's findings |
+| `review_history.md` | final_review | Previous review cycles; composes guidance and attempt entries rendered in Go through `include_final_review_history_guidance.md` and `include_final_review_history_attempt.md` before bounding |
+| `include_final_review_notes.md` | final_review | Selected previous-verdict checklist or per-commit human decisions from data; includes `review_verification_section.md` or `review_notes_section.md` for framing, preserving project overrides |
+| `include_final_review_touched_file_contents.md` | final_review_delta | Per-file headings, submodule and binary notices, complete fenced contents and empty-list notice from files present at head; rendered in Go with project overrides before measuring the section ceiling, then placed as `touched_file_contents` in embedded mode |
+| `include_final_review_touched_file_listing.md` | final_review_delta | Contents-withheld notice with the quoted worktree and every touched path's status, kind, lines, bytes or submodule commit; rendered in Go with project overrides before bounding, then placed as `touched_file_contents` in listed mode |
+| `include_final_review_delta_commits.md` | final_review_delta | Full-SHA gained-commit lines, oldest first, from commit records; rendered in Go with project overrides before bounding, then placed as `delta_commits_body` |
+| `include_final_review_touched_files.md` | final_review_delta | Recorded touched-path lines and deletion/submodule markers from file records; rendered in Go with project overrides before bounding, then placed as `touched_files_body` |
+| `include_final_review_gate_evidence_records.md` | final_review + final_review_delta (gate_after_review) | Evidence opening sentence, subheadings and record lines, from planned commit results and the previous merge gate round; rendered in Go before bounding, with Go keeping only the bound notice and reference |
+| `include_final_review_gate_evidence_section.md` | final_review + final_review_delta (gate_after_review) | Build and Test Evidence heading and bounded `build_test_evidence` body |
+| `final_review.md` | final_review | Holistic branch review before merge; includes the shared evidence section under gate_after_review |
+| `final_review_delta.md` | final_review (after a FIX) | Delta round: checks the FIX commits answer the last verdict's findings; includes the shared evidence section under gate_after_review |
 | `failing_tests.md` | failing_tests | Name the failing tests, the runner's summary line and its count, and the failure's kind (tests, build or environment) with the output line it rests on, in a failed build or test output nothing else named (test stage, provisioning baseline, merge gate); all labelled "named by model" |
 | `browser_classify.md` | browser_classify | Boolean browser relevance check before story planning, implementation, per-commit or final review |
 
@@ -944,10 +1095,19 @@ internal browser-mcp`), injected into every harness's MCP config for the
 invocation that owns the session; not through their own shell. A stage whose
 shell cannot start processes or write files (a read-only review, a planner with
 no shell, Codex's read-only sandbox for shell-less stages) can therefore still browse. The server is
-a child of the agent: outside a harness's own sandbox, inside the stage fence,
-which lets it and the agent read that session's directory and nothing beside
-it. They never write there: the browser daemon and the server do, outside the
-fence, so a stage that could write there could plant a symlink they follow. Its `browser` tool runs
+a child of the agent: outside a harness's own sandbox, inside the stage fence.
+Each session's directory (`browser/<role>-<suffix>`) keeps the browser's
+control files, its `config.json` and lifecycle log, and the browser saves its
+captures to a `captures` child of it. That capture directory is the session's
+artifacts directory: the `browser_artifacts` prompt variable and the server's
+`--artifacts` name it, and it is the one directory the stage fence and, for
+OpenCode, the harness's own permission layer open to the stage, read-only. The
+fence opens it as a directory, so captures saved after launch are readable;
+the control files beside it and other sessions stay closed. A launch whose
+capture directory cannot be granted is refused before it starts
+(`stage.evidence_grant`). The stage never writes there: the browser daemon
+does, outside the fence, so a stage that could write there could plant a
+symlink it follows. Its `browser` tool runs
 one playwright-cli command in that session, from its artifacts directory, and
 refuses everything that reaches past the page under test: session lifecycle,
 another session, `run-code` and the debugger, commands that read or write files
@@ -1022,8 +1182,8 @@ plus 30 seconds; resumed attempts inherit their base stage's timeout) bounds
 leftovers after a host-process crash. Per-commit artifacts remain under the run's
 `browser/review-*` directory.
 
-Final review additionally receives the short screenshot-attachment skill in
-`include_final_review_images.md`. The reviewer explicitly selects a PNG and
+Final review additionally receives the short screenshot-attachment skill, part
+of `final_review.md`. The reviewer explicitly selects a PNG and
 caption through the `hashd-browser` server's `attach_image` tool (the same
 receiver `hashd internal review-attach-image` posts to); selecting none is valid.
 The template checks that its optional attachment command is defined, so an
@@ -1068,7 +1228,9 @@ TUI Kitty/Sixel rendering and clickable fallback are tracked separately in
 | `plan_discovery_resume.md` | pm_discovery_resume | Finish interrupted discovery in its existing session |
 | `refine_story.md` | pm_refine | Refine chunk into story with acceptance criteria |
 | `edit_story.md` | pm_edit | Edit existing story based on feedback |
+| `sequence_story.md` | pm_refine_resume, pm_edit_resume | Sequencing turn after a draft or an edit: which open filed stories the story should wait for, each with a one-line reason |
 | `project_describe.md` | pm_describe | Generate project description from repo contents |
+| `directives_edit.md` | pm_edit | Propose a revision of one directives level (global, project, workstream) from the operator's instruction |
 | `plan_add.md` | plan_add | Generate a single micro-commit from instruction |
 
 #### Other
@@ -1104,8 +1266,11 @@ Override resolution: project `prompts/<name>.md` > built-in `prompts/<name>.md`.
 
 Overrides are by **prompt template name**, not stage name. Stages compose multiple templates, so overriding at the template level gives fine-grained control, including shared sections.
 
-The server owns the override files; the CLI reads and writes them over the REST
-API, so these commands work the same in single-user and team/remote mode.
+The server owns the override files. The `hashd prompts` commands read and write them over the REST API and send only the project and the prompt name: the reads (`GET /prompts`, `GET /prompts/{name}`) take `project` rather than filesystem paths, so the commands need no local `HASHD_ROOT` or ops root and work the same against a local or a remote server.
+
+Overrides can also be listed, viewed, edited, diffed and reset from Web Settings > Prompts, which uses the same REST routes and writes the same override files.
+
+Overrides can also be listed, viewed, edited, diffed and reset from the TUI Settings modal's Prompts row, which uses the same REST routes and writes the same override files.
 
 ```bash
 # Edit an override in $EDITOR (starts from the current override, or the default)
@@ -1155,6 +1320,38 @@ Older Hashd launches could write an incompatible `mcpServers` object to
 delete or rewrite existing files.
 This does not change the existing best-effort read-only permission declaration,
 server-side credential exclusion, or stage-specific background/subagent policy.
+
+What a stage is given to read outside its checkout -- its delivered inputs
+(the directories under `<TranscriptRoot>/inputs/` holding copies of its
+selected files), the directory holding its project environment's as-file
+entries, and its browser session's capture directory, each of which the stage
+fence opens read-only -- reaches OpenCode's own permission layer, which would otherwise refuse them:
+OpenCode asks `external_directory` before a tool reads or writes outside the
+worktree, and `opencode run` rejects every ask. Verified against OpenCode
+1.19.5 with a local scripted model, each launch that delivers inputs writes an
+`opencode.json` holding only a reference `hashd-input-<dir name>` for every
+such directory into a directory of the launch's own, removed after the
+launch, and points `OPENCODE_CONFIG_DIR` at it. OpenCode then puts `<dir>/*`
+among the `external_directory` allows of every agent's defaults, whichever
+agent the config makes the default. A reference alone grants no tool
+permission ([References](https://opencode.ai/docs/references/)), and hashd
+writes no permission rule: the defaults come before every rule a config sets,
+so a configured `external_directory` or `read` denial still refuses the inputs,
+and no rule is added, replaced, reordered or re-advertised. hashd never writes a
+rule above the operator's and does not check their config before launch; a read
+such a denial refuses is left to be reported as a harness refusal. OpenCode reads
+references only from config files (never `OPENCODE_CONFIG_CONTENT` or an
+`OPENCODE_CONFIG` file); its reference loader reads `OPENCODE_CONFIG_DIR` in
+the global directory's place whenever the variable is set, even empty, as the
+run home's declaration sets it, and its config loader reads that directory's
+`opencode.json` after the project's root config, which moves no other setting
+because the file holds nothing else. An inherited `OPENCODE_CONFIG_DIR` naming
+a directory refuses the launch rather than being replaced. OpenCode applies
+references only inside a git project, as a stage's checkout is; elsewhere the
+inputs stay refused. The copies are read-only files. With the fence off, that
+prevents only writes by the `edit`, `write` and `patch` tools and plain shell
+writes; the agent's own user can still `chmod` or delete a copy, and the stage
+fence is what prevents that.
 
 ## Ops-dir isolation
 
@@ -1228,10 +1425,9 @@ still closes the ops dir, and downstream gates validate the result.
 
 ### Stage Shapes
 
-The Go map `server/internal/agents/runner.go:stageShapeMap`, Python mirror
-`packages/hashd-client/src/hashd_client/agents_check.py:STAGE_SHAPE`, and fixture
-`tests/fixtures/agents/stage_shape.json` define which shape each stage uses.
-Those three stay in lockstep through the existing stage-shape contract tests.
+The Go map `server/internal/agents/runner.go:stageShapeMap` and Python mirror
+`packages/hashd-client/src/hashd_client/agents_check.py:STAGE_SHAPE` define which shape each stage uses.
+Those stay in lockstep through the existing stage-shape contract tests.
 
 Default stage commands in `defaults.yaml:stages` and per-agent templates for
 stage-backed shapes in `defaults.yaml:agents.*.shapes` are structural templates
@@ -1287,7 +1483,7 @@ Before launch, hashd reads the repository's `.claude/settings.json` and `.claude
 - an `env` entry for a credential variable the run's own environment sets, because pinning it would put its value on the command line;
 - a settings file that cannot be parsed.
 
-The refusal's Diagnostic source is `agents.claude_project_settings_refused` (failure kind `AgentProfileRefused` once the failure catalogue exists). Runs with no registered credential (a credential from the server's environment, or the host login on an unowned team run) carry no guard: the repository's own settings stand.
+The refusal's Diagnostic source is `agents.claude_project_settings_refused` (failure kind `AgentProfileRefused` once the failure catalogue exists). Runs with no registered credential (a credential from the server's environment) carry no guard: the repository's own settings stand.
 
 The opt-in live check `TestLiveClaudeBackground` (`server/internal/agents/live_claude_background_test.go`) launches the real claude binary through `RunStageWithOptions` in a temp directory with no project, at the harness default tool timeout. The host's Claude Code login, user settings and account MCP connectors still load (leg (2) below moves the user configuration directory), so its results hold for the host it ran on. It last ran on Claude Code 2.1.266. Each row records what that run observed. A result is unavailable (the tool is not offered), refused (the harness answered the call with an error), foreground completion (the work finished inside the call), started or moved to background (the call returned while its work kept running), or not moved (the harness stopped the command at its timeout). Completion after final result is judged from the stream (a frame after the first `type:"result"` frame, or a turn the harness started itself) and from a marker file the work writes as its last step, watched for the work's own duration after the run returned. The launcher runs the agent in its own process group and SIGKILLs that group when the agent exits, so the marker watch sees only work that left the group: a "no" for work inside the group comes from that reap, not from the work not having run. The check fails on any background start or later completion, on `Agent` (listed as `Task` in the tool list) or `Workflow` offered on any shape, on `Monitor`, `CronCreate`, `ScheduleWakeup`, `RemoteTrigger`, `SendMessage` or the `/loop` skill offered on any shape, and on a case with no attempt or not exercised, which produce no row. Case (e) asks the stage agent to try `Monitor`, `CronCreate` and `ScheduleWakeup` with local work that writes its marker; it never asks for `RemoteTrigger` (routines on the operator's claude.ai account) or `SendMessage` (the operator's other sessions), and judges both from the offered tool list alone. Case (f) names the stage session with a unique `--name`, added at the test's subprocess seam because the launcher passes none, and once the stage agent's foreground Bash call starts, a test-owned `claude -p` sender restricted to `--tools SendMessage` and bypassing permission prompts sends one message to that name alone; it never lists or messages any other session. The message's last line is a random token that appears nowhere in the stage's prompt or argv. The check looks for it in three places: the stage session's stored transcript (the one file named for the session id under the Claude Code configuration directory's `projects` directory), which records a delivered message whether or not the stage agent mentions it; the stage's stream; and the stage agent's text, which is asked to quote the last line of any message that reached it without acting on it. A control leg first removes `crossSessionInbound` from the launch settings and must find the token in its transcript, so the run shows that signal records a delivery without depending on the stage agent; the leg with the launch settings fails if the token appears in any of the three, and fails as not exercised when the control's transcript showed none or its own transcript cannot be read. The sender's `SendMessage` answered `{"success":true,...}` in both legs, so the result is judged on the receiving side.
 
@@ -1494,9 +1690,13 @@ launch defects. The current implementation was checked against the published
   policy. The resume runs only when the result still denies `Agent` and
   `AgentSwarm` with `subagents: []`, whoever created the session; an
   unprotected session (one created outside hashd or before this policy without
-  those restrictions), a journal it cannot find or read, or another journal
-  version is refused with a diagnostic and nothing launches. Restrictions are
-  never retrofitted; start a new hashd session instead.
+  those restrictions), a session folder whose journal it cannot find or read,
+  or another journal version is refused with a diagnostic and nothing
+  launches. Restrictions are never retrofitted; start a new hashd session
+  instead. A session no workspace folder holds (another owner's, or one gone
+  with its home) is not refused: Kimi finds sessions only there, so it fails
+  `Session "<id>" not found.` itself, classified `session_not_found`, and the
+  caller starts a fresh session (Kimi Code 2.5.2).
 - `--max-ralph-iterations` belongs to the retired CLI and is not sent. No claim
   is made that this fixes background shell execution, hooks or all autonomous
   continuation features. No native read-only enforcement has been added.
@@ -1559,7 +1759,7 @@ Documented release: kimi-cli 1.50.0. Installed version: not installed. Opted in 
 
 hashd's `opencode` registry entry targets OpenCode 1.18.31 ([anomalyco/opencode](https://github.com/anomalyco/opencode), npm `opencode-ai`, the latest release on 2026-09-16): every shape runs `opencode run --format json`: `run` reads the prompt from piped stdin, `--format json` prints one event per line carrying a top-level `sessionID`, and `--session` continues a session and exits with "Session not found" for an id it does not have ([`run` command](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/cli/cmd/run.ts), [CLI](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/cli.mdx#run)). MCP servers reach it through the per-process `OPENCODE_CONFIG_CONTENT` inline config in OpenCode's `mcp` shape (`type: "local"`, `command` as one array, `environment`), merged into the inherited value so its other settings stay as they are ("OpenCode distribution and configuration" above), since OpenCode ignores config keys it does not define ([MCP servers](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/mcp-servers.mdx), [config parsing](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/parse.ts)).
 
-Every opencode launch pins two environment variables: `opencodeStageOwnedEnv` in `server/internal/agents/runner.go` sets them after credential and MCP injection, so argv and the stdin prompt stay as the shape builds them. That reaches every shape (`print`, `print_resume`, `json`, `review`, `review_resume`, `implement`, `implement_resume`, `chat`, `chat_resume`, `detect`) and `stage_agents` reassignments. The permission flags stay empty and read-only stays best-effort. OpenCode 1.18.31 has these ways a stage agent's run can go on after its turn:
+Every opencode launch pins two environment variables: the opencode adapter's `StageOwnedEnv` (`server/internal/agents/harness/opencode.go`), which `applyStageOwnedControls` in `server/internal/agents/runner.go` applies, after credential and MCP injection, so argv and the stdin prompt stay as the shape builds them. That reaches every shape (`print`, `print_resume`, `json`, `review`, `review_resume`, `implement`, `implement_resume`, `chat`, `chat_resume`, `detect`) and `stage_agents` reassignments. The permission flags stay empty and read-only stays best-effort. OpenCode 1.18.31 has these ways a stage agent's run can go on after its turn:
 
 - Subagents. The `task` tool starts a subagent in a child session, in the foreground by default; with `background: true` it returns at once and later sends the subagent's result into the parent session as a new prompt, and a running foreground task can also be promoted to a background job; the source read here does not show what promotes one ([`task` tool](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/tool/task.ts), [agents](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/agents.mdx#task-permissions)). Pinned: `OPENCODE_PERMISSION`, the documented inline permission config ([environment variables](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/cli.mdx#environment-variables)), with `"task":"deny"` as its last key. An inherited value keeps every other key in its order and as written, since the last matching rule wins ([permissions](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/permissions.mdx#granular-rules-object-syntax)); a value OpenCode cannot parse, which it skips, is replaced, and so is valid JSON that is not an object: OpenCode deep-merges the parsed variable without the config schema's normalization of a single action such as `"allow"` to `{"*":"allow"}`, so a string spreads into index keys that name no permission and holds no rule to keep ([config loading](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/config.ts)). A denied `task` call is rejected and the tool description lists no subagent, so this also removes subagents that finish inside the turn. Also pinned: `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false`, the documented background-subagent switch. OpenCode reads it only from the process environment, and an explicit value outranks the `OPENCODE_EXPERIMENTAL` umbrella; while it is false the `task` tool rejects a background call before it checks the permission ([runtime flags](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/effect/runtime-flags.ts)).
 
@@ -1569,7 +1769,7 @@ No flag or variable is pinned for this path, and it stays open:
 
 - Shell commands that background themselves. The `bash` tool has no background mode: it starts the command in its own process group and waits for that shell to exit, killing it only on timeout or abort ([`bash` tool](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/tool/shell.ts)). A command that backgrounds a child with `&`, `nohup` or `setsid` returns while the child keeps running, and `opencode run` stops reading the session's events once the session first goes idle, so it does not wait for the child. No flag or variable turns this off, and `bash` also runs foreground commands, so hashd denies nothing.
 
-Plugins, loaded from config files or `.opencode/plugins/`, run code inside the opencode process on its events ([config](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/config.mdx#plugins)); hashd leaves operator plugins as they are and does not pass `--pure`, which drops every external plugin. Without `--attach`, `opencode run` talks to its server in-process rather than through a listening port, so no other client can prompt the stage session. The CLI, tool, agent and config documentation describe no scheduled or deferred tasks. hashd does not read, write, override or probe OpenCode's user, project or managed configuration beyond the `OPENCODE_CONFIG_CONTENT` value it builds from the inherited one to add its MCP servers. Source and documentation retrieved 2026-09-16 at the v1.18.31 tag of anomalyco/opencode, the latest release on GitHub and npm (`opencode-ai`) that day.
+Plugins, loaded from config files or `.opencode/plugins/`, run code inside the opencode process on its events ([config](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/web/src/content/docs/config.mdx#plugins)); hashd leaves operator plugins as they are and does not pass `--pure`, which drops every external plugin. Without `--attach`, `opencode run` talks to its server in-process rather than through a listening port, so no other client can prompt the stage session. The CLI, tool, agent and config documentation describe no scheduled or deferred tasks. hashd does not read, write, override or probe OpenCode's user, project or managed configuration beyond the `OPENCODE_CONFIG_CONTENT` value it builds from the inherited one to add its MCP servers, and the delivery `opencode.json` it writes in a directory of the launch's own. Source and documentation retrieved 2026-09-16 at the v1.18.31 tag of anomalyco/opencode, the latest release on GitHub and npm (`opencode-ai`) that day.
 
 The opt-in live check `TestLiveOpencodeBackground` (`server/internal/agents/live_opencode_background_test.go`, `HASHD_LIVE_OPENCODE=1`) launches the real opencode binary through `RunStageWithOptions` in one temp git repo with a temp project config naming opencode in `stage_agents`, with `HOME` and the four XDG base directories pointing at temp directories, so OpenCode's global config, auth store, sessions and caches are disposable; a temp global `opencode.json` names the model from `HASHD_LIVE_OPENCODE_MODEL` and disables sharing and autoupdate, and the provider key rides the variable `HASHD_LIVE_OPENCODE_KEY_ENV` names. Routes: review, review_resume, implement, implement_resume, chat and chat_resume; each resume takes the session id `extractSessionID` finds in its fresh route's output. Each turn asks for a short foreground command, a `bash` command that backgrounds its work with `nohup ... &`, a foreground subagent through `task`, a background subagent through `task`, and a last foreground command that prints a nonce and the time. The probes and markers, the 90-second wait and the six result values are the same as the Kimi check, except that the nonce files sit in the repo: OpenCode's `bash` tool asks for `external_directory` permission before `cat` names a path outside it, and `opencode run` rejects every ask. There OpenCode's `read`, `grep` and `glob` tools can read them without an ask, so a nonce the agent reports shows the file was read, not that the command ran. On every route the check decodes `tool_use` events for calls carrying a probe's token, their `background` input and a failed state's error, and counts `step_start` events after the text carrying the end line. It fails when a route cannot run, when the foreground command's nonce does not reach an implement route, when a fresh route prints no session id for its resume route, on a subagent that ran, in the background or the foreground, on any route, and on a capability with no attempt or not exercised; a background shell start is recorded, not failed. One leg writes a temp project `opencode.json` giving the build agent its own permission allowing `task` and an unrelated `instructions` file holding a canary, and runs the review stage once: the leg is not exercised when the canary does not come back, records a foreground subagent that runs as the limitation above, and fails on any subagent work that starts in the background. Managed config on the host fails the check instead of being bypassed. Once opted in, a missing opencode binary, no `HASHD_LIVE_OPENCODE_KEY_ENV` or an empty variable under that name, no `HASHD_LIVE_OPENCODE_MODEL`, a missing `pgrep`, or an `opencode --version` other than 1.18.31 fails it.
 
@@ -1609,10 +1809,10 @@ capability-derived permission flags (see Agent Tool Permissions above).
 |---|---|---|---|
 | C1 | Non-interactive prompt intake on **stdin** | `{prompt}` is a stdin sentinel, never argv; agents with no bare-stdin mode declare `prompt_stdin_sentinel` (codex `-`) or `prompt_value_flags` (`-p`/`--prompt`) | Prompts exceed argv limits and must not leak into `ps` |
 | C2 | Machine-parseable output for structured stages | shape templates carry the agent's JSON/stream flags (`--output-format json`, `--json`, ...) | Verdicts, results, and session ids are parsed, never scraped |
-| C3 | **Session identity**: emit a session id in machine-readable output | per-agent extractor in `server/internal/agents/session_id.go` (codex JSONL events, gemini/qwen `session_id` keys, opencode `sessionID`, copilot `session.start`, kimi stderr hint) | Resume is impossible without capturing the id |
+| C3 | **Session identity**: emit a session id in machine-readable output | per-agent extractor in `server/internal/agents/session_id.go` (codex JSONL events, gemini/qwen `session_id` keys, opencode `sessionID`, copilot's `result` event `sessionId`, kimi stderr hint; copilot and qwen declare `session_id_template`, naming the session of shapes that print no id) | Resume is impossible without capturing the id |
 | C4 | **Session resume**: an invocation that continues the same conversation from that id | `_resume` shape templates with `{session_id}` (claude/gemini/kimi/qwen/copilot `--resume`, codex `exec resume` / app-server `thread/resume`, opencode `--session`) | Dirty-tree continuity on retry, and the token payoff: a resumed turn sends only the new instruction instead of re-sending the full prompt |
 | C5 | Distinguishable missing-session errors | `sessionResumePatterns` in `server/internal/agents/classifier.go` (`session_not_found` classification) | A dead session must fall back to a fresh run, not retry-loop |
-| C6 | Permission flags mappable to `shape_capabilities` | per-agent flag translators in `runner.go` (`--dangerously-skip-permissions`, `sandbox_mode=...`, `--approval-mode ...`); agents without a read-only mode are best-effort and documented as such | Shape intent (writes/bash) is enforced per agent |
+| C6 | Permission flags mappable to `shape_capabilities` | per-agent flag translators in `runner.go` (`--dangerously-skip-permissions`, `sandbox_mode=...`, `--approval-mode ...`); agents without a read-only mode are best-effort and documented as such; an agent whose modes run its commands in an OS sandbox of its own declares `os_sandbox_off_args` (codex), and inside the stage fence launches with that sandbox off: the fence holds a read-only shape to reading and an edit shape to its checkout, for every agent | Shape intent (writes/bash) is enforced per agent |
 | C7 | Auth verification verb | `verify_auth` (`claude auth status`, `codex login status`, ...); omit rather than guess when the CLI has no reliable verb | Preflight without inspecting private credential files |
 | C8 | Separable tool traffic in JSON streams | `tool_output_fields` beside `stdout_format` (codex `item.command`, `item.aggregated_output`, `item.arguments`, `item.result`; claude `message.content[type=tool_use]`, `message.content[type=tool_result]`, `tool_use_result`); a plain stream declares none | The failure classifier reads only the agent's own text: a file the agent read that quotes an error must never decide the run's failure |
 
@@ -1672,8 +1872,7 @@ not impose Claude's result-frame protocol on Codex, Kimi or other harnesses.
 
 An agent that declares `effort_template` must also declare `effort_levels`, the
 values its effort flag accepts (claude `low`..`max`, codex `low`/`medium`/`high`/`xhigh`);
-an agent with no `effort_template` declares none. `TestLoadRegistryEffortLevels`
-enforces the pairing.
+an agent with no `effort_template` declares none.
 
 ### Fresh vs resumed invocations by stage
 
@@ -1687,7 +1886,7 @@ deadline diagnostics name the base setting. Outer activity floors/margins remain
 
 | Stage | Fresh invocation (claude) | Resumed invocation (claude) | Resume trigger | Session store |
 |---|---|---|---|---|
-| implement | `claude --output-format stream-json --verbose -p` (stdin: full commit prompt + branch diff; session captured before work) | `claude --resume {session_id} --output-format stream-json --verbose -p` (stdin: retry feedback or crash reorientation) | saved session + retry feedback or crash retry; same rule for FIX (`runflow/implementdriver.go`) | `workstreams.codex_session_id` (durable) |
+| implement | `claude --output-format stream-json --verbose -p` (stdin: full commit prompt + branch diff; session captured before work) | `claude --resume {session_id} --output-format stream-json --verbose -p` (stdin: retry feedback or crash reorientation) | saved session + retry feedback or crash retry; same rule for FIX (`runflow/implementdriver.go`) | `workstreams.implementer_session_id` (durable) |
 | review | `claude --output-format stream-json --verbose -p` (activity streams live; the terminal result supplies the verdict) | `claude --resume {session_id} --output-format stream-json --verbose -p` (stdin: retry/redraft delta) | in-package semantic-retry and format-redraft loops (`stages/review/retry.go`) | in-process (same stage run) |
 | final_review | `claude --output-format stream-json --verbose -p` | configured final reviewer's `review_resume` shape (stdin: repair delta) | shared output-repair loop; final-review policy retained | in-process (same stage run) |
 | tech_tree | dedicated wrapper, print shape | `tech_tree_resume` | discovery flow hands its session forward in-flow | in-flow (dies with the flow) |
@@ -1781,9 +1980,7 @@ an upstream exhaustion fails the run with `failure_kind:
 page all render as a distinct calm treatment.
 
 A 429 whose extracted error message names the ACCOUNT's session/usage limit
-is carved out of the capacity family as `usage_limit`: non-retryable within
-the run (the limit outlasts any backoff the ladder can afford), carrying the
-parsed reset time in `classification_message`. The claude structured error
+is classified as `usage_limit`. Hashd permits one immediate retry within the call’s attempt budget. The claude structured error
 envelope (`is_error` or `terminal_reason: "api_error"` plus
 `api_error_status`) routes by status before any prose matching; a structured
 401 lands the agent-auth family (`agent_needs_login` /
@@ -1791,16 +1988,7 @@ envelope (`is_error` or `terminal_reason: "api_error"` plus
 the login signal outranks key-shaped tags like `authentication_error`).
 Both fail with their `failure_kind` riding the same run-row / `run_failed` /
 `current_errors` channel as the capacity family, and the implement driver
-and review stage render them as the account's condition ("account hit its
-usage limit; resets <time>", with `hashd agents` credential-status help) --
-never as upstream capacity.
-
-An implementation or final-review usage-limit failure also carries `failure_code`, account, agent and any
-structured-envelope reset time. Hashd schedules one durable retry at that
-reset in every autonomy mode, provided the same failure still stands and no
-operator action superseded it. Without a reset it schedules nothing. The run
-stays failed, with `hashd run`, switch-account and switch-agent guidance; an
-informational account limit never prevents a manual or scheduled launch.
+and review stage report the affected account. A failed quota retry ends the run with its final error. Use `hashd agents` to inspect credentials and `hashd run` to retry manually.
 
 ### Chat context
 
@@ -1841,7 +2029,7 @@ use and submit the proposed answer.
 When a per-commit review is retried after an infrastructure failure, it resumes the killed attempt's own caller-chosen session ID from durable launch records or persisted stage state for the same run, microcommit and review round. Closed-list rounds retain the judge's CARRY list. A missing session falls back cold once within the same round with a durable warning. Operator cancellation and attempts without a recorded caller-chosen ID keep their existing behavior. The whole-stage retry policy controls whether and when retries occur.
 
 - A session id that must survive process death is persisted **durably** and
-  read back by whatever re-enters the stage (`workstreams.codex_session_id`,
+  read back by whatever re-enters the stage (`workstreams.implementer_session_id`,
   `chat_sessions`, discovery and planner launch records). The discovery ->
   tech_tree handoff is in-flow; discovery recovery reads the durable records.
 - For discovery, a killed attempt's retry resumes that attempt's own chosen
@@ -1873,20 +2061,26 @@ Directives are curated standing rules that guide AI agents. They exist at three 
 
 ```
 ~/.config/hashd/directives.md        # Global user preferences
-{configured_project_root}/directives.md  # Project rules
+<ops>/projects/<project>/directives.md  # Project rules, server-side in the project's ops dir
 workstreams.directives                  # Workstream-specific text in the project DB
 ```
 
-The server reads project directives only from the configured project root, including
-multi-repo projects, and supplies that text to local and remote runners. A code
-repository or story checkout's copy does not replace it. Missing or blank means
-no project directives; an unreadable file stops the stage with a Diagnostic.
+Project directives live only in a server-side file in the project's ops
+directory (`<ops>/projects/<project>/directives.md`, beside `config.yaml` and
+the `prompts` overrides dir). The server reads them from there, including for
+multi-repo projects and projects without a repository root, and supplies that
+text to local and remote runners. A `directives.md` in the project's repository
+or a story checkout is not read at any level; it is an ordinary file hashd
+ignores. Missing or blank means no project directives; an unreadable file stops
+the stage with a Diagnostic. `hashd directives edit project`, `hashd directives
+ai-edit project` and the Web Settings Directives panel save to the same
+server-side file and never write into the repository.
 The same source applies to planning and add-commit; existing stage filters still
 apply. Disabling `instructions.directives` omits all three levels.
 
 **Why `directives.md` not `AGENTS.md`?** We want hashd to control when directives are passed to agents, not have agents auto-read them. Using `directives.md` ensures agents only see these rules when we explicitly include them in prompts.
 
-**Key principle:** Directives are curated policy. File-based directives can be version-controlled; workstream directives are stored with the workstream.
+**Key principle:** Directives are curated policy and belong to hashd, not to the project's repository. Global and project directives are files on the server host; workstream directives are stored with the workstream.
 
 ### Instructions settings
 
@@ -1935,7 +2129,10 @@ hashd directives edit                  # Edit global
 hashd directives edit project          # Edit project
 hashd directives edit workstream <ws>  # Edit workstream's
 
-# AI-assisted editing
+# AI-assisted editing: the pm_edit agent revises the document server-side
+# against your instruction (-m/--message; prompted for on a terminal), the
+# proposal is shown as a diff, and only a confirmed save is written
+# (-y/--yes confirms without a terminal; without one both flags are required)
 hashd directives ai-edit               # AI edit global
 hashd directives ai-edit project       # AI edit project
 hashd directives ai-edit workstream <ws>  # AI edit workstream's
@@ -1991,8 +2188,20 @@ both an omitted and an empty token get the diagnostic that names the `GET` to
 read and the field to send back. There is no fallback path: the schema permits
 omission, the server does not.
 
-The file-backed global and project levels carry no token: they have no `etag`
-and their concurrent saves remain last-write-wins.
+The file-backed global and project levels carry the same token, optionally.
+`GET /directives` returns an `etag` on the global and project sections,
+computed over the content returned -- for global, including a legacy
+`~/.config/wf/directives.md` it fell back to. `PUT /directives/global` and
+`PUT /directives/project` accept it as an optional `base_etag`; a save whose
+token no longer matches is refused with 409 under the level's source
+(`global.directives.cas_mismatch`, `project.directives.cas_mismatch`) and
+nothing is written. The project token is computed over the server-side
+`<ops>/projects/<project>/directives.md`, which is where the project save
+lands. Saves of the same file are serialized, so two built on the
+same token cannot both land. `hashd directives edit` and `hashd directives edit
+project` send the token they read and, like the workstream level, keep the
+edited buffer on refusal. A save without `base_etag` is not revision-checked
+and remains last-write-wins (the Web Settings Directives panel saves this way).
 
 ### Usage
 
@@ -2124,3 +2333,174 @@ Transient agent failures (API timeouts, rate limits) are retried automatically i
 2. **Across attempts** — each long agent stage activity carries a `RetryPolicy` (`agentActivityOptions`: `InitialInterval 5s`, `BackoffCoefficient 2.0`, `MaximumInterval 60s`) plus a 120s `HeartbeatTimeout`. It retries ONLY infrastructure failures (worker death detected via a missed heartbeat, DB faults). An agent *outcome* is returned as data with a nil error and never retries — the outcome/error split is the guard, so a review verdict of "changes required" is data, not a retryable error. Tier A stages whose whole-body re-run is crash-safe (implement, adjudicate, concern_triage, test, probe, detect, provision, final_review, and review -- its agent-outcome errors carry the typed non-retryable `review_outcome` marker so only infra shapes retry) use `MaximumAttempts>1`; stages that persist a plan or transition mid-body (breakdown, partial_breakdown) and the one-shot commit leg keep the heartbeat but stay `MaximumAttempts:1`. On a Tier-A retry the implement driver resumes the agent's session (crash-resume); other stages re-run fresh. **Cancellation is a different layer from an agent outcome.** When the activity context is cancelled -- worker shutdown, heartbeat-timeout invalidation, a persistence brownout -- the runner kills the agent subprocess off `ctx.Done` and the killed attempt classifies `interrupted` (the holistic judges surface the same kill as a failed judge call / error verdict). That is the box blinking *before* the agent finished, not the agent's answer. So a **single boundary helper, `propagateCancel`, wraps the return of every agent-stage activity** (implement, test, review, final_review, adjudicate, concern_triage, breakdown, partial_breakdown, the committed-breakage probe, provision, detect, scope_adjudicate): when the context is cancelled it discards whatever the driver returned -- a nil-error `interrupted` / failed-judge-call / `Verdict:"error"` / `"Build failed"` outcome, or a wrapped context error -- and returns the bare `ctx.Err()`. This is one authority rather than a guard per stage, so no stage -- present or future -- can silently masquerade a cancellation as an outcome. Temporal then splits the two cancellation kinds by cause: an infrastructure-driven cancel (worker death / heartbeat-timeout / brownout, a non-server cause) is retryable, but only stages with `MaximumAttempts>1` re-run while their retry budget remains (implement resumes its session; the judge runs again). The one-shot `partial_breakdown` (`MaximumAttempts:1`) instead routes its interrupted attempt through `failStage` to `StatusFailed`, preserving work for explicit retry; a **server-requested cancel (operator stop) carries a `CanceledError` cause, so the SDK reports it terminal-canceled and the workflow's cancellation path handles it -- no retry**. Returning the bare `ctx.Err()` -- not a wrapped or typed error -- is what lets the SDK's `cancelAllowed` check make that split. The fail-closed path is **not** weakened -- it is reached truthfully. A judge whose agent call failed with the context still alive (its agent was rejected, exhausted context, or self-exited) ends the run `failed` as `The <judge> judge could not run: <reason>`, never a ruling; deadline exhaustion instead closes the run `failed` with an operator note naming the in-flight stage and micro-commit and pointing at `hashd run` -- the abandoned attempt surfaced, not left as a stale pre-kill reading. The discriminator everywhere is `ctx.Err()`: non-nil means the box blinked (propagate -- Temporal retries an infra cancel, terminates a server-requested one); nil means the agent produced the outcome (fail-closed, no retry).
 
 These retries happen transparently within a single micro-commit cycle. The business-logic retry loops (implement/test/review = 5, merge-conflict = 3, PR-rebase = 3) are workflow-level, independent of activity retries.
+
+### hashd's MCP tools and the code graph
+
+hashd gives its agents tools as MCP servers. Each tool is declared once
+(`config.MCPTool` in `server/internal/config/mcp_tools.go`), and the
+declaration carries everything that belongs to the tool:
+
+- **its server**, the MCP server a launch registers;
+- **its hooks**, agent hooks that only make sense with that server;
+- **its prompt sections**, the templates that tell an agent the tool is there,
+  and a **prompt variable** every template can test;
+- **its setting**, the project setting that turns all of it on or off.
+
+These go into a stage together or not at all. A launch installs a server's
+hooks only when it carries the server (`MCPServerDefinition.Hooks`,
+`installServerHooks` in `server/internal/agents/mcp_config.go`). A prompt
+renders a tool's sections only while the project has the tool on: whoever
+renders a stage's prompt knows its project and passes the project's `mcp`
+settings to the renderer (`prompts.RenderFor`), which renders an off tool's
+sections as nothing, wherever they are rendered or included
+(`toolSectionOff` in `server/internal/prompts/includes.go`). The renderer
+reads no configuration itself, and refuses a tool's section when it was
+given no settings. A tool added later brings its own hooks and sections by
+declaring them the same way.
+
+The one tool declared today is the **code graph** (`config.CodeGraphTool`):
+the code-map index hashd builds of each checkout with codebase-memory-mcp,
+and the `code` MCP server that queries it.
+
+| Belongs to the code graph | What it is |
+|---|---|
+| Server | `code`: `hashd code mcp-shim`, bound to the launch checkout's code map |
+| Hook | The grep redirect, for Claude Code: before `Bash`, `Grep` and `Glob` it runs `hashd internal grep-redirect-hook`, and the server serves the grep, rg and find landing pads (`--grep-hook`). `mcp.grep_hook` turns it on or off |
+| Prompt sections | `code_tools_section.md` ("Code exploration") and `include_code_tools.md`, the same section under its `## Code-Analysis Tools` heading |
+| Prompt variable | `code_graph`, true while the code graph is on. Templates wrap their own words about the code tools in `{% if code_graph %}`: each stage's "most useful tools" list, and steps that name an `mcp__code__` tool, which read as plain file reading otherwise |
+| Setting | `mcp.code_graph`, per project, on by default |
+
+#### `mcp.code_graph`
+
+```bash
+hashd --project <name> project config set mcp.code_graph false   # run this project's stages without the code graph
+hashd --project <name> project config set mcp.code_graph true    # the default
+```
+
+It is a project setting: whether a codebase is worth mapping is one project's
+call. It is not written at system scope. With it off, for that project:
+
+- no launch gets the `code` server, and so none gets the grep redirect hook,
+  whatever `mcp.grep_hook` says: the hook belongs to the server;
+- no code map is built: not at provisioning, not when a checkout is activated
+  or reset, not for a planning checkout, and not before a launch. The
+  workstream's code-map name is still recorded, since it is only the name
+  derived from the checkout's path, so nothing that reads the name fails;
+- every prompt is rendered without the code-tools section, its heading, the
+  per-stage tool lists and the steps that name a code tool. Every stage runs,
+  with the agent's own file and search tools and hashd's other MCP servers;
+- the `hashd code` query commands and their REST routes refuse (409,
+  `code.code_graph.off`) with a message that names the setting and the command
+  that turns it on. Nothing is indexed on demand.
+
+The setting is read when a stage starts: when its prompt is rendered and when
+its agent is launched. Nothing is migrated when it changes. Turned on, the
+next launch indexes its checkout, as every launch does. Turned off, launches
+stop getting the server, and an index already built is left for the usual
+cleanup when its story ends.
+
+`mcp.grep_hook` is unchanged and still on by default. It applies only while
+the code graph is on.
+
+A project's own override of a prompt (`<project>/prompts/`) is rendered by
+the same rules: its `{% include "include_code_tools.md" %}` or
+`{{ code_tools_section }}` goes with the tool. Words about the code tools that
+an override writes itself stay unless it wraps them in `{% if code_graph %}`.
+
+#### `mcp.project_servers`
+
+```bash
+hashd config set mcp.project_servers false                           # disable hashd's injection system-wide (for projects without an override)
+hashd config reset mcp.project_servers                               # clear the system override (falls back to the enabled default)
+hashd --project <name> project config set mcp.project_servers false  # override for one project
+hashd --project <name> project config reset mcp.project_servers      # clear the project override (inherits system, then default)
+```
+
+`mcp.project_servers` is enabled (`true`) by default. A system-scope value
+(`hashd config set|reset mcp.project_servers`) applies to every project that
+does not set its own override; a project-scope override
+(`hashd project config set|reset mcp.project_servers`) takes precedence for
+that project. `hashd project config` (and `hashd project config show
+mcp.project_servers`) displays the effective value alongside its provenance:
+`(default)`, `(system)`, or `(project)`. TUI and Web controls for this setting
+are tracked in STORY-0763.
+
+The setting governs only whether hashd injects repository-declared servers
+(read from the repository's root `.mcp.json` at the launch's pinned base
+commit) into stage launches. The agent harness's own MCP discovery stays on
+whether `mcp.project_servers` is `true` or `false`: servers the harness
+discovers itself come from the working tree and its other sources, and the
+harness's own precedence decides a shared name. Repository instruction files,
+rules, and skills are unaffected.
+
+Injected stdio servers are started by the harness under its ordinary child
+environment — which may include the agent's sign-in and other credentials —
+using the harness's own env-map syntax. hashd does not isolate those server
+subprocesses, does not resolve or check references in their `env` maps, and
+never writes substituted values into its configuration or launch evidence (each
+attempt's `mcp_delivery` transcript metadata records sorted `env_keys` names
+only). Authenticated HTTP owner sign-in for project MCP servers is tracked in
+STORY-0762.
+
+### Overview delivery pages and harness qualification
+
+The shared code MCP shim captures one complete `get_architecture` result per
+initial `overview` call. `aspects` still selects upstream content; it does not
+bound delivery. The result text contains a JSON page with `snapshot`, `offset`,
+`next_offset`, `has_more`, `total_content_length`, and `data`. Offsets and total
+length count UTF-8 bytes of the original MCP result JSON. Concatenate `data`
+in offset order to reconstruct every upstream field, including content
+annotations, resources, structured content, and unknown metadata. A page may
+split a JSON value, but never a UTF-8 code point. The initial `orientation` is a
+supplementary preview of the architectural text, not a replacement for detail.
+
+Continue with only `snapshot` and `offset: next_offset`, until `has_more=false`.
+Snapshots are immutable, bound to the shim session and its code-map project,
+and retained until session exit without eviction or continuation-count limits.
+Interleave snapshots freely. Unknown snapshots, conflicting selections, and
+invalid offsets fail explicitly; start a new overview after a session restart.
+The existing upstream transport's 10 MiB frame limit remains a hard failure;
+there is no claim that paging can recover a result the upstream cannot send.
+
+Each delivered overview frame is at most 4096 UTF-8 bytes **including** MCP
+content encoding, nested JSON escaping, paging metadata, JSON-RPC ID/envelope,
+and newline. The builder measures actual serialized candidate responses.
+If even one code point cannot fit, it refuses delivery explicitly using the
+original request ID. If the correlated refusal also exceeds the budget, the
+shim terminates the MCP session with an actionable diagnostic rather than
+substituting an ID the client cannot correlate with its pending request. This
+ceiling is not a prompt limit and does not use `PromptInputLimitChars`.
+
+Harness framing and token accounting are separate from this wire limit.
+Decoding the page's single text block cannot increase its UTF-8 byte count;
+model-facing wrappers can add bytes/tokens. A four-characters-per-token rule
+would not establish safety for escaped, non-ASCII, or adversarial text. The
+following evidence inventory was checked on 2026-11-15. **All-harness
+qualification is deferred**, independently of the paging implementation,
+under the operator's 2026-11-15 ruling (CLQ-753). It is not a completion
+condition for this delivery fix. Documented thresholds or an unchanged text
+conversion alone do not measure every model-facing wrapper and token counter.
+No live model boundary probes were run. This table records evidence and open
+qualification work; it does not claim successful qualification of every
+registration in `defaults.yaml`.
+
+| Registration | Versioned source or documented evidence | Qualification remaining |
+|---|---|---|
+| `claude` | Local version `2.1.306`; [official MCP limits](https://code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings) document a 25,000-token default and an independent 50,000-character persistence threshold. Both apply to Claude only. | Measure the harness wrapper and token estimate for the actual encoded boundary page; documentation is not versioned implementation evidence. |
+| `codex` | Local version `0.167.1`; [MCP call handling](https://github.com/openai/codex/blob/rust-v0.167.1/codex-rs/core/src/mcp_tool_call.rs) and [serialized-result truncation](https://github.com/openai/codex/blob/rust-v0.167.1/codex-rs/utils/output-truncation/src/lib.rs) distinguish event byte limits from model/history truncation. | Trace the effective model/history budget and its framing; the event byte cap alone is insufficient. |
+| `gemini` | [v0.49.0 MCP invocation and content transformation](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/packages/core/src/tools/mcp-tool.ts) forwards a text block's text to the model-facing parts. | Qualify the scheduler/model wrapper and token budget; binary not installed here. |
+| `agy` | Registry minimum `1.5.1`; [official ACP changelog, v1.4.0](https://antigravity.google/docs/changelog) introduces `_meta.antigravity.mcpMaxOutputBytes`. | The documented configurable limit does not establish its default or framing; a runtime boundary probe against the installed CLI is still needed. |
+| `opencode` | Local version `1.19.5`; [v1.19.5 truncation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/truncate.ts) checks both 2000 lines and 50 KiB by default. Our page text escapes internal newlines. | Qualify MCP conversion and model wrapper, including effective configuration, rather than treating the generic truncation helper as the whole path. |
+| `kimi` | [1.50.0 MCP conversion](https://github.com/MoonshotAI/kimi-cli/blob/1.50.0/src/kimi_cli/soul/toolset.py) budgets content characters; [text conversion](https://github.com/MoonshotAI/kimi-cli/blob/1.50.0/packages/kosong/src/kosong/tooling/mcp.py) retains text. Local executable reports `2.5.2`, so this source does not qualify it. | Inspect the installed version's path and model-facing framing or run a version-recorded boundary probe. |
+| `qwen` | [v0.23.4 MCP invocation](https://github.com/QwenLM/qwen-code/blob/v0.23.4/packages/core/src/tools/mcp-tool.ts) uses a 500,000-character per-text-part budget with no line cap. | Qualify the remaining scheduler/model wrapper and token accounting; binary not installed here. |
+| `copilot` | [Official command reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference#environment-variables) documents a 20,480-byte default for `COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES`. | Establish versioned implementation and framing evidence or run a version-recorded probe; binary not installed here. |
+
+When undertaking the deferred qualification, record the harness version, unmodified
+registry launch shape, effective output settings, exact tool response bytes,
+and model-facing tool-result bytes and token count. Retrieve the repository-size
+fixture through advertised snapshot continuations, compare concatenated data
+with the captured result, and verify no file offload, truncation, or overflow at
+the boundary. Include escaped controls, non-ASCII text, and a large scalar.
+Record harness-added framing separately from the shim frame and demonstrate
+both fit that version's applicable byte/character/token budgets. Record results
+per registration without treating that future work as a gate for this paging fix.

@@ -53,15 +53,15 @@ TEMPORAL_VERSION="1.31.2"
 # only needs its own forge's CLI; the rest are inert.
 GH_VERSION="2.93.0"
 GLAB_VERSION="1.101.0"
-BKT_VERSION="0.28.1"
+BKT_VERSION="0.31.1" # First release with token-only Cloud Bearer authentication.
 TEA_VERSION="0.14.1"
 
 # Refreshed together with vendor/playwright by refresh-browser-deps.py before
 # minor/major release candidates. Installers never resolve a floating latest.
-BROWSER_NODE_VERSION="24.21.0"
-BROWSER_NODE_SHA_LINUX_X64="6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff"
-BROWSER_NODE_SHA_LINUX_ARM64="724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5"
-BROWSER_NODE_SHA_DARWIN_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
+BROWSER_NODE_VERSION="26.13.1"
+BROWSER_NODE_SHA_LINUX_X64="518674de2b621728a5e4486f5fb3b7d2900bb3cc4aa97969edaa463db99f9778"
+BROWSER_NODE_SHA_LINUX_ARM64="80a330b35415382878df18d41afbd106ea89bfb3be0087d6608e289a14c5cc7d"
+BROWSER_NODE_SHA_DARWIN_ARM64="aec2514ea1ceb2ba52455e9ec65986f6749a06dd759e5db2a72e6889668c9735"
 
 log() {
     # Single-line status prefix so source and wheel flows render consistently.
@@ -596,7 +596,7 @@ install_cbm() {
         dest="$repo_root/.cache/cbm/$platform/codebase-memory-mcp$suffix"
     fi
 
-    local metadata version url sha256 archive_name
+    local metadata version url sha256 attestation_repo binary_sha256 archive_name
     metadata="$(
         python3 - "$lock_path" "$platform" <<'PY'
 import json
@@ -614,11 +614,18 @@ except KeyError:
 print(lock["version"])
 print(entry["url"])
 print(entry["sha256"])
+print(entry.get("attestation_repo", "DeusData/codebase-memory-mcp"))
+print(entry.get("binary_sha256", ""))
 PY
     )"
     version="$(sed -n '1p' <<< "$metadata")"
     url="$(sed -n '2p' <<< "$metadata")"
     sha256="$(sed -n '3p' <<< "$metadata")"
+    # An archive hashd builds from vendor/cbm-hashd.patch is attested by the
+    # mirror that built it, and reports the upstream version it was built
+    # from: its entry names that repository and the checksum of the binary.
+    attestation_repo="$(sed -n '4p' <<< "$metadata")"
+    binary_sha256="$(sed -n '5p' <<< "$metadata")"
     archive_name="$(basename "$url")"
 
     # Already at the pinned version -- nothing to do. gitleaks/delta/temporal
@@ -632,9 +639,13 @@ PY
     # evidence of anything -- the release pipeline (dist/build_wheel.sh) passes
     # this flag, so a warm cache must never be able to stand in for a real
     # `gh attestation verify`.
+    #
+    # Where the pin names the binary's checksum the installed file must match
+    # it too: a patched build and upstream's report the same version.
     if [[ "$verify_attestation" -eq 0 ]] &&
         [[ -x "$dest" ]] &&
-        [[ "$("$dest" --version 2>/dev/null | awk '{print $2}')" == "${version#v}" ]]; then
+        [[ "$("$dest" --version 2>/dev/null | awk '{print $2}')" == "${version#v}" ]] &&
+        { [[ -z "$binary_sha256" ]] || (cbm_verify_sha256 "$dest" "$binary_sha256") >/dev/null 2>&1; }; then
         echo "cbm ${version#v} already installed at $dest"
         return 0
     fi
@@ -658,7 +669,7 @@ PY
 
     if [[ "$verify_attestation" -eq 1 ]]; then
         command -v gh >/dev/null 2>&1 || cbm_die "gh is required for --verify-attestation"
-        gh attestation verify "$archive" --repo DeusData/codebase-memory-mcp >/dev/null
+        gh attestation verify "$archive" --repo "$attestation_repo" >/dev/null
     fi
 
     local extract_dir="$tmp_dir/extract"
@@ -679,6 +690,7 @@ PY
     esac
 
     [[ -f "$binary" ]] || cbm_die "archive did not contain expected cbm binary"
+    [[ -z "$binary_sha256" ]] || cbm_verify_sha256 "$binary" "$binary_sha256"
     mkdir -p "$(dirname "$dest")"
     # Write to a FRESH inode. macOS caches a Mach-O's code signature by vnode and
     # does not flush it when the file is rewritten in place (cp truncates in place,

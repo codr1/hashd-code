@@ -68,6 +68,7 @@ hashd lineage STORY-0012                 # all commits, reviews, decisions for a
 hashd lineage a1b2c3d                     # full chain for one commit
 hashd lineage src/auth/jwt.go             # all commits touching a file
 hashd lineage src/auth/jwt.go --lines 42-58   # lineage for specific lines (git blame)
+hashd lineage src/auth/jwt.go:42-58         # the same lines, named in the target
 ```
 
 A commit query reads like a lab notebook entry — the story it served, the

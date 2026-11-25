@@ -107,14 +107,14 @@ look before you commit agents to it:
 hashd show STORY-0001     # read the problem statement and acceptance criteria
 ```
 
-If the acceptance criteria need work, reshape them — edit, delete, descope, or
-rescope individual criteria (`hashd story edit-ac` / `delete-ac` / `descope-ac` /
-`rescope-ac`), or hand the whole story to the AI editor
+If the acceptance criteria need work, reshape them — edit, delete, or descope
+individual criteria (`hashd story edit-ac` / `delete-ac` / `descope-ac`), or
+hand the whole story to the AI editor
 (`hashd story edit STORY-0001 -f "also handle the mobile nav"`). When it reads
 right, accept it:
 
 ```bash
-hashd approve STORY-0001  # draft -> accepted
+hashd approve STORY-0001  # draft -> approved
 ```
 
 Accepting unlocks the Story to be run.
@@ -169,12 +169,13 @@ hashd diff <workstream>                      # see the change
 hashd approve <workstream>                   # looks good, continue
 hashd reject <workstream> -f "rename the handler to logout()"   # iterate with feedback
 hashd reset  <workstream>                    # keep the plan, redo from a clean baseline
-hashd replan <workstream> -f "split the endpoint out"  # the plan itself is wrong; regenerate it
+hashd replan <workstream> -f "drop the CSV export criterion" [--from-commit <COMMIT-ID>]  # the plan itself is wrong; back to planning (-f: the planner's instruction for the criteria; --from-commit: keep the commits before it)
 ```
 
 (`reset` keeps the plan and redoes the implementation from baseline; `replan`
-regenerates the plan from a clean base. They differ only in keep-vs-regenerate
-the plan — see **[WF.md > Plan regeneration](../WF.md)**.)
+returns the story to planning: a full replan on the base branch's current head,
+`--from-commit` keeping the commits before the chosen one; once its criteria are
+accepted again its run plans afresh, or after the kept commits — see **[WF.md > Plan regeneration](../WF.md)**.)
 
 If an agent needs information to proceed it raises a **clarification** and the
 Workstream blocks. Answer it and the run continues:
@@ -266,8 +267,7 @@ commit.
 | `hashd story clone STORY-xxx` | Clone a locked story |
 | `hashd story retry STORY-xxx` | Retry failed planning run |
 | `hashd plan reset` | Reclaim claimed suggestions whose story is gone (dead flow / out-of-band delete) so discovery is unblocked, and release pending stories stranded behind dependencies that are all implemented |
-| `hashd story descope-ac STORY-xxx N` | Move acceptance criterion N to descoped list |
-| `hashd story rescope-ac STORY-xxx N` | Move descoped criterion N back to acceptance criteria |
+| `hashd story descope-ac STORY-xxx AC-NNNN\|N` | Move an acceptance criterion, by identifier or position, to the descoped list |
 | `hashd story split STORY-xxx [--feedback ".."]` | Request an agent breakdown proposal for a large story |
 | `hashd story split STORY-xxx 3,5,7 -t "title" [-y]` | Split criteria into one new draft sibling story |
 | `hashd run [id] [--once\|--loop] [--gatekeeper\|--supervised\|--autonomous] [-f ".."] [-y]` | Dispatch the workstream run workflow (-f: guidance, -y: skip prompts) |
@@ -275,24 +275,17 @@ commit.
 | `hashd show <id>` | Show story or workstream details |
 | `hashd approve <id>` | Accept story or approve gate |
 | `hashd reject [id] [-f "feedback"] [--reset] [--include-forge \| --findings-file FILE]` | Reject a gate and fold review findings into the next FIX commit; at `pr_open` and `pr_approved` that includes the PR's open forge threads and current changes-requested review bodies by default, other gates fold internal findings only unless `--include-forge` is given. `-f` is optional additive operator guidance and takes precedence over folded findings. Use `@directive <text>` in feedback to add durable constraints (e.g. `hashd reject ws-1 -f "fix X @directive do not modify RBAC"`) |
-| `hashd assign <id> [user]` | Assign a story/workstream to a user by handle (default: yourself); ownership is open -- anyone can (re)assign |
-| `hashd unassign <id>` | Clear the owner of a story/workstream |
+| `hashd assign <id> [user]` | Assign a story to a user by handle (legacy workstream aliases resolve to their story) (default: yourself); ownership is open -- anyone can (re)assign |
+| `hashd unassign <id>` | Clear the owner of a story (team servers; refused while the work is in flight). Unassigned work does not run until someone takes it with `hashd assign` |
 | `hashd admin user rename <email> <name>` | Rename a user's unique display-name handle (team-server; the solo owner defaults from `git config user.name`) |
 | `hashd pr create [id]` | Create PR/MR for specified workstream |
 | `hashd pr feedback [id]` | View PR/MR review comments |
 | `hashd review findings ID [--include-forge]` | Export editable findings without dispatching; accepts a workstream or linked story ID |
 | `hashd merge [id] [--confirm\|-y] [--pr] [--no-push] [--fix] [--ai-resolve]` | Merge to main and archive (`--confirm`/`-y` required in supervised/gatekeeper mode, `--pr` forces PR workflow) |
-| `hashd close [story] [-y] [--keep-branch] [--no-changes \| --ref <ref>] [-r ".."]` | Close a story and its linked workstream, one of three ways. Plain: abandon; the requirement returns to REQS as open work. `--no-changes -r ".."`: no changes needed; the requirement is met and its REQS sections are burned. `--ref <ref> -r ".."`: closed by person, for work done outside hashd; the server first verifies the ref (`#<number>` or URL of a merged or closed PR, a commit SHA on the target branch, or an implemented story), the story ends `closed_by_person`, the requirement is met and burned, and the branch is kept |
+| `hashd close [story] [-y] [--keep-branch] [--no-changes \| --ref <ref>] [-r ".."]` | Close a story and its linked workstream, one of three ways. Plain, with an optional `-r ".."`: abandon; the requirement returns to REQS as open work, and the reason is recorded as the story's closure. `--no-changes -r ".."`: no changes needed; the requirement is met and its REQS sections are burned. `--ref <ref> -r ".."`: closed by person, for work done outside hashd; the server first verifies the ref (`#<number>` or URL of a merged or closed PR, a commit SHA on the target branch, or an implemented story), the story ends `closed_by_person`, the requirement is met and burned, and the branch is kept |
 | `hashd skip [id] [commit] [-m ".."] [--discard]` | Mark commit as done without changes; skipping the next commit over its uncommitted work needs `--discard`, which saves that work (index and working files, separately) under `runs/<project>/skipped/` and discards it |
 | `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
-| `hashd replan [id] [-f ".."]` | Regenerate the plan from a clean base (resets the worktree to baseline, clears the plan; `-f`: why the plan is wrong) |
-
-Workstream run, approve and reject requests must use the server's configured
-operations root. These actions refuse a different `ops_dir` before changing
-work or sending a workflow decision: Temporal activities use the worker's root,
-and project/workstream workflow IDs do not distinguish roots. Equivalent paths
-(including symlinks) are accepted. Connect to the server serving the intended
-root to operate on its workstreams.
+| `hashd replan [id] [-f ".."] [--from-commit <COMMIT-ID>]` | Return the story to planning (a full replan resets the worktree to the base branch's current head and clears the plan; `-f`: the planner's instruction for the criteria; `--from-commit`: replan from a micro-commit, keeping the commits before it and discarding it and every later one, with the kept/discarded lists shown and confirmed first) |
 
 ### Supporting Commands
 
@@ -328,9 +321,9 @@ root to operate on its workstreams.
 | `hashd directives edit` | Edit global in $EDITOR |
 | `hashd directives edit project` | Edit project in $EDITOR |
 | `hashd directives edit workstream <ws>` | Edit workstream's in $EDITOR |
-| `hashd directives ai-edit` | AI-assisted edit of global |
-| `hashd directives ai-edit project` | AI-assisted edit of project |
-| `hashd directives ai-edit workstream <ws>` | AI-assisted edit of workstream's |
+| `hashd directives ai-edit [-m "..." -y]` | AI-assisted edit of global: dispatches the pm_edit agent server-side, shows the proposal as a diff, saves only on confirmation; on a terminal the instruction is prompted for and the save confirmed, without one `-m/--message` and `-y/--yes` are required |
+| `hashd directives ai-edit project [-m "..." -y]` | AI-assisted edit of project (same flags and flow) |
+| `hashd directives ai-edit workstream <ws> [-m "..." -y]` | AI-assisted edit of workstream's (same flags and flow) |
 
 ### Project Commands
 
@@ -465,11 +458,11 @@ the story to merge/close and clean up its markers.
 ## Adjust story scope
 
 Descoping moves a criterion out of active acceptance criteria and excludes it
-from implementation. Rescoping brings it back:
+from implementation (on a draft, its workflow writes any returned REQS prose
+directly under the project's REQS lock and records the outcome):
 
 ```bash
 hashd story descope-ac STORY-0054 5
-hashd story rescope-ac STORY-0054 1
 hashd show STORY-0054
 ```
 
@@ -513,7 +506,7 @@ holds the feature's problem and criteria and is never implemented; its
 children are ordinary stories that are planned, run and merged as usual,
 each knowing its Arc and its siblings. Arcs are flat: a child is never an Arc.
 
-1. **Request an Arc proposal.** For a draft or accepted story that is in no Arc and has never had a workstream: `hashd story arc STORY-0054`, `M` on the TUI story detail, or **plan as arc** in the Web story menu. The story stays as it is while the planner proposes its children; `hashd show STORY-0054` shows the operation's phase. When planning judges a story several stories' worth, the story shows 'Arc proposed' with the planner's reasoning; nothing starts until the proposal is requested, and autonomous mode requests it itself.
+1. **Request an Arc proposal.** For a draft or approved story that is in no Arc and has never had a workstream: `hashd story arc STORY-0054`, `M` on the TUI story detail, or **plan as arc** in the Web story menu. The story stays as it is while the planner proposes its children; `hashd show STORY-0054` shows the operation's phase. When planning judges a story several stories' worth, the story shows 'Arc proposed' with the planner's reasoning; nothing starts until the proposal is requested, and autonomous mode requests it itself.
 2. **Review the proposal.** At 'Arc draft' the proposal opens in the TUI and Web Arc proposal workspaces: approve it, discard it, or revise it with guidance; every version stays in the history with a comparison. A factual question from the planner is answered in the workspace and planning resumes; the answer approves nothing. Approval converts the story to an Arc and creates its children; autonomous mode approves a ready proposal itself. Editing the story's requirements while a proposal is ready makes that proposal stale: refresh it, or discard it and keep the edits. An Arc that already has children is not split again: add one with `hashd plan story "..." --arc STORY-0054`.
 3. **Let the children run.** Accepted children are planned at once in
    gatekeeper and autonomous modes, and wait as drafts for you in supervised
@@ -536,7 +529,7 @@ each knowing its Arc and its siblings. Arcs are flat: a child is never an Arc.
 
 Two Arc questions are still open with the operator (#2025): whether a story may
 depend on an Arc (today the server allows it, and completing the Arc releases
-such stories), and whether an accepted story gets a notice when a prerequisite
+such stories), and whether an approved story gets a notice when a prerequisite
 lands.
 
 See [Arcs in the workflow](../WF.md#story-scope-management),

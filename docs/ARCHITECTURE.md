@@ -55,7 +55,7 @@ declaration cache or credential policy is introduced.
 
 ## Forges
 
-Core has one forge-neutral model and vocabulary: the most common generic term for each concept (merge a PR, a reviewer's review state of approved, changes_requested, commented or none, unresolved threads, username). A forge backend under `server/internal/forge/` is the only place that knows its forge's API, words, enums and rules; it maps them into the generic model and may carry the raw value verbatim (for example `forge_review`) for display only. Core decisions read the generic fields, never a raw forge value. Forge paths stay separate from connectors. A design or PR that couples core to one forge's view of the world is raised to the operator before it lands.
+Core has one forge-neutral model and vocabulary, and a forge backend under `server/internal/forge/` is the only place that knows its forge's API, words, enums and rules. The principle and the adapter contract a backend implements: [FORGES.md](FORGES.md).
 
 ## Build And Test Systems
 
@@ -69,13 +69,22 @@ Tool knowledge lives only in build adapters:
 - **Facts inform, never steer.** An adapter returns data. It has no access to run control and cannot stop a run, skip the fix loop, classify a cause or choose a transition. Core decides from exit codes and its own rules.
 - **Structured syntax only.** No adapter parses free-text console output itself. It may run the tool's own official converter on that tool's output (for example `go tool test2json`), never a parser of hashd's own. An output signature only switches an adapter on; its facts still come from what it reads.
 - **Libraries.** Third-party formats are read with established libraries (for example JUnit XML through one shared reader that every adapter uses), and matching uses git and established libraries.
-- **No project change.** An adapter never requires a plugin, reporter or CI change. hashd never changes the project's commands and does not tell the operator to: it adds no flag and no environment variable to them. An adapter reads only what the command, as the operator configured it, already produces, and says what its tool's report gives when it is present.
+- **Commit hooks.** hashd runs a repo's commit hook if one is installed, and never installs hooks on runners.
+- **No project change.** An adapter never requires a plugin, reporter or CI change. hashd never changes the project's commands and does not tell the operator to: it adds no flag and no environment variable to them. An adapter reads only what the command, as the operator configured it, already produces, and says what its tool's report gives when it is present. The operator-authorized `COMMIT-TEST_LOG_OWNER-005` producer contract is a narrow exception for hashd's own configured gates: their existing entrypoints may request structured reports and preserve Go events before console filtering. Adapters still consume reports without modifying other projects' commands.
+
+  `scripts/test-report.py` creates a fresh execution directory (under `HASHD_TEST_REPORT_ROOT`, or `test-results/` under the CI cache root), announced as `Test results directory:` / `Test results manifest:`. `execution.json` records schema version, configured entrypoint, working directory, commit and start time. Each attempted invocation owns a `run-*/result.json` with its actual argv, working directory, timestamps, exit code and completion flag. Go reports retain all lifecycle events in `events.jsonl`, plus failure output; pytest writes native JUnit XML without captured passing console logs; shell reports name only scripts actually invoked, in order, stopping at the first failure. Repeated tests and subtests remain separate occurrences. The final `manifest.json` lists those reports and the overall gate exit code; its `complete` flag certifies report completion, independently of pass/fail. Missing manifests, running invocations and unfinished streams are incomplete evidence. An empty report list certifies that no tests ran (for example an empty fast selection or generation failing before any tests execute); the gate exit code still records a failed prerequisite. Report production errors fail the gate. Reports live outside supervisor scratch, contain no duplicate whole-console payload, and remain available for the runner to consume before side-effect cleanup. No configured command string changes are needed.
 - **Provenance.** Every failure fact records the adapter, reader and file it came from.
+- **Execution evidence.** One run record carries the command, commit, suite, process outcome, structured failing tests, bounded console tail and the runner-owned complete-log reference. Merge-gate evidence pairs branch and base run records. Failing tests come from adapter reports or the verified small-model reader (`named_by_model`); a broken expected report refuses comparison. The run record also keeps every case its reports name, passing, failing, errored or skipped (`tests`), each named as the same adapter names a failure, so a later baseline can tell which tests ran without the complete log. Counts come from adapter report facts or, for uncovered runs, the model reader's existing run object; they are informational only, never a prerequisite for acknowledgement, go-anyway or reuse. Core does not parse tool-specific summary text. Missing complete logs are reported with a reason; the bounded view is never presented as complete. Terminal-story cleanup uses the shared FSM predicate and reaches every recorded log owner, reporting unreachable runners. The owner also removes the build and test stage logs of the run that copied the console, from the run directory it noted beside the retained log when the command ran. The process outcome records the signal that ended a process (`signal`, for example `SIGKILL`) beside its exit -1; an outcome recorded before signals were kept, exit -1 with no signal, reads as ended by an unnamed signal and is never rewritten. Every build/test stage log (`test.log`, `build.log`, `pre-commit.log`) carries an `=== ENDED ===` block holding the ending statement, `ExecutionProcessOutcome.Ending`, rendered from the execution's recorded process outcome and never from the stage's local result. The stored test output record carries the same ending statement on each execution reference it names (`executions[].ending`). Agent-facing test evidence -- the test stage's output, implementer retry feedback and failure explanation, the stage log and prompts of the test and build judges, merge-gate judge and recovery evidence, and the reviewer's inputs -- points agents at the inline evidence, the stored output's `GET` read (`transcriptstore.OutputReference`) and, beside each execution whose console a runner kept, hashd's read of that complete console (`GET /test-executions/{id}/log`, `transcriptstore.ExecutionConsoleOffer`), forwarded from the owning runner under the run token's existing scope. It never offers a runner's retained console as a file to read; that console's runner and path stay in the failure's operator-facing `help` and in the execution records. A file a prompt does name as readable is granted to the agent at launch, and one that cannot be granted fails the launch with a Diagnostic.
+  The project database retains execution outcomes, failure identities, test counts and
+  provenance. Active test inventories, console captures and baseline bodies live beside
+  it in `story-evidence/<sha256>`. Detail reads verify the digest. Story closure retires
+  the references and deletes a file after its last active reference is gone. The upgrade
+  applies the same terminal-state rule to historical rows and compacts the database.
 - **Extensions.** Where a tool's output is poor, hashd defines a documented, versioned results format that any build can write. It is reserved until designed, and a value for it is refused until then.
 
-Known exceptions in core, to be moved behind adapters and never extended: the pytest console parser (`server/internal/testparser`), kept until the failing-test reader (STORY-0456) replaces it for pytest runs that write no report, and the ecosystem detection (`server/internal/config/detect.go`).
+Known exceptions in core, to be moved behind adapters and never extended: the ecosystem detection (`server/internal/config/detect.go`).
 
-The failing-test reader (the `failing_tests` agent stage, STORY-0456) is not an adapter. Failure naming uses mechanical evidence first: adapter reports, then the console parser. When neither names a failure, the reader's exact `(file, test)` pairs become ordinary `testparser.FailureInfo` entries before identities, failure signatures, retry feedback, adjudication, clarification wording, baseline recording/exclusion and merge-gate go-anyway are computed. Both reader calls use the same prompt and answer shape. Names and files are used exactly as returned: no snapping, fuzzy matching, separator normalization or marker trimming; a missing file stays empty. Merge-gate comparison and acceptance keys use the exact pair, and an empty file matches only an empty file. Their source remains labelled "named by model". hashd then checks whether each test name occurs verbatim in the output and whether the reported failed count agrees with the number of named tests. Any mismatch only adds `named by model; not mechanically verified: <why>` to the stage log and existing failure, execution-evidence, baseline-capture and acceptance records; verification never drops a name or withholds its ordinary use. The run's summary lines, failed count and total count are retained in the existing evidence and verdict records as FYI, without display changes. Genuine execution, evidence-delivery and adapter errors retain the same rules for all naming sources. The reader also names the failure's kind -- tests, build or environment -- directly, without a separate evidence line; a failed build asks it for the kind too. An environment failure stops for a person instead of taking a code-fix round, and the kind is labelled "named by model". A re-run reads its own new output: a failing verdict is never reused.
+The failing-test reader (the `failing_tests` agent stage, STORY-0456) is not an adapter. Failure naming uses adapter reports first, then the failing-test reader: when no adapter names a failure, the reader's exact `(file, test)` pairs become ordinary `testparser.FailureInfo` entries before identities, failure signatures, retry feedback, adjudication, clarification wording, baseline recording/exclusion and merge-gate go-anyway are computed. Both reader calls use the same prompt and answer shape. Names and files are used exactly as returned: no snapping, fuzzy matching, separator normalization or marker trimming; a missing file stays empty. Merge-gate comparison and acceptance keys use the exact pair, and an empty file matches only an empty file. Their source remains labelled "named by model". hashd then checks whether each test name occurs verbatim in the output and whether the reported failed count agrees with the number of named tests. Any mismatch only adds `named by model; not mechanically verified: <why>` to the stage log and existing failure, execution-evidence, baseline-capture and acceptance records; verification never drops a name or withholds its ordinary use. The run's summary lines, failed count and total count are retained in the existing evidence and verdict records as FYI, without display changes. Genuine execution, evidence-delivery and adapter errors retain the same rules for all naming sources. The reader also names the failure's kind -- tests, build or environment -- directly, without a separate evidence line; a failed build asks it for the kind too. An environment failure stops for a person instead of taking a code-fix round, and the kind is labelled "named by model". A re-run reads its own new output: a failing verdict is never reused.
 
 Design: https://github.com/codr1/hashd/issues/2273.
 
@@ -87,7 +96,7 @@ The package is `server/internal/buildadapter`, at `InterfaceVersion` 5. A run ha
 - **Detection (auto).** The run's first stage with nothing carried for the repo (normally provisioning's baseline; a resumed run, a merge-gate retry or a run after a park detects at its first stage) switches on every adapter whose marker file the worktree holds, and adds their default side-effect paths. The result travels with the run, as a field on the existing stage and cycle inputs and results (`buildadapter.Carried`, per repo, across continue-as-new), and every stage gets its adapters through `runflow.StageAdapters`. An adapter whose output signature appears in a command's stdout or stderr is read for that command too and carried from then on; its default paths apply from the next command. Nothing is stored between runs: no table, column or cache file.
 - **What the run records.** Each stage that resolves under auto logs `Build adapters: <name> (<marker file> | output: "<signature>"), ...`; a signature hit is also noted in the command's parsed summary, and every failure keeps its adapter as before.
 - **What core does with the facts.** Core asks the adapters after each baseline, test-stage, merge-gate, post-rebase fast check and committed-breakage probe run, before the side-effect policy runs, so a report the policy would clean is read first. The merge gate names its failing tests from them in the execution that read them; they are not recorded.
-  - A failure the console parsers did not name is added to the run's failure list, and one they named with the same file is replaced by the adapter's.
+  - Every failure an adapter reads is added to the run's failure list; no failure is read from console text.
   - The facts are *incomplete* when a matched report could not be read (malformed, or over 16 MiB), when one is *stale*, meaning it is older than the run, so something reported on earlier did not report this time, when part of the build that holds tests wrote no report this run (*unreported*), or when the adapter names something else the run shows that its failures may not cover. Incomplete facts never let a baseline exclusion pass, and a baseline whose test failures came with incomplete facts is recorded as `baseline_unparsed`. They reach the run's failure feedback as a Diagnostic (`buildadapter.Facts.Diagnostic`): each cause, and the step that fixes it. An adapter may also report that its failures cannot prove the whole build compiled; a baseline exclusion on such failures applies only beside a build command that passed earlier in the same test-stage run.
   - A stale report also shows up when a subset run (a fast check, say) leaves other modules' reports in place. That run then fails closed.
 - **Searching for reports.** Patterns are matched with doublestar. `.git` and `node_modules` are never searched, and a malformed pattern is reported as unreadable.
@@ -134,6 +143,45 @@ The package is `server/internal/buildadapter`, at `InterfaceVersion` 5. A run ha
 - Default side-effect paths: `**/TestResults/**` as `clean`, because each run writes a new, timestamped TRX that would otherwise be read as stale by the next run. Cleanup includes gitignored files created by the command and preserves files present before it. The adapter adds no `ignore` defaults: the repository’s `.gitignore` covers .NET build output, while real `bin/` entry points in mixed repositories remain eligible for commits.
 - Detected by a root or nested `.sln`, `.slnx`, `.csproj`, `.fsproj`, `.vbproj` or `global.json`, or by VSTest's `!  - Failed: ` summary or the testing platform's `Test run summary: ` line in a command's output.
 
+An adapter:
+
+- reads only structured output the tool already writes, such as report files in a documented format, and never parses free-text console output itself; it may run the tool's own official converter on that tool's output (for example `go tool test2json`);
+- contributes facts only: failing tests, default side-effect paths, and detection hints for `project add`. It never changes control flow: it does not stop a run, skip the fix loop, classify a cause or choose a transition;
+- reads third-party formats with established libraries and never re-implements them;
+- never requires the project to add a plugin, a reporter or a CI change.
+
+## Agent harnesses
+
+A harness is its declaration under `agents:` in `server/internal/config/defaults.yaml`: how hashd launches it, signs it in, isolates its home and talks to it. Core reads the declaration and never branches on which harness is running. A harness that speaks a protocol core already understands needs no code: an ACP harness (`kind: acp`) is launched, prompted, permissioned and resumed by `agents/acp.go` from its declaration alone.
+
+What neither the protocol nor the declaration can express lives in that harness's adapter, one file per harness in `server/internal/agents/harness/`, registered under its harness id (its registry name). The package never imports `agents`. Each capability is a small interface core asks for with `harness.For(id)`; a harness without the capability, or without an adapter, gets core's default:
+
+| Capability | Fact | Core's default |
+|---|---|---|
+| `SessionReader` | the session id a finished run's output names | none captured |
+| `ResponseReader`, `StageResponseReader` | the answer in the harness's own output shape; the second chooses by the command's declared format rather than the content | stdout as written |
+| `MessageReader` | the harness's own assistant messages, and whether stdout was a message stream | no stream |
+| `OutputRetainer` | the part of stdout a transcript, result and failure message keep, when a format carries activity frames kept apart | all of it |
+| `FinalResultReader` | the resolved final result is the whole answer, even when empty | other text may stand in |
+| `ACPInstructionReader` | the runtime takes instructions in the session's system prompt (`acp.instructions_path`) | yes when the path is declared |
+| `ACPTurnWatcher` | a turn failed upstream although the protocol reply was ordinary, with the provider's status, message and reset time | no evidence beyond the reply |
+| `EndpointReader` | whether the launch's environment sends model calls somewhere other than the native provider, and the billing provider and region when that endpoint states them (Claude on Bedrock) | native endpoint: the reported provider prices the call |
+| `RuntimeConfigComposer` | the runtime configuration composed over the one the launch inherits: hashd's MCP servers, and the launch's delivered input directories opened to the harness's own permission layer, as variables and, where the harness reads it only from files, files in a directory of the launch's own | MCP servers through core's injection for the harness; nothing for delivered inputs |
+
+An adapter contributes facts only. Core decides every verdict, retry and transition from them with its own rules: an ACP turn failure, for example, is classified by the same status rules as any other harness's structured error: a spent quota allows at most one immediate retry, and a rate limit or outage is a failed attempt the retry ladder retries after the provider's recorded delay. An adapter reads only the harness's own structured evidence, never agent text, so a time or status the agent merely quotes cannot decide anything.
+
+A stage's selected input files (`RunStageOptions.ReadFiles`) reach its agent as copies, each in a directory of its own under `<TranscriptRoot>/inputs/`, which the prompt names in place of the original (`server/internal/agents/delivery.go`). The stage fence opens those directories read-only and nothing beside them (`opsfence.Fence.ReadDelivered`), and a harness's own permission layer is given the same directories through `RuntimeConfigComposer`, together with the directory holding the project environment's as-file entries and the browser session's capture directory, which the fence also opens read-only, with or without MCP servers, fenced or not, on every attempt and resume: both layers open one selection. Files the adapter returns are written through an `os.Root` into a directory of the launch's own beside the other harnesses' MCP config files and removed with them; the adapter writes no permission rule, so every rule the harness's config sets still holds, a configured denial included. The copies are read-only files: with the fence off that prevents only tool and plain shell writes, and the fence is what prevents `chmod` and deletion. Delivered files outside the checkout are readable in Claude, Codex and OpenCode; only OpenCode's adapter needs to compose this. Gemini, Copilot and Qwen do not yet receive read access to them: their own permission layers refuse paths outside the checkout, and none of the three has a read-directory flag hashd has verified against an installed binary. A launch whose root holds its conversation's deliveries alone (chat, one root per conversation) passes `RunStageOptions.KeepDelivered`, so the copies its earlier prompts named stay granted, as delivered, on a turn that names none of them again, resumed or the fresh send a failed resume falls back to. OpenCode's composition: docs/AGENT_MANAGEMENT.md, **OpenCode distribution and configuration**.
+
+An ACP declaration's `launch_args` may name one of the launch's own environment variables as `{env:NAME}`, for a runtime that takes a directory as a flag where hashd points it with a variable. An unset or empty variable fails the launch with a Diagnostic rather than running with the placeholder.
+
+When an ACP runtime does not take instructions in its system prompt, they lead the prompt as their own text block: on a fresh session the repository's instruction files, on a resumed one only what a resume adds, since the session's history already holds the first prompt's.
+
+Harness-specific code still outside adapters (launch controls, failure classification, usage accounting, credentials, MCP configuration) is to be moved into its harness's declaration or behind its adapter, never extended (AGENTS.md, **Architecture: Agent Harnesses**).
+
+### Process containment
+
+`server/internal/procgroup` contains stage launches by owner: a story or workstream on the server (`procgroup.Owner(project, entity)`, entered in `RunStageWithOptions`), an attempt on a runner (entered at dispatch). Where `ProbeScopes` found user scopes usable, `procgroup.Start` runs each launch in its own transient scope named `hashd-<digest>-<pid>-<n>.scope`, the digest a fixed-length sha256 of the ops root and the owner; otherwise in its own process group. `KillOwner` is the one hard kill: each live launch's process group first, then one `systemctl --user kill` of the owner's scope pattern, plus the owner's cancelled contexts and a refusal of its later launches until `Forget`. Nothing is kept after a launch exits; scopes run with `--collect`, so none stays loaded. No process start or systemctl call runs under the owners' lock.
+
 ## Connector Planning Inputs
 
 `attachments.Prepare` is the single server boundary for typed references and
@@ -154,14 +202,16 @@ or freshness. Files live beneath the existing project artifact directory; normal
 failures clean unpublished scratch. This adds no retention/garbage-collection job.
 
 `attachments.Link` links one tracker story to a story at rest, outside
-planning, as the one leg of the tracker-link workflow (the tracker is read
-with the story owner's account, `PlanningConnectorHost`): it resolves and
-validates the reference as `Prepare` does, then
+planning, as the one leg of the tracker-link workflow
+(the tracker is read with the story owner's account for a personal connector and with the project's account for a project connector, `PlanningConnectorHost`):
+it resolves and validates the reference as `Prepare` does, then
 publishes one link and its capture inside `reqs.WithStory`, refused while a
 `content_owner` holds the story or the story already has a live link from that
 tracker. `attachments.Unlink` sets `story_attachments.unlinked_at` instead of
 deleting, so captures stay as evidence; every reader skips unlinked rows, and a
 later link of the same item clears the mark.
+
+Connector reads authenticate by the connector's `ACCOUNT_KIND`. A personal connector is read with a person's own account for the project's configured destination; solo's chat reads of a personal connector through the ordinary connector host (`callerReadHost.configured`) are the remaining exception. A project connector is read only with the project's account for the project's configured destination, pinned to it, in solo and team mode, and never through the ordinary host.
 
 A connector's typed item projection (`ResolvedArtifact.projection`) is pinned
 with the capture it came with: the server writes it as one more manifest entry,
@@ -177,13 +227,24 @@ exactly against `project_repos.name`. A story with no target, none inherited
 from its suggestion, takes a primary or active match as its `target_repo` in
 that write, and planning then runs no `pm_route`; a target it already has is
 never overwritten. Any other value -- a typo, a renamed repo, a `reference` or
-`ignore` repo -- is not a target: planning runs `pm_route` as usual and hands
-it the value as a hint (`RouteParams.TrackerTargetHint`, the `tracker_target_name`
-variable of `repo_router.md`, whose wording says it is a hint). A story run with no target does the same: an
-exact primary or active match is its target, anything else is routed with the
-hint, and nothing is refused. Two notices are derived on read, and neither
-blocks: `unknown_target_repo` while the value names no primary or active repo,
-and `target_repo_disagrees` while the story targets another repo than the
+`ignore` repo -- is not a target, and the router is never handed it. For a
+story with no target, planning stops before
+any `pm_route` (`pm.TrackerTargetStop`): the story lands in `draft_failed` with
+cause `refused`, its suggestion stays claimed, and it carries the shared
+Diagnostic (`pm.UnknownTrackerTargetDiagnostic`) with the `hashd story retry`
+step. A retry captures the item again and re-reads the repos, so a corrected
+field, or a repo registered or promoted under the name, is taken as an exact
+match with no router; a name that still matches nothing stops again. A story run with no target takes an
+exact primary or active match as its target and refuses any other name with
+the shared Diagnostic (`pm.UnknownTrackerTargetDiagnostic`, 409) before any
+workstream is created or `pm_route` runs. Each run reads the repos' current
+status, so a repo registered or promoted under the name is picked up by running
+again, but it uses the item's value as last recorded on the story and does not
+capture the item again: a corrected item takes effect after `hashd story edit`
+re-captures it. Two notices are derived on read: `unknown_target_repo` while
+the value names no primary or active repo, which for a story with no target
+means it waits for a person to settle the repository, and
+`target_repo_disagrees` while the story targets another repo than the
 routable one the item names. A single-repo project records nothing: its
 stories carry no target.
 
@@ -194,9 +255,28 @@ attachment listing exposes recorded metadata and those full-read URLs, never
 server file paths. Full reads verify the committed digest and serve downloads
 with `nosniff`; missing or changed evidence is an error, not an empty record.
 
-The reference parser is shared in `refs/refparse`. Its complete argument candidate
-lets the provider report consumed UTF-8 bytes for planning; existing metadata-only
-chat/implement readers keep their legacy argument behavior. Jira issue fetches,
+Implementation delivers the latest capture of every live story attachment into
+its run directory, verifies the bytes, and grants those paths to the agent.
+Authored prompt text is never scanned or rewritten. No connector cache or live
+account is read to assemble an implement prompt.
+
+`refs/refparse` is the single tokenizer. Connector declarations carry
+`reference_pattern` (RE2, the argument following `@name:`); built-ins declare
+patterns in `BuiltinTypes`. Only complete grammar matches at a word boundary
+are references. Backslash-escaped at-signs and Markdown code are literal.
+Planning and chat aggregate unresolved items in a Diagnostic before calling an
+agent. A planner run (first draft, planning retry or edit) resolves references
+in the story title, the discovery suggestion context, the story input it is
+handed, and the parts of its instruction a person wrote or whose author was not
+recorded, chosen by one rule (`pm.PlanningReferenceText`) from the parts'
+recorded authorship; hashd's own question text rendered from clarification
+rows, the server's framing of the instruction, the story's stored open
+questions and the preserved feedback of failed edits are not resolved.
+Per-artifact Diagnostics preserve provider reasons and repair advice;
+string-only errors get no inferred cause. A failed refresh can use only the
+same story's verified stored capture, with a notice explaining the failure.
+Planning records this as a refusal rather than a crash and preserves unapplied
+edit feedback for retry. Jira issue fetches,
 GitHub issue fetches and Figma frame imports produce capture evidence. Figma
 identity belongs to each imported resource generation, not the manifest's latest
 configured file. Legacy caches without producer evidence remain readable through
@@ -219,7 +299,12 @@ are consumed one at a time; missing continuation evidence is an error.
 Declared `ReferenceAction.filters` (key/label/multiple) feed the same generic
 controls in both clients. The host validates the complete typed filter map before
 calling a provider; callbacks without filters retain their three-argument call.
-Nonempty filters permit filter-only search, never blank enumeration. Jira exact
+Nonempty filters permit filter-only search, never blank enumeration; a
+watch's read (`watch_scope` on the request) is not a picker's search, and reaches
+the provider with its filters as given, none included, for the provider to list
+or refuse. It reads only at the `REMOTE_SCOPE` it names: the host refuses it,
+before searching, when the connector, as that search loads its configuration,
+points elsewhere. Jira exact
 keys remain key constraints when filters are supplied. Labels are ANDed; status
 is provider-native, and updated-since uses the timezone named in the field label.
 GitHub searches the configured/detected repository through the existing gh
@@ -260,7 +345,7 @@ that cannot be read is left out and named in `incomplete_reason`.
 
 `GET /connectors/search` adds page-local `imports` marks, from the Hashd server
 (`reqs.LookupLiveImports`: one query over the project's stories that carry an
-import, one over the page identities' suggestions), for the returned items already
+import, one over each connection's suggestions), for the returned items already
 imported in the project; connectors' own search knows nothing of suggestions,
 and only the import picker acts on the marks. Each mark names its item by
 connector, `connection_id` and `resource_id`. `POST /suggestions/import/marks`
@@ -292,6 +377,143 @@ planning's fresh owned capture remains authoritative. TUI file saving explicitly
 creates a new client-local file and refuses existing files/symlinks.
 
 Other editors keep text-only autocomplete. Outbound synchronization remains separate.
+
+### Tracker watches
+
+A tracker watch (#2937) keeps one person's own not-done work in one tracker
+flowing into hashd as that person's stories, each linked to its item. A
+watch that is on acts through its scan. Each housekeeping sweep of the
+project starts one scan of every watch that is on, for every owner
+(`EnsureConnectorWatchScans`, beside the PR watch backstop), and waits for
+none; there is no timer, schedule or setting of its own. The scan is the
+`connectorwatchscan:{project}:{connector}:{owner id, 0 for unowned}`
+workflow (`DispatchConnectorWatchScan`), started with
+`WorkflowExecutionErrorWhenAlreadyStarted`, so a scan still running when
+the next sweep comes is not started twice and is not a sweep error. It reads
+the watch with `ReadConnectorWatch` as it stands -- the filter in force, the
+owner's own account, every page -- and pulls in each item that read's skip
+rule (`classifyWatchItems`) marks `create` as the owner's story, linked to
+the item by its reference exactly as `hashd story link <story> <ref>` links
+one: nothing is written to the tracker, and find-or-create is never used.
+Each pull-in re-checks the project-wide live-link and live-import rule in
+the transaction that creates the story (`PullInScannedWatchItem`), so an
+item linked or imported since the read, or by a concurrent or retried scan,
+gets no second story. Once its tracker read succeeds the scan replaces the
+watch's last-scan record (`scanned_at`, `scan_stories`), and it adds each
+story it creates, with the item it came from, in the write that creates the
+story; a scan refused before or during its read leaves the previous record.
+Each item whose leg ends in error, once its re-runs are over, is added with
+its own Diagnostic to `scan_failures`, once per reference
+(`RecordScannedWatchItemFailure`), so the record names every failed item
+where the workflow's own failure names only the first few. The final step
+records a failed scan as a durable `operation_result` and alerts its owner.
+The next scan that ends without failure clears it; a watch found off does
+neither. Success is published only after a previous failure.
+`GET /connectors/{name}/watch` serves that record's stories as `last_scan` and a scan
+in flight as `scan_running`, read from the workflow, never stored. A watch belongs to one person, for one
+connector in one project (`connector_watches`, one row per owner; single-user
+mode's implicit user is `user_id` NULL, as connector accounts store it). Every
+watch route reads and writes only the requester's own row, the requester
+resolved as for the personal accounts the watch reads with (`watchOwner`, by
+`personalOwner`), the same code path in solo and team mode: no request names
+another person's watch, so each person sees and changes only their own. In
+team mode that is only ever the signed-in user; an unowned server token,
+which `ResolveActingUserID` would resolve to the server's owner, is refused
+before anything is read or saved. Whose watch it is needs no account store:
+while that store is unavailable, the owner still reads their watch, its
+account reported unavailable, and still stops it.
+
+A watch reads its tracker only with its owner's own account for the
+connector's configured destination: every host call, capabilities included,
+goes through `callerReadHost` with the owner's identity (`connectorWatchHost`).
+Nothing falls back to the asker's account, the project's configured
+credentials or the host's; an owner with no usable account is refused, the
+refusal worded for the owner.
+
+Its filter takes one of two forms: the connector's declared filters
+(`ReferenceAction.filters`, key to values), or one query in the connector's
+native query language, sent as written. A connector that declares
+`NATIVE_QUERY` takes a native query, and labels it with that declaration. One
+that declares `WATCH_DEFAULT` -- the filter of a person's own not-done work, in
+its declared filter keys, `me` meaning the reading account's own user -- may be
+watched with that default instead (`default`). The default is resolved per
+project, so only the project-scoped capabilities read through the owner's
+account reports it. A default request is read, saved and recorded as the
+declared filters the default stands for at that moment, its tokens (`me`,
+`current`) kept for the connector to resolve with the reading account, so a
+default that changes later changes neither a saved watch nor a recorded
+preview. Declared filters are kept as their search takes them: blank values,
+and the keys they leave with none, are dropped, by the connector host's own
+rule, once the host's own checks pass on the values as given. A filter mixing
+forms, a native query given empty, an undeclared key, several values, blank
+ones counted, for a filter that takes one, and a native query or default the
+connector does not declare are refused before anything is read, and so is
+every read of a connector whose `WATCH_DEFAULT` the host refused
+(`watch_default_problem`); the values themselves are the connector's own
+`search_references` to check, as the import picker's are.
+
+`ReadConnectorWatch` is the one read and skip rule. The preview shows what it
+returns, and the scan that acts on a watch must call it rather than repeat it,
+so the two make the same tracker call and classify alike. It reads every page,
+with no item cap; an `incomplete_reason`, a cursor already returned or any
+failure fails the whole read, and no partial list is returned. Each item, in
+the tracker's order, is `create`, or `skip` with the first reason that applies:
+the import refuses its identity, it repeats an earlier item, a story links it
+or it is imported (`reqs.LookupLiveImports`, counting live links), or the
+import's gate refuses it (`storySourceGate.refusal`). The read writes nothing.
+
+`POST /connectors/{name}/watch/preview` is a synchronous read like
+`GET /connectors/search`. Only a successful preview is stored, with the watch:
+the filter it ran with, where it read (the connector's `REMOTE_SCOPE`, which
+its items were classified against and every page's search confirmed, under
+that search's own configuration, as `watch_scope`), when it ran, and every item
+with its outcome and reason. A configuration that moves the connector during
+the read fails it. A first preview creates the watch off; a failed one leaves
+the stored preview as it was.
+
+`GET /connectors/{name}/watch` is the single source every client renders, so
+no client works any of it out: on or off; the owner; the owner's account for
+the connector's destination, or that they have none (`connectorStatus`); the
+filter or native query in force, which with none saved is the declared
+filters the `WATCH_DEFAULT` stands for where one is declared, and otherwise no
+filter; the
+`NATIVE_QUERY` label; the watch default; the stored last preview, or `null`
+when none has run; and the warnings. When the connector cannot be read
+through the owner's account, the read carries the refusal a preview would
+meet and leaves out what only that read says: the watch default, and the
+filter in force when none is saved.
+
+`PUT /connectors/{name}/watch` sets on or off and, when it names one, the
+filter. Every save as on -- turning a watch on, changing its filter while it
+is on, or saving it on again -- is refused (409) unless the stored last
+successful preview ran with exactly the filter being saved, compared by
+canonical encoding, and read where the connector points now; the refusal's
+help names
+`hashd connector <tracker> watch preview` with the request's own flags, so it
+previews what the same request saves when made again, or, for an empty set of
+filters, which no flag names, describes that preview instead. The watch is
+read, the rule decided on it and the result written in one transaction that
+takes the write lock at BEGIN, so no save or preview lands between the read
+and the write. A save as on also holds the project lifecycle lock, which
+configuration writes take, from reading where the connector points through
+that write, so no configuration write moves the destination it was compared
+with before it lands. Stopping a watch that exists needs no preview and meets no
+refusal, so an owner who can no longer read the tracker can still stop it.
+Anything else -- turning a watch on, saving a filter, or making the watch, even
+off -- first meets the preview's own story-source and filter-form refusals.
+Declared filters named while the watch is off need no preview, so their
+values get the connector's own check instead (`checkWatchFilters`): before the
+transaction, the save reads one page of the connector's search with them,
+through the owner's account, and keeps nothing it returns; the connector's
+refusal comes back whole, and nothing is stored. A
+watch turned on with no filter saved saves the one in force, so a watch that
+is on always reads with a filter it saved. A refusal stores nothing. While a
+watch is on, every save and read warns that its intake has no dependency
+graph, so planning is best effort and will not sequence the stories it pulls
+in; and, when the stored preview ran with the filter in force and would create
+more than 20 stories, how many. Warnings never block a save. Saving starts no
+scan, workflow or timer and creates no story, suggestion or link; neither
+saving nor previewing adds an event-bus type or an `events` row.
 
 ## Suggestion Lifecycle
 
@@ -356,6 +578,22 @@ the pause. Ownership, destination eligibility, discard confirmation, expected
 placement and the transactional command-occurrence/live-attempt boundary
 checks remain the move's. An acknowledged parked workflow is not an open stage.
 
+Close (both `POST /workstreams/{id}/close` and `POST /stories/{id}/close`,
+through `closeWorkstreamFully`), replan and reset (not `reject --reset`)
+on a `ready` pause also pass only the pause's refusal. `ReadyPauseRecovery` reads the pause through the
+readiness evaluator and checks the unpause's authority
+(`requireWorkstreamUnpauser`) before anything closes; `WithPauseRecovery`
+carries the recovery on the request context, so admission passes that exact
+pause and the execution claim passes the exact run held at it, and
+`fsm.WithRunnerHeldAtReadyPause` lets `no_active_work` pass the held run.
+The route closes that run through `closeAdmittedRunExecution`, does its work,
+and then ends the pause through the unpause release path
+(`endWorkstreamPauseLocked`, then `releaseRecoveredPause`, which signals no
+run it closed), recording
+`workstream_pause_released` with the verb that ended it. A `waiting` or
+`unknown` pause refuses with the not-ready reason. Restart holds, saved human
+edits and open worktree resets still refuse.
+
 With no hold row left, Go (`POST /workstreams/{id}/run`) on a workstream whose
 run still waits at a hold boundary delivers the release to that exact run and
 dispatches nothing.
@@ -378,6 +616,217 @@ When no open run remains, unpause starts nothing: use `hashd run <story>`
 afterwards. Placement epochs fence old-runner work, and the destination
 rebuilds from the branch rather than receiving checkout state.
 
+The wait for a runner slot (WF.md "Restart holds") is computed as well, from
+the runner slot store (`server/internal/runnerslots`, the system database)
+rather than a hold row (`server/internal/api/runner_capacity_hold.go`).
+A runner's capacity limits ordinary work; the holder of a project's merge lock
+runs in addition to it. `coveringHolds` asks `runnerCapacityHold` last, and
+only when no other hold covers a workstream run whose family uses a runner
+(`inflight.UsesRunner`). For a merge or archive granted its project's merge
+lock (`HoldBoundaryCheckInput.MergeLockHolder`, or a `Withdrawable` grant check
+scheduled before that flag existed), it calls
+`runnerslots.Store.AdmitMergeLockHolder` instead of `Admit`, admitting the
+holder immediately whatever the runner's load without entering the queue, while
+non-capacity holds still apply because `runnerCapacityHold` runs last. The
+project merge lock serializes every merge and archive of the project, so a
+holder waiting for capacity keeps the project lock idle while merges on runners
+with free slots wait behind it, and granting the lock only to merges whose
+runners have a free slot would let a merge on a busy runner be passed over
+without limit. Because a merge keeps its runner slot after releasing the merge
+lock and gives it back when it queues for the lock again for its archive, a
+runner can be above its capacity by one job for each project whose lock holder
+runs on it, plus that project's landed merges that have not yet queued for
+their archive; that second part lasts only as long as archive preparation,
+no merge or archive waits because of it, ordinary work on that runner is
+admitted once the load is back under capacity, and a landed merge preparing its
+archive runs no build and no test. When a
+non-capacity hold (restart hold, workstream pause, or runner return) holds a
+granted lock holder that acknowledges at its boundary (a local merge or a PR
+merge predating `merge-chute-hold-v1`), `boundaryAck` preserves
+`MergeLockHolder` in `execution_hold_acks.merge_lock_holder`: on release,
+`resumptionPlacement` returns false for it (and for retained pre-upgrade
+acknowledgements at `MergeChuteGrantedBoundary`) so neither
+`deleteWorkstreamPauseQueued` nor `queueForRunnerSlot` enqueues it for ordinary
+capacity, `releaseAcksMatching` signals it directly so its re-check admits it
+at once via `AdmitMergeLockHolder` whatever the runner's load, and
+`reapRunnerSlots` retries any failed direct release on housekeeping sweeps
+without queueing it or taking over a later execution's slot. For ordinary work,
+`runnerCapacityHold` calls `runnerslots.Store.Admit` for the workstream's placed
+runner and epoch, for the asking run's root execution (`slotExecution`: a run
+cycle's run), always naming the new tier, since the store keeps whether the
+workstream has held a slot under this placement and queues it in the resume tier
+when it has. The
+row records that execution (`workflow_id`, `workflow_run_id`), and a later
+execution of the workstream that asks takes the slot, or the queue entry,
+over. Admitted is no hold; queued is owner `runner_capacity`, reason "waiting
+for runner <name> (<active>/<capacity>)"; left waiting, the run's
+acknowledgement is written in `Admit`'s own transaction (its `waiting`
+callback), so no queue entry is ever without the acknowledgement that makes
+it eligible. The run workflow's first boundary is `run:provision`, after its
+begin and before provisioning; a story rebase's is `rebase-start`, a PR
+reopen's `pr-reopen`, a merge's `merge-start` (in every execution it
+continues as new, before the merge lock), a resolve's `resolve-start` (and, past it, `resolve-continuation-<n>` before its run continuation, which
+asks with the slot the resolve already holds), a PR
+create's `pr-create`, a PR push's `pr-push`, a recovery answer's
+`recovery-answer`, an add-commit's `add-commit`, a scope judge's
+`adjudicate` and a docs update's `docs`, each before its first stage on the
+runner -- an undo-only rebase's before its undo, so the undo runs only once
+admitted. A rebase that ends at `rebase-start` has run nothing on the
+runner, so its deferred close runs no undo there: it returns the story, or,
+undo-only, leaves the stopped rebase for the story's next cancel. The eight
+workflows that ask only at their first boundary carry a runner admission in
+their context from their first statement (`withRunnerAdmission`,
+`awaitRunnerAdmission`): left holding no slot -- cancelled while it waits
+there, or replayed past a boundary its build lacked -- the next stage one puts
+on the runner asks first (`admitBeforeStage`, in `wholeStageRun`), on the
+stage's context, a disconnected cleanup one included, and a merge asks before
+each attempt at its merge lock (`AcquireMergeLock`'s `section.Hold`). A
+fresh resolve cancelled at `resolve-start` so asks before its rollback, and a
+rebase whose conflict gave the slot back asks before its undo.
+`StartWorkstreamRun` places unplaced work on the local runner
+(`placeLocalWork`), and refuses to start a run it cannot place, so the run's
+first boundary finds the runner it queues on. A standalone command -- a docs
+update, an added commit -- runs unplaced legacy work's stages on the local
+runner as it stands, so that work takes the local runner's slot under
+placement epoch zero (`runnerSlotPlacement`, `placedRunnerID`), which the
+store admits as the work's stages are (`placedAt`, `workplacement.Admits`).
+A runner's dispatch pass
+(`dispatchRunnerSlots`) calls `ClaimNext` with `slotEligible`, which reads,
+inside the store's transaction through its queries (`holds.In`: the holds and
+the slots share the system database), which workstreams have a run waiting
+acknowledged at a boundary no other hold covers (`slotEligibility`), so no
+pause, unpause or acknowledgement lands between that read and the admission;
+`Admit` asks the same way. The pass then sends
+`execution-hold-released` to the waiting runs of every workstream holding a
+slot on the runner -- first the ones it claimed, in the order `ClaimNext`
+admitted them, then any whose earlier release did not reach its run; a
+workstream whose waiting runs have all closed gives the slot back, naming
+those runs' own executions (`ackExecution`), so one that took the slot over
+since keeps it. `releaseAcksMatching` enters each released slot-taking run in
+its runner's queue (`queueForRunnerSlot`, `runnerslots.Store.Enqueue`, which
+admits nothing and never takes a slot or a queue entry over: the
+acknowledgement it replays may be an earlier execution's), then runs each such
+runner's pass, so runs released together are admitted in queue order, and
+reports the ones left waiting as held with their reason; it enters no run
+acknowledged at a park (`workflows.ParkedBoundary`) with no decision delivered
+to it (`fsm.HumanGateDecisionPending`), whose release goes to the run itself
+(`resumptionPlacement`). An unpause deletes the pause, reads the
+acknowledgements of the runs it held and enters the first whose resumption
+takes a slot in one transaction (`deleteWorkstreamPauseQueued`, through
+`runnerslots.Store.EnqueueWith`).
+`ReleaseRunnerSlot` (`runnerslots.Store.Release`, then the pass) runs at the
+exit of every workflow that takes a slot (the `RunnerReleaseSlot` activity,
+last in each deferred close, version `runner-slot-release`), and before a
+merge's wait for the forge (`runPROpenLoop`), and releases only
+while the exiting execution asked last: its own run, or the run it continued
+as new from, since a workflow continues as new only after asking in that run.
+An earlier execution's exit, an independent rerun's, or the PR reopen whose
+saved run took the slot over releases nothing; `releaseRunnerSlotLogged`
+releases whatever the workstream holds beside the close transition in
+`closeWorkstreamFully` and beside the workstream row's delete. The store
+counts a closed workstream's queue entry (`fsm.IsClosedStage`), and a
+finished one's released record, for nothing, whichever path wrote the stage,
+but keeps a held slot until the execution that took it releases it (the
+archive after a merge still runs); a merged story's archive retry asks at
+the merge's boundary and waits in the resume tier with the merging group
+(`runnerQueueStageGroups`). Before anything is
+admitted each boot, `runnerSlotsReconciled` reserves a slot
+(`runnerslots.Store.Reserve`, whatever the load) for each live runner
+assignment whose workflow is open and whose root execution is of a
+slot-taking family -- a merge lock's stage under its merge -- and whose
+workstream holds no slot and waits in no queue, an unplaced story's on the
+local runner under placement epoch zero; until that succeeds, every
+admission fails and is retried. Housekeeping's `reapRunnerSlots` releases a
+slot or queue entry whose workstream has no open run of a slot-taking family,
+by the engine's exact answer for each (`slotTakingProbes`, and the asking
+execution's own workflow ID, since a docs update is keyed to its project and
+a recovery answer to its question), and keeps a slot whose merge lock section
+the execution started still runs (`mergeLockSectionOf`), naming the execution
+it read, and
+dispatches each runner where the project's work holds a slot or waits for one.
+`waitingOverlay` reports a queued workstream as `waiting` and returns its
+runner as the typed capacity wait (`runnerSlotWaitingReason`,
+`types.CapacityWait`), which the detail, snapshot and list reads serve as
+`capacity_wait` beside `waiting_reason`; it returns none for the wait for a
+runner to come back. It reads the queue over every status but `paused`
+(`fsm.SlotWaitShows`, `fsm.SlotWaitRuntimeStatus`), since a decision taken
+at a human gate waits for its slot while the park still reads `blocked`, and
+a docs update dispatched after a failed run waits while the story reads
+`failed`; a paused workstream, or one parked on a wait of its own, holds no
+place in a queue. A queue it cannot read
+fails the workstream read with a 503 sourced `workstream.runner_slot`, its
+cause as the caller may read it (`RunnerSlotsError`), as any unanswerable
+runtime-status input does, rather than reporting the queued work `running`;
+the inflight board's overlay pass fails the inventory (`inflight.incomplete`)
+the same way. Go's `run` row and
+the run route read the dispatch claim of slot-taking work -- a run, a story
+rebase or a PR reopen -- under `slotWaitContext`: `workstreamExecutionOwner`
+lets them share the claim of work waiting acknowledged in its runner's queue
+(`runQueuedForSlot`) instead of refusing it as in flight. Both ask
+`slotQueuedReason` ahead of the refusals a new start meets -- after the
+caller's permission and the holds the route's admission refuses on -- so the
+row is withheld naming the wait, and Go itself (`ResumeReleasePendingRun`)
+delivers the release, then answers with the wait as the outcome's reason,
+which the route reports as queued (`parkedRunAnswer`), dispatching nothing;
+`release_pending` leaves the run out.
+
+A wait of the story's own gives the slot back from the server-side writer
+that records it: `runflow.Deps.ReleaseRunnerSlotOnWait`, bound by
+`runnerDeps` to the activity host's `ReleaseRunnerSlotOnWait`
+(`api.Server.ReleaseRunnerSlotOnWait`, `releaseRunnerSlot` naming no
+execution: the store's release, then the dispatch pass). The writers are
+`ParkForHumanReview`, which every park goes through
+(`ParkStopForHumanReview`, `ParkTimeBoundForHumanReview`),
+`MarkRunnerBlockedCLQAt`, and
+`ApplyMergeGateExitState` for `merge_test_failed`; outside runflow, a story
+rebase's conflict gives it back in its narration
+(`workflows.ActivityHost.StoryRebaseStage` at `fsm.RebaseStageConflictWaiting`).
+A park, whose run stays open, fails when the release fails, since
+housekeeping reaps only for closed runs and the failed park's exit gives the
+slot back, and a rebase whose conflict narration fails ends, undone, the same
+way; the others, whose runs end next, log a failure
+(`releaseRunnerSlotBeforeExit`). `CheckHoldBoundary`
+gives the slot back once a read finds a run of a family that takes a slot
+held by its workstream pause (`releasePausedRunnerSlot`), and that release
+runs only while the pause stands: the pause is asked again inside the
+release's own transaction (`runnerslots.Store.ReleaseWhile`, one BEGIN
+IMMEDIATE on the system database both rows live on), which the pause's
+deletion cannot commit inside, so an unpause that deleted the pause first
+has taken the resumption over -- `queueForRunnerSlot` finds the slot the run
+holds and signals it -- and a release asked from a read the deletion has
+outrun erases nothing, freeing no slot for a new placement to take ahead of
+the resumption. The release writes the run's acknowledgement in its own
+transaction, and the unpause reads acknowledgements in the one that deletes
+the pause, so a slot given back is queued for its resumption with the
+deletion, and a run whose check comes after the deletion gives nothing back.
+Every such release is followed by the acknowledgement and a confirming read,
+which finds a pause deleted since gone and asks for the slot itself. A pause
+first seen by the confirming read is released there, and the
+run acknowledged and confirmed again. A failure fails the check, which
+retries; a held PR watch frees nothing, since the run may
+still be executing. A pause that lands after the check, while a restart hold
+or the wait for a runner keeps the run, is caught by the dispatch pass:
+`dispatchRunnerSlots` also releases the waiting runs of a workstream whose
+pause is the one hold left (`slotEligibility.pausedOnly`) and that still holds
+a slot on the runner, a prompt whose own check gives the slot back. A restart hold and the
+wait for a runner are left out: a run they hold keeps its slot. A story
+waiting on its prerequisites waits in `pending`, entered from planning or
+editing before any run of it starts, so it has no slot to give back. The
+run workflow's parks, and a rebase's conflict, mark their own boundary
+`GateParked`: the check `receiveGateOrCancellation` runs on a hold-requested
+signal sends `HoldBoundaryCheckInput.GateParked`, and `runnerCapacityHold`
+asks nothing for it. `queueForRunnerSlot` enters no run acknowledged at its
+park with no decision delivered to it in a queue, so a release of a hold a
+park acknowledged signals the run instead; a run acknowledged after its
+gate's decision or its conflict's act, or held elsewhere while its story stays
+parked -- a PR reopen -- goes on to the runner once released, and is queued.
+A decision a park returns asks at its own boundary (`run:c<N>:human-gate-decision`
+or `run:c<N>:agent-stop-decision`) before `resumeFromGate`, whose reject resets
+the checkout on the runner (`ResetRejectedOnRunner`), and before any
+re-entry; its failure takes the park's error path, so a cancel while it waits
+is the park's cancel. It asks through `Admit`, which requeues the released
+row in the resume tier with the time of the ask.
+
 ### Go's availability row
 
 Clients learn whether Go is eligible from the `run` capability row
@@ -391,10 +840,11 @@ reads every acknowledgement, as the route's release visits every one: any run
 that cannot be read refuses, even when another is running; otherwise a running
 one is a resume and the checks after it do not apply, and a closed one is
 skipped), `runHumanGateRefusal`, the
-recovery-question and requirements-edit refusals, `noPipelineForwardRefusal`,
+recovery-question refusals, `noPipelineForwardRefusal`,
 and the run workflow's openness through `RunActivity` (an error refuses as
 unknown, never as running). A stored baseline failure keeps the row available
-with a `note`, and so does a current test, build or review judge-failure stop
+with a `note`, as does an unparsed baseline, whose note says Go refreshes the
+target and rechecks or re-runs the baseline, and so does a current test, build or review judge-failure stop
 with a complete record (`judgeResumeFor`, server records only: the note says
 Go retries that judge if the branch is unchanged, and the dispatch resumes
 from the same helper); agent preflight, the baseline fetch and recheck, and the
@@ -405,8 +855,8 @@ Each of the three reads shares one guard evaluation between its actions and
 this row (`fsm.WithGuardCache`). The detail and snapshot reads also memoise the
 run-workflow activity probe (`fsm.WithActivityMemo`), so the row reuses the
 probe their runtime status already made; the available-actions read has none to
-reuse. Runner liveness (the `no_active_runner` guard) probes through its own
-provider, outside that memo. Measured against the fake engine, the row adds at
+reuse. The `no_active_work` guard asks its owners through the same activity
+providers, so on those two reads it reuses that memo too. Measured against the fake engine, the row adds at
 most one run-workflow describe to a read, plus one exact-run describe per
 parked acknowledgement. Story Detail gates Go on this row alone (TUI `story_detail.py`,
 web `storyCaps`); Workstream Detail's G does not read it yet.
@@ -420,6 +870,20 @@ capability rows. The earlier `reserve` and `release` commands no longer exist:
 |---|---|---|---|
 | pause | `pause` | `hashd workstream pause` | `POST /workstreams/{id}/pause` |
 | unpause | `unpause` | `hashd workstream unpause` | `DELETE /workstreams/{id}/pause` |
+| replan (ready pause) | `replan` | `hashd replan` | `POST /workstreams/{id}/replan` |
+| reset (ready pause) | `reset` | `hashd reset` | `POST /workstreams/{id}/reset` |
+| close (ready pause) | `close`, `close_no_changes`, `close_by_person` | `hashd close` | `POST /stories/{id}/close`, `POST /workstreams/{id}/close` |
+
+Every other execution and structural-edit row is withheld while a pause
+stands (`withholdWhilePaused`). On a `ready` pause the replan and reset rows,
+and the close rows on workstream and story reads (`storyCloseAvailability`),
+pass it: they are evaluated as their routes evaluate them, with the held run
+passing `no_active_work` and the execution claim, and are offered when their
+other guards pass. Their routes end the pause through
+`requireWorkstreamUnpauser` and the unpause release path. On a `waiting` or `unknown` pause, or a surface that
+did not read readiness, they are withheld with the not-ready reason
+(`humanEditWriteReadiness`). Like the unpause row they name no holder. Saved
+edits and an open worktree reset still withhold them.
 
 The story's owner can move it while `pause_readiness` is `ready` with
 `hashd story runner set <story> <runner> -y`. The placement move leaves the
@@ -428,12 +892,39 @@ pause standing and does not resume execution. Unpause with the same
 remains, run `hashd run <story>` after unpausing. Saved edits still refuse a
 move even with discard confirmation, as do an open command occurrence or a
 live attempt. The destination rebuilds from the published branch; checkout state is
-never transported. If origin positively reports the feature ref absent,
-discard consent recorded on the current `workstream_placed` event permits
-rebuilding at the recorded base SHA, never today's base tip. Historical events
-grant no consent: preparation asks for the move to be repeated with `-y`.
-A confirmed repeat to the same runner records consent under the same guards
-without changing the placement epoch.
+never transported. Once the move commits, hashd removes the story's checkout, its branch and its stage files from the runner it left. If that runner is offline or revoked, or the removal fails or does not answer, the move still stands: its answer carries a warning, also recorded in the story's history, naming the runner, the checkout path and what was left, with the steps to remove them by hand. Test consoles retained on that runner stay there until the story closes. With no completed micro-commits and no origin story branch,
+the destination rebuilds at the recorded base SHA without discard confirmation,
+never at today's base tip. Completed work without a published branch refuses the
+move before placement changes, with guidance to configure origin if missing and
+publish the branch before retrying. The plan, branch and target repository are
+rechecked under the placement write lock. The in-progress micro-commit restarts
+from the published branch or recorded base, and checkout notices report the
+completed rebuild.
+
+Every completed micro-commit is published before its plan step is marked done,
+so runner loss or a move keeps completed progress without transferring local
+state (operator rulings, 2026-10-20 and 2026-11-06). Each push scans outgoing
+history for secrets. Commit-stage PR fixes and `hashd pr push` share
+`mergeflow.PublishPRBranch` in `pr_push.go`: rebase onto base under the existing
+rewrite decision, scan the resulting outgoing history, and push with a lease.
+The same sequence handles a base that advances before the push. If the rebase
+records a dropped patch already on base, a retry keeps the original commit as
+evidence and publishes the recorded result tip only while it is still the
+branch's current tip. Pre-PR checkpoint pushes retain their existing behavior
+and do not rebase.
+
+A closed occurrence whose original bindings still match may release its claim
+and record its failure even when a stop received no result to consume. Closure
+still forbids execution and consumption. Superseded executions may record their
+own ending as history, bound to their recorded run start; they cannot release a
+replacement claim, change current placement state or errors, or schedule a retry.
+Their history-only ending is published after commit to refresh live timelines,
+without raising an alert, an attention marker or a toast on today's placement.
+Moves retire earlier-placement run failures from current reads, preserving
+history, pending questions, review findings and human decisions. A move retains
+the old provisioning fault and its occurrence in the placement event while
+clearing that standing fault; pending baseline decisions remain. These writes
+apply to new endings; past missing endings are not backfilled.
 
 A workstream pause offers three writes besides its own release, each a
 capability row rather than an FSM trigger -- none moves the workstream:
@@ -614,21 +1105,37 @@ refusal, refuses the states the row does not leave from with
 the workstream into `rebasing` and dispatches `StoryRebaseWorkflow` under
 `rebase:{project}:{ws}` with the state it admitted from and `base_sha`; a
 failed dispatch returns it. The workflow runs the `story_rebase` whole stage's
-steps on the runner that holds the story (`runflow.StoryRebaseStep*`): rebase
-(`mergeflow.RunStoryRebase`: the story branch in its existing checkout, original
-tip and trees retained in refs, uncommitted work carried as commits, `syncBranchOntoAs` onto `ws.BaseBranch`
-as `OperationStoryRebase`, a stop left in place on a conflict), then -- at a
-conflict, on `StoryRebaseActSignal` -- resolve or continue
-(`mergeflow.RunStoryRebaseContinue`, the agent or the operator's fix), then
-land (`mergeflow.LandStoryRebase`: lease push first, branch, unwind,
-cleanup). Any ending but a landing runs undo (`mergeflow.UndoStoryRebase`) on
-a disconnected context. The stage's substage is its newest `stage_changed`
+steps only after the FSM admits them: `active` has no `start_rebase` edge, and
+`implementing` requires `no_unfinished_implementation`. That guard reads the
+retained implementation checkpoint and its plan step; Git reconciliation alone
+does not finish an attempt. Its refusal names the attempt and the working
+recovery actions, without an independent endpoint or client check. The workflow
+runs its steps on the runner that holds the story (`runflow.StoryRebaseStep*`): rebase
+(`mergeflow.RunStoryRebase`: the story branch in its existing checkout, the
+original tip retained in refs, uncommitted work made one hashd-made WIP commit
+before replay -- a `carry_uncommitted` intent, trailer `Hashd-Carried-Work`,
+never pushed -- then `syncBranchOntoAs` onto `ws.BaseBranch` as
+`OperationStoryRebase`, replaying commits only, a stop left in place on a
+conflict), then -- at a conflict, on `StoryRebaseActSignal` -- resolve or
+continue (`mergeflow.RunStoryRebaseContinue`, the agent or the operator's fix),
+then land (`mergeflow.LandStoryRebase`: lease push of the WIP commit's parent
+only, then a soft reset of the WIP commit -- `carry_uncommitted_unwind`, the
+branch moved to the rebased tip with index and files untouched, so the work
+comes back staged with its files unchanged -- then cleanup). The conflict agent
+resolves across files and continues the whole rebase. Git's exec step captures
+its rewritten pairs in the worktree's Git directory, regardless of who
+continues; agent-driven replay retains complete origins without claiming
+unchanged review coverage. A failed or interrupted AI resolve aborts and
+retries from the rebase's input tip (the WIP commit, or the original tip),
+without restoring an exact stop. Recovery refs preserve the original committed
+and uncommitted work. Any ending but a landing runs undo
+(`mergeflow.UndoStoryRebase`) on a disconnected context, which restores the
+pre-rebase tip with the work uncommitted. The stage's substage is its newest `stage_changed`
 row (`fsm.RebaseConflictWaiting`), which the guard and runtime status read
 (`fsm.RebaseActivity`: working is running, waiting is blocked). The workflow
-leaves the stage with `StoryRebaseLeave` (`mergeflow.LeaveStoryRebase`), moves
-`base_sha` to the rebased onto commit (`StoryRebaseRecordBase`,
-compare-and-swap on the dispatched value) and records each verdict as a
-`story_rebase` operation result. Close ends a rebasing story's rebase first
+accepts a landing by atomically moving `base_sha`, taking the existing return
+edge and recording its `story_rebase` result. An undone rebase leaves through
+`StoryRebaseLeave` (`mergeflow.LeaveStoryRebase`). Close ends a rebasing story's rebase first
 (`endStoryRebase`); a cancel of a rebase whose workflow is gone dispatches
 one with `UndoOnly`.
 
@@ -658,7 +1165,38 @@ the latest final review's state (`review.FinalReviewState`, which the snapshot's
 recorded equals `review.FinalReviewChangeHash` of the branch over its merge
 base now (`changehash.Compare`). The change hash leaves out context and line
 numbers, so a clean rebase keeps the review current and only a change to the
-story's own patch makes it stale. A placed workstream's runner reports the
+story's own patch makes it stale. Two writers may link the reviewed patch to a
+changed one with an operation result carrying `automatic_rebase_recovery`
+(`review.AutomaticRebaseRecovery`, before and result change hashes), which the
+currency walk chains from the reviewed hash: a fully verified AI conflict
+resolution (`ai_resolve`), and the merge gate's own changes
+(`merge_gate_changes`, `review.MergeGateChangesRecord`), recorded by each gate
+phase that ends without a stop and each ownership heal that commits, from the
+hash read as it entered, under the gate's claim, to the hash of the head it
+left. So a rebase and the gate's own commits (migration renumber, regeneration,
+whitespace fix, owned-file regeneration, and the verify phase's
+`merge_doc_update` documentation commit) do not make an approval stale; any
+change between the approval and a link's entry hash breaks the chain. In
+`spec_mode repo` when the configured merge mode is PR, the merge gate's verify
+phase (`MergeGatePhaseVerify`) writes the story's SPEC update and, when the
+requirements destination is the lane's repository and base branch, its REQS
+burn as one ordinary lane commit (`merge_doc_update`) in the lane checkout,
+after any verify-phase rebase and before the full test, holding no merge lock.
+The full test then runs on the tree containing that commit, the PR carries it,
+and `merge_gate_changes` keeps the approved final review current across it. The
+step writes nothing in other spec modes or merge modes, in the prepare or
+legacy whole-gate phases, when `HEAD` is already a `merge_doc_update` commit
+(including a clean replay), or when nothing is staged; a REQS destination in
+another repository or branch is left untouched. Before any rebase hashd runs on
+a lane, if the lane's tip is a hashd `merge_doc_update` commit that would not
+apply cleanly on the rebase target, hashd drops that tip before rebasing the
+lane's other commits; a docs tip that applies cleanly stays and is replayed, a
+docs commit buried under any later lane commit is treated as ordinary history,
+and the docs are written again at the next merge gate (or inside the merge
+hold when the drop happened there). The gate
+link is recorded as `code_change` without the `code_change` payload key, so it
+is neither a surface nor the fault broom, and no client can record either
+link (`POST /events` refuses the key). A placed workstream's runner reports the
 branch's change hash with each accepted stage result
 (`workstreams.runner_branch_diff_identity`). A recorded hash that is missing or
 not computed is not current; a guard that cannot compute the hash now refuses
@@ -671,8 +1209,8 @@ and help naming `hashd run <ws>`, and the TUI, Web, bot and CLI controls,
 none of which checks currency itself. Its negation, `final_review_not_current`,
 guards the `rerun_final_review` self-loops at `ready_to_merge`, `pr_open` and
 `pr_approved`, with
-`no_active_runner` and `no_active_publish` (a PR create keeps the workstream
-at `ready_to_merge` while it rebases and pushes), which is a
+`no_active_work` (a PR create keeps the workstream at `ready_to_merge` while
+it rebases and pushes), which is a
 pipeline-forward trigger: `hashd run` from those states without a current
 final review dispatches a run that re-runs the merge gate (reusing a recorded
 pass for the same tree) and the final review. The trigger is never fired and
@@ -690,13 +1228,17 @@ unpublished local commits from `pr_open` / `pr_approved` (`hashd pr push
 (`routePROpen`) on the stored `pr_watch` snapshot, never a forge call. That
 refuses a change request and a PR the forge does not report ready, and admits
 everything the merge handles itself: a conflict (rebased), mergeability not
-computed yet (waited out: at the `pr_open` check every
-`pr.watch.interval_active` (`PRVerdictAwaitForge`), and inside the locked merge
-after its own force-push on the forge-write retry schedule -- 2, 4 and 8 s,
-`PushRetryBackoffTotal` -- the activity already budgets while it holds the
-merge lock (`awaitPushedMergeability`); still unanswered after that, the merge
-stops at `pr_open` naming the waits and their total), a PR merged or closed on
-the forge. It decides only
+computed yet (the row a backend reports for it: [FORGES.md](FORGES.md),
+section 4; waited out: at the `pr_open` check every
+`pr.watch.interval_active` (`PRVerdictAwaitForge`), and inside the locked PR
+merge whenever its pre-merge read is blocked only by uncomputed mergeability at
+the read's head, pushed by this merge or not: it asks the forge again every
+10 s for at most 4 min (`awaitMergeability`), holding the merge lock and its
+preparation, each read re-recording the `pr_merge` stamp, all inside the
+existing bounds (WF.md, **Deadline inventory**, `pr_merge_mergeability_wait`);
+still unanswered after that, the merge records a blocked forge notice naming
+`hashd merge <id>` and returns the lane to where it was dispatched from, not
+from `pr_approved` to `pr_open`), a PR merged or closed on the forge. It decides only
 when the snapshot is of the PR's current published head (`origin/<branch>`)
 and its watch is running; no snapshot, one of another head, or a stopped
 watch's (idle past `pr.watch.max_age`, disabled, or off its PR -- nothing reads
@@ -718,7 +1260,7 @@ A `merged` workstream's merge row is `start_merge`, the self-transition
 `merged -> merged` (`mergeflow.MergeAdmissionEdge`). It maps to the same
 `POST /workstreams/{id}/merge` (`hashd merge <ws>`), which re-runs the
 post-merge archive from its checkpoint. It is available when the FSM guards
-pass and no merge workflow runs (`no_active_merge`); the route rows keep its
+pass and no merge workflow runs (`no_active_work`); the route rows keep its
 verdict and carry the note that the route is not used. While the archive is
 unfinished (WF.md, **Unfinished archive**), `GET /stories/{id}` serves the
 same three rows under `archive_unfinished.available_actions`, built by the
@@ -729,6 +1271,63 @@ When the PR check observes a forge-side merge, it records the landing and
 archives through the merging sub-FSM's `pr_merged_externally` edge from
 `await_pr_approval` to `finalize`. It does not run the local or approved-PR
 merge steps to enter finalization.
+
+PR settings and the per-request merge strategy override are held to the
+backend's capability check: strategy, source deletion and completion mode
+(what each backend honours: [FORGES.md](FORGES.md), section 5). The override
+changes no project setting.
+
+Before source cleanup, the archive completes PR landing evidence after its
+existing credentialed target fetch. In `spec_mode repo` for a PR landing
+(`state.Landing.MergeMode == forge.MergeModePR`, hashd-, forge-, or
+person-merged, `External` included), `runArchiveWorkstream` runs
+`completeLanding` against `p.RepoPath` before SPEC registration and decides
+each artifact from that landing without adding any archive state, wire, or
+stored field: SPEC is skipped (no registration, no `UpdateSpec`) when
+`d.FixupCommits(...).Records.IntentOperation(landing.SourceCommit)` (served for
+`merge_archive` by `mergeRecordsContext`) returns `merge_doc_update`; REQS is
+skipped only when the requirements destination is `p.Repository` and
+`p.BaseBranch` and `git show` on the already-fetched objects in `p.RepoPath` at
+`landing.TargetCommit` and the landed commit (`MergeSHA`, or `SquashCommit` for
+a squash) shows `reqs.RemoveStorySections` extracting the story's text at the
+target and finding none at the landed commit, in which case `state.Burned`
+carries that text and `DeleteRequirements` and `AppendDescopedToReqs` are
+skipped. When nothing remains to write, archival completes without committing
+or pushing to the base branch. Any undelivered artifact, any unestablished
+landing (missing landing, empty `SourceCommit` or `TargetCommit`, or failed
+read), REQS in another repository or branch, direct merges, and `spec_mode`
+`local`, `external`, and `none` keep the existing post-merge writer unchanged.
+`RecoverPRMergeLanding` rereads the forge
+when source, final merge, authoritative strategy or squash identity is missing,
+even when both source and final merge were already pinned. Established facts
+and captured origins survive replay; a requested strategy alone does not
+establish completion. The runner checkpoints the complete source observation
+and delivers it through `FixupCommits.RecordSquashTransformation` and the shared
+transactional transformation writer. An interruption after storage reuses that
+record without duplicating rows. The enriched `merge_landed` record retains
+both the squash identity and the forge's final merge identity; the
+transformation's result tip remains the squash commit. Every source origin is
+`combined`, including a fully observed one-commit squash; local merges retain
+their existing `merged_in` semantics.
+
+Missing objects, incomplete observations, hard transport limits and storage
+failures retain the existing `commitrecord.transformation` diagnostic rather
+than claim successful lineage. These records are evidence of an already landed
+merge: failure to record them does not prevent story closure or source cleanup.
+The archive owns recovery through its existing checkpoint, with no separate
+retry ledger or per-forge reconstruction path.
+
+The shared runner transformation callback checks the encoded squash delivery
+against the issued call-report limit before sending it. A refusal sends an
+undetermined failure with pinned identities through the same durable note
+writer, so direct completion, external reconciliation and archive can continue;
+it never delivers a truncated transformation as successful evidence. Archive
+measurement and recording failures apply only to that attempt's recording copy,
+leaving checkpointed origins available for a later successful retry.
+The following landing write checks the same delivery limit. If the full
+landing cannot be delivered, it retains the complete checkpoint and emits the
+existing `merge.landed_verification` failure instead of cancelling finalization
+or sending partial landing evidence.
 
 `hashd merge <ws> --abort` recovers a dead merge through the same endpoint:
 `POST /workstreams/{id}/merge {abort:true}`. It runs the housekeeping sweep's
@@ -747,6 +1346,12 @@ anything in Temporal. When the merge is dead, the `merging` refusals of
 `hashd merge` (`dispatch.merge.already_running`) and `hashd run`
 (`dispatch.run.no_pipeline_forward`) add the help line
 `hashd merge <ws> --abort`; otherwise they are unchanged.
+The sweep's elapsed-age failsafe skips an `acquire_lock` stamp while the
+workstream's `merge:{project}:{ws}` execution is running, or cannot be read:
+a queued merge waits for its turn without bound, and its age says nothing
+about whether it is alive. `runner_stages.acquire_lock.timeout` applies only to
+an orphaned stamp, whose merge workflow is not running; that stamp is failed
+and judged as above. Every other merging substage stays eligible on age alone.
 
 AI resolve follows where the merge gate left the workstream, not the mere fact
 that the gate failed: `rebase` and `conflict` park at `merge_conflicts`, where
@@ -754,7 +1359,58 @@ that the gate failed: `rebase` and `conflict` park at `merge_conflicts`, where
 reached any file -- parks back at `active`, where resolve 409s and run is the
 working verb. WF.md's merge-gate section owns the two shapes.
 `verify_failed` parks at `merge_test_failed` (`post_rebase_test_failed`),
-where `start_resolve` is offered too. The run's gate maps no exit state for
+where `start_resolve` is offered too. `fixed` (`runflow.MergeGateFixed`) maps
+no exit state either: its stage move is in the FIX's own append. The runner's
+`merge_gate_fix` plan write (`stageMergeGatePlan`, then
+`runflow.RecordAutomaticMergeGateFix`) binds the FIX and, from
+`ready_to_merge`, `final_review_with_concerns`, `pr_open` or `pr_approved`,
+moves the workstream to `implementing` by the internal, unguarded
+`start_merge_gate_fix` (`handOffAutomaticFix`). The `state_changed` row is in
+that same assignment-fenced transaction and is published after commit. A
+forge_autocomplete auto-merge is cleared before the write. The run's next
+select then starts the FIX with no hand-off of its own. A FIX bound undone at
+one of those states with no such move takes `handOffBoundFix` at select: the
+bound-FIX admission, then `SelectAPI.StartFix` (`start_merge_gate_fix`, the
+server's runner transition clearing the auto-merge first through
+`clearAutoMergeBeforeFixHandOff`, then moving the stage and writing its
+`state_changed` row in one transaction, `runflow.RecordBoundFixHandOff`,
+published after commit). A plain `hashd run` at `ready_to_merge`, `pr_open`
+or `pr_approved` with no pipeline-forward action keeps
+`dispatch.run.no_pipeline_forward` (`noPipelineForwardRefusal`, which the
+dispatch and the `run` row both ask) unless it is dispatched with
+`--run-anyway` or carries a clarification answer
+(`clarificationAnswerResumesBoundFix`). The operator's `add_commit` (whose
+contract rows return `ready_to_merge` and `merge_test_failed` to `active`) and
+`add_fix_commit` keep `no_active_work`, which the live run would fail. The
+repaired lane's completion leaves the stage at `implementing` until it is
+verified: `runflow.ReconcileMergeReadyPR` returns its forge observations with
+`ReadinessDeferred` and writes neither `EnsureReadyToMerge` nor
+`EnsurePRTrackingState` (an external merge still lands `merged`, straight
+from `implementing` by the internal `github_merged`; the server's
+`stageExternalMergeTransition` records every external merge's `state_changed`
+row in the transition's write, published after commit, and the runner sends
+none), and
+`runflow.HandleFinalReviewConcerns` decides a concerns verdict there as at
+`ready_to_merge` (`final_review_concerns` from `implementing`, internal), its
+park and FIX round refused unless the deciding run still holds the claim. The
+FIX round moves `implementing` -> `active` by the internal, unguarded
+`add_fix_commit` through `fsm.TransitionWorkstreamWithPlan` (`FixAppend.Transition`),
+its `state_changed` row in the FIX's transaction, published after commit.
+After the approval, verification and currency, the outer leg publishes the
+verified head to an open PR in either lane order, then its
+`RunnerRecordRepairReadiness` (`runflow.RecordRepairReadiness`) moves
+`implementing` -> `ready_to_merge`, or -> `pr_open` when the PR is open, by
+the internal `merge_gate_fix_verified` with its `state_changed` row in one
+transaction, keyed to the run's claim (`ErrRunnerClaimSuperseded`
+otherwise), published after commit, before the passed row and
+`run_complete`; a refusal fails the run through the gate's failure exit. A
+retry after that verification failed (`merge_test_failed`) or was blocked
+(`active`) finds the repair done at select, which returns it to
+`implementing` before the reconcile by `SelectAPI.StartFix`
+(`start_merge_gate_fix`, internal, `runflow.RecordBoundFixHandOff` with its
+`state_changed` row in one transaction). The FIX's append at `active` makes no
+such move. The
+run's gate maps no exit state for
 `agent_stop` (`runflow.MergeGateAgentStop`), the stops an agent's own output
 caused: a failed automatic FIX, a branch build break the adjudicator did not
 rule FIXABLE, verification still failing after the story's automatic FIX --
@@ -773,7 +1429,10 @@ When the run pinned `agentStopLandingChange` at its start (carried on
 `RunnerCycleInput.AgentStopLanding` to every cycle for the other landings), the
 workflow sets `RunnerMergeGateInput.AgentStopLanding`, and the driver returns that status in
 place of `verify_failed` when the workstream is at a source of
-`await_review` (`implementing` or `active`); the gate emits no blocked for it.
+`await_review` (`implementing`, `active`, or the merge-ready states `ready_to_merge`,
+`pr_open` and `pr_approved`, whose edges are internal and never offered as a
+verb); the gate emits no blocked for it. Parking from a PR state withdraws a
+`forge_autocomplete` auto-merge first, as the gate's other exits do.
 `runAllCompleteLeg` clears the `merge_gate` stamp (`clearStage`, not the
 preserving release) and hands the stop to `WorkstreamRunWorkflow`, which parks
 it through `parkAgentStop` with `stop_origin = merge_gate`. Approve there is a
@@ -872,7 +1531,9 @@ reconciliation. This is an observation at publication, not an immutable backup
 or a replacement for the merge-time head check above. Earlier stages still
 run locally without requiring publication; dirty-source recovery is separate.
 
-**Test verdict cache.** A project test command's verdict is recorded under the project's `gate-receipts/` directory, one file per key. The key is the git tree of everything the command could observe (tracked changes and non-ignored untracked files, written through a scratch index so the worktree and its index are untouched), the argv with its working directory relative to the worktree root, and the resolved path and content digest of the executable argv[0] names there. Workstream, branch, destination SHA, worktree path and timeout are not part of it, nor is HEAD outside the clean-HEAD form below. When the per-commit fast check recorded the verdict, the key also carries the sha256 of the touched-file list it was handed: such a verdict is reused only for the same command, content and touched set, and never matches a full-command lookup. When the command ran with an `exec.env` (the project's, with a multi-repo target repo's over it by name), the key also carries the sha256 of its names each with the sha256 of its value, never a value: a pass recorded under one `exec.env` is never reused for a run under another, and a key with no `exec.env` is the key it was before `exec.env` existed. When it ran with `exec.credentials` bindings, the key also carries the sha256 of their names and credential keys, never a value, and the store neither reuses nor records a verdict under such a key; the key still names the checkout, which the merge gate's judge-requested re-run compares before it runs: the checkout must still be the tested content the failed verification's key named. A checkout whose tree cannot name its content (a `.gitattributes` file or a converting attribute, `core.autocrlf` other than false, `core.filemode=false`, `core.symlinks=false`, `core.ignoreCase=true`, an assume-unchanged or skip-worktree index entry, or a submodule gitlink) is keyed by its HEAD commit instead, and only while the tree the worktree holds, written the same way through a fresh scratch index from every non-ignored file's bytes, is HEAD's tree; no stat data is consulted. A checkout with `core.ignoreCase=true`, whose tree would fold a new path into a tracked one, is never keyed that way. That key also carries a fingerprint of every HEAD path as it sits on disk, read without git's conversions (a file's bytes and permission bits, a symlink's target, and a checked-out submodule's own clean HEAD and fingerprint taken the same way; any other gitlink state is a miss), so an unchanged checkout still reuses a pass and any uncommitted byte is a miss, including one git normalises away (a line ending). A verdict is recorded only for a run that completed and left the key unchanged, with its complete redacted output, its duration and where and for which workstream it was recorded. The latest verdict for a key wins, and only a pass is reused: a recorded fail never short-circuits a run, and a pass is reused only within seven days of recording and when its recorded duration fits the reusing site's test timeout. Expired receipts are ignored, not pruned. The merge gate's suite and its post-rebase leg, and post-rebase verification on the landing, PR and resolve paths (the gate's command and test-kind required checks), read and write the cache; build commands are never cached. The merge gate's suite, post-rebase tests and required test checks collect the repo's build adapter facts as the test stage does, before side-effect cleanup. Required checks always execute as project commands without verdict lookup or recording; a failure whose every failing test the workstream's baseline recorded before the story, named from those facts alone (never the console output, and never on incomplete facts or on build-unproven facts without a build that passed on the same content), parks with no judge, FIX or recovery question and is offered to go-anyway through the `run_anyway` availability row, whose acceptance (`workstreams.merge_gate_acceptance`, the tests and tested revision) the next gate honours for exactly those failures at that revision ([WF: Merge-Gate Recovery Decision](../WF.md#merge-gate-recovery-decision)). The merge gate's judge-requested re-run of a suite or post-rebase test failure runs through the cache without reuse, so its verdict replaces the failed one; its re-run of a post-rebase build or a required check runs as a project command, uncached ([WF: Merge-Gate Recovery Decision](../WF.md#merge-gate-recovery-decision)). Narrowed post-rebase verification reads the store twice: before the rebase it looks up a full-command pass for the pre-rebase tree as its proof, and its fast check reads and writes its verdict under the fast-check key. The per-commit test stage's test phase reads and writes it too, for the impl-phase test command and an automatic FIX's test-kind required verification, keyed by the argv run from the worktree root; its build phase and a build-kind required verification are not cached, and a run that exits non-zero but passes through baseline exclusion is recorded as a fail. The committed-breakage probe and the merge-gate base comparison read and write it as well. They look up the revision they would test before creating their throwaway worktree, with the key a fresh checkout of that revision would get, computed without a checkout; the lookup is a miss, and the site creates its worktree and runs, when that revision would be keyed by clean HEAD (a `.gitattributes` file or a converting attribute or setting, case folding, or a submodule gitlink) or when argv[0] resolves to a path inside the checkout. A verdict's provenance records which key form it used. Every reuse records a `test_verdict_reused` timeline row naming the command, the key form and its tree or HEAD commit, where and by whom the pass was recorded, and when. A reuse whose row cannot be recorded is not a reuse: the command runs as on a miss. A pass recorded by a runner other than a stage is reported by that runner and trusted on reuse. `hashd test [--] <command...>` also writes the cache: it runs the command in the current directory of a git worktree, computes the key before and after the run with the same key function, and posts a completed run whose key did not change to `POST /test-verdicts` with site `hashd test`. A report whose key carries a touched-file digest or an `exec.env` digest is refused, since `hashd test` never computes one: it runs the command in the caller's own environment, without the repo's `exec.env`. Its pass is reported by whoever ran it. The server attributes such a verdict only from records it holds, and the two attributions have separate conditions. The workstream is attributed when the request's forwarded run identity names a workstream whose live `runner_run_id` is that run; otherwise the verdict is attributed to no workstream and no commit. The commit is attributed, on top of that workstream, only when an implement-stage invocation is registered for it and its recorded micro-commit selection resolves; a live run outside implement, or one without a selection, keeps its workstream attribution with no commit.
+In approved-PR chute verification, including preparation without a new rebase, each configured build, fast, full or required command that exits normally with a nonzero status runs once more immediately through `RunProjectCommand`. The repeat keeps the same checkout, HEAD, argv, environment and fast-check handoff under the existing merge lock and timeout policy. No fetch, rebase, classification, regeneration commit or side-effect restoration occurs between executions. A passing repeat continues verification; two failing exits stop through `FailPostRebaseTest` in `merge_test_failed`, with a structured diagnostic naming the command and both failures. A twice-failing fast check never substitutes the full suite or runs a third time. Both executions retain distinct references, complete console captures and individual outcomes even when the repeat passes; evidence-delivery errors fail explicitly. Cancellation, timeout, credential refusal, signals and launch failures keep their existing handling and never initiate a repeat. Other verification modes and other fast-selection fallback reasons are unchanged. This is local command verification, not a Temporal retry or a restarted preparation.
+
+**Test verdict cache.** In the approved-PR chute (`RunMergeApprovedLocked`), a clean rebase selects only the configured build, or no ordinary proof when the build is unconfigured or explicitly skipped. This local execution policy precedes file selection, migration-triggered full-proof rules and ordinary fast/full settings. Migration preparation and review stops still run, and the existing document-only exemption keeps its eligibility and omits the build too. Successful chute AI conflict resolution selects the configured build followed by the target repository’s `fast_test_cmd`, falling back to the existing full merge-gate command when no fast command is configured. This selection needs neither a fresh pre-rebase full-command receipt nor permission from ordinary fast/full settings. It reuses the both-sides touched-file handoff, fast verdict keys; a narrowed fast pass cannot discharge an unrestricted required command, even with identical argv. Resolution provenance is recorded only after the selected verification succeeds. Standalone recovery, earlier merge-gate verification, resolution eligibility and attempt counts remain unchanged; paths outside the chute keep their existing behavior. Further clean preparations in the same hold retain the earlier full-test proof as evidence without requiring a full-command receipt for each rebased tree. A preparation that needed no rebase reuses a recorded pass of the merge-gate test command for exactly the content the branch holds, and runs the command only when none is recorded. A command that runs there still validates its exit tree, so a pass on content the command changed is not recorded for reuse. The build uses the existing regeneration handling. Required commands remain independent: each preparation refreshes durable obligations, executes unpaid commands through the shared required-check loop and discharges only the commands actually paid. A build-only pass neither claims a full-command verdict nor retires unrelated failures. The `post_rebase_check` timeline and attempt evidence name the selected build or no-proof policy and the actual command executions, without manufacturing a full-test pass. A project test command's verdict is recorded under the project's `gate-receipts/` directory, one file per key. The key is the git tree of everything the command could observe (tracked changes and non-ignored untracked files, written through a scratch index so the worktree and its index are untouched), the argv with its working directory relative to the worktree root, and the resolved path and content digest of the executable argv[0] names there. Workstream, branch, destination SHA, worktree path and timeout are not part of it, nor is HEAD outside the clean-HEAD form below. When the per-commit fast check recorded the verdict, the key also carries the sha256 of the touched-file list it was handed: such a verdict is reused only for the same command, content and touched set, and never matches a full-command lookup. When the command ran with a project environment (the project's entries, with the target repo's over them by name), the key also carries the environment's digest, the sha256 of its entries' names, types and versions, never a value: every write to an entry gives it a new version, so a pass recorded under one environment is never reused for a run under another, and a key with no entries carries no digest. When the environment has a secret or a credential entry, the key carries the digest a second time as its credentials mark, and the store neither reuses nor records a verdict under such a key; the key still names the checkout, which the merge gate's judge-requested re-run compares before it runs: the checkout must still be the tested content the failed verification's key named. A checkout whose tree cannot name its content (a `.gitattributes` file or a converting attribute, `core.autocrlf` other than false, `core.filemode=false`, `core.symlinks=false`, `core.ignoreCase=true`, an assume-unchanged or skip-worktree index entry, or a submodule gitlink) is keyed by its HEAD commit instead, and only while the tree the worktree holds, written the same way through a fresh scratch index from every non-ignored file's bytes, is HEAD's tree; no stat data is consulted. A checkout with `core.ignoreCase=true`, whose tree would fold a new path into a tracked one, is never keyed that way. That key also carries a fingerprint of every HEAD path as it sits on disk, read without git's conversions (a file's bytes and permission bits, a symlink's target, and a checked-out submodule's own clean HEAD and fingerprint taken the same way; any other gitlink state is a miss), so an unchanged checkout still reuses a pass and any uncommitted byte is a miss, including one git normalises away (a line ending). A verdict is recorded only for a run that completed and left the key unchanged, with its complete redacted output, its duration and where and for which workstream it was recorded. The latest verdict for a key wins, and only a pass is reused: a recorded fail never short-circuits a run, and a pass is reused only within seven days of recording and when its recorded duration fits the reusing site's test timeout. Expired receipts are ignored, not pruned. The merge gate's suite and its post-rebase leg, and post-rebase verification on the landing, PR and resolve paths (the gate's command and test-kind required checks), read and write the cache; build commands are never cached. The merge gate's suite, post-rebase tests and required test checks collect the repo's build adapter facts as the test stage does, before side-effect cleanup. Required checks always execute as project commands without verdict lookup or recording; a failure whose every failing test the workstream's baseline recorded before the story, named from those facts alone (never the console output, and never on incomplete facts or on build-unproven facts without a build that passed on the same content), parks with no judge, FIX or recovery question and is offered to go-anyway through the `run_anyway` availability row, whose acceptance (`workstreams.merge_gate_acceptance`, the tests and tested revision) the next gate honours for exactly those failures at that revision ([WF: Merge-Gate Recovery Decision](../WF.md#merge-gate-recovery-decision)). The merge gate's judge-requested re-run of a suite or post-rebase test failure runs through the cache without reuse, so its verdict replaces the failed one; its re-run of a post-rebase build or a required check runs as a project command, uncached ([WF: Merge-Gate Recovery Decision](../WF.md#merge-gate-recovery-decision)). In the approved-PR chute alone, a clean rebase of a proven pre-rebase tree onto a target whose every change since the tip's fork point is a workflow-owned REQS/SPEC file (`specArtifactFiles` under `SpecMode.OwnsRepoArtifacts`, one `git diff-tree --no-renames` over the whole range, failing closed) is not verified at all: `DecidePostRebaseCheck` returns `document_only` after recovery, conflicts and the migration step and ahead of `workflow.post_rebase_test`, `gates.commit_check` and `fast_test_cmd`, and the verification runs only recorded repair checks. It reads no verdict beyond the proof and records none -- the keys are unchanged, so the documents stay part of tree identity -- and its `post_rebase_check` row (gate `document_only`) names the retained proof, the covered and new target revisions and the paths ([WF: Post-rebase check](../WF.md)). Every later preparation in the same hold of `RunMergeApprovedLocked` -- both `prepareAgain` paths, the behind-base push refusal and the base re-read before the forge merge -- takes it too: the loop keeps the exemption it was last verified by (`retainedDocumentOnly`: the proof, its covered target revision and the head the preparation left) in a local, never stored, and when `ProvePreRebasePass` finds no fresh proof but the pre-rebase tip is that head, the retained proof stands and the range runs from its covered revision to the new target (`documentOnlyAdvanceFrom`). Any other verification clears it; an activity retry starts again from the first preparation's lookup. The rule is pinned per attempt the way automatic rebase recovery is: `runPRApproved` sets `RunnerMergeInput.DocumentOnlyTargetExemption` on the lock input from a `workflow.GetVersion` change before `AcquireMergeLock`, and the runner reads it from that recorded stage input, never from its own binary version, so an attempt whose history predates the change keeps its original proof rules through replay, activity retries and every later preparation in its hold. The local merge leg records no such marker. Every other narrowed post-rebase verification reads the store twice: before the rebase it looks up a full-command pass for the pre-rebase tree as its proof, and its fast check reads and writes its verdict under the fast-check key, whose touched-file digest covers the both-sides list the merge gate's post-rebase fast check is handed -- the branch's own paths against the new merge base and the base's paths between the merge bases either side of the rebase -- so a verdict recorded against either side's list alone never matches it. When the fast check is selected, that proof also comes in a paired form for the plan's last micro-commit M: a passing test-stage run of the merge gate's own command for the workstream whose execution names M (the full leg), paired with a later passing test-stage fast-check run for the same workstream and M keyed to exactly the tree the rebase judges (the fast leg), both records admitted under the store's own reuse rules -- age, timeout fit, exec environment. The fast leg's tested commit must be the judged commit's parent, and the full leg's that same commit or a branch head the workstream's recorded clean sync rebases alone carried to it (`LookupStageMicrocommitPass`'s carried answer for the parent). A carried full leg pairs only with a fast leg handed both sides' paths, the base's taken from the merge base the full leg's tested commit sat on: the proof keys the judged tree's fast check with that list, as the test stage keyed the fast check standing in for the carried pass, so a fast pass handed the branch's paths alone never matches. The judged commit is also cross-checked against the newest commit the project's chain recorded for M, so it is M's own commit and not any replacement that merely shares the pair's tree and parent, and a rebase between the two passes that was not a recorded clean sync rebase, a rebase between the fast leg and the judged tree, or one over the recorded commit breaks the pairing. The fast leg's execution must carry the test stage's fast-check site, so a fast pass any other site recorded never pairs. A verification that narrows on the pair records one `test_verdict_reused` row naming both of its passes and, for a carried full leg, the rebase range it was carried across: its tested commit and the judged commit's parent. For the merge gate after a clean rebase, that is what counts as full evidence: the pre-rebase full pass -- or the pair, a carried one included -- plus the passing both-sides fast check on the rebased tree, whose acceptance is recorded by a `test_verdict_reused` row naming the full pass (the pair's row, or a single proof's own naming the full pass and the fast pass that rests on it); the gate then runs its other checks -- whitespace fix, up-to-date, diff and conflict-marker checks -- and finishes -- required verification, secret scan, Ready -- without running its suite again on the rebased tree, unless those checks commit over it (a whitespace normalisation): the suite then judges the head they ship, as at entry. The per-commit test stage counts the same evidence for the plan's last undone micro-commit after clean sync rebases ([WF: Phase 2: Implementation](../WF.md#phase-2-implementation), **Fast check in the test stage**): that micro-commit's full pass recorded on an earlier branch head that the workstream's recorded clean sync rebases alone carried to the head the stage runs on (`LookupStageMicrocommitPass`'s carried answer), plus a passing fast check on that head handed both sides' paths, the base's taken from the merge base the pass's tested commit sat on to the current one, so the chain's whole range is one list under one fast-check key. The stage narrows only on the merge gate's post-rebase decision (`DecidePostRebaseCheck`) with that pass as the proof and the migrations both sides added across the range read as the migration step reads them (`MigrationsAcrossRebase`, over the merge bases the list was taken between), and accepts its passing fast check only once a `test_verdict_reused` row naming the carried pass, the fast check's pass the verdict store retained and the range the full pass was carried across -- its tested commit and the head -- is recorded; a full decision or a list that cannot be taken or carried runs `merge_gate_test_cmd` on the head, and a fast check that fails or cannot resolve its test target, or whose pass is not retained or whose row cannot be recorded, is followed by it on the same tree, executed either way rather than answered from a recorded pass, and that run is the head's own full pass. The merge gate's own suite, when it needs no rebase, accepts the same pair, a carried one included, in place of running its command: a full pass recorded for exactly the tree it judges is reused as always, and when none is, the pair stands in, recording the same row and leading the gate's stage log with the same note. The gate's judge-requested re-run, a recovery verification and a FIX's required-verification command never consult the pair, and a pair-answered suite does not discharge a pending required verification: its recorded command runs even when it matches the configured suite. The per-commit test stage's test phase reads and writes it too, for the impl-phase test command and an automatic FIX's test-kind required verification, keyed by the argv run from the worktree root; its build phase and a build-kind required verification are not cached, and a run that exits non-zero but passes through baseline exclusion is recorded as a fail. The committed-breakage probe and the merge-gate base comparison read and write it as well. They look up the revision they would test before creating their throwaway worktree, with the key a fresh checkout of that revision would get, computed without a checkout; the lookup is a miss, and the site creates its worktree and runs, when that revision would be keyed by clean HEAD (a `.gitattributes` file or a converting attribute or setting, case folding, or a submodule gitlink) or when argv[0] resolves to a path inside the checkout. A verdict's provenance records which key form it used. Every reuse records a `test_verdict_reused` timeline row naming the command, the key form and its tree or HEAD commit, where and by whom the pass was recorded, and when. A reuse whose row cannot be recorded is not a reuse: the command runs as on a miss. A pass recorded by a runner other than a stage is reported by that runner and trusted on reuse. `hashd test [--] <command...>` also writes the cache: it runs the command in the current directory of a git worktree, computes the key before and after the run with the same key function, and posts a completed run whose key did not change to `POST /test-verdicts` with site `hashd test`. A report whose key carries a touched-file digest or a project environment digest is refused, since `hashd test` never computes one: it runs the command in the caller's own environment, without the project's entries. Its pass is reported by whoever ran it. The server attributes such a verdict only from records it holds, and the two attributions have separate conditions. The workstream is attributed when the request's forwarded run identity names a workstream whose live `runner_run_id` is that run; otherwise the verdict is attributed to no workstream and no commit. The commit is attributed, on top of that workstream, only when an implement-stage invocation is registered for it and its recorded micro-commit selection resolves; a live run outside implement, or one without a selection, keeps its workstream attribution with no commit.
 
 ## Standing Rulings
 
@@ -888,7 +1549,8 @@ told not to raise again. Rulings are the entries of
 | List the rulings | `GET /workstreams/{id}/acknowledged-concerns` | read | `hashd workstream acknowledged` |
 
 The POST is append-only and allowed in every state, like feedback. Its body
-takes exactly one of `finding_ref` (a reference `hashd review show` prints) or
+takes exactly one of `finding_ref` (an internal reference `hashd review show` prints
+or a stored `forge#<id>` thread reference `hashd show` prints) or
 `covers` (free text), a required `reason`, an optional `class` and an optional
 `clarification_id` naming an answered `merge_gate_recovery` clarification of
 the workstream. A resolved reference copies the item's full text, class, file
@@ -901,7 +1563,14 @@ path's own. Every refusal is a Diagnostic and writes nothing.
 A reject's `dismissals` (each a `finding_ref` and a `reason`; the CLI splits
 each `--dismiss` value on its first colon) go through the POST's checks and
 resolver, with source `reject`, before the reject writes or signals anything:
-one that does not resolve refuses the whole reject. Each reject continuation
+one that does not resolve refuses the whole reject. Mixed internal and forge
+batches resolve only against the target project's and workstream's stored rows,
+before `clearAutoMergeBeforeExit` as well as under the lifecycle lock. The
+admission and reject guards still apply. Forge references read the existing
+`pr_review_findings` ledger, including resolved and absent rows, and copy the
+complete body and path/line into the ruling's covered text and file location.
+They neither refresh the forge nor resolve threads. Replacement findings
+(including empty input) do not suppress explicit dismissals. Each reject continuation
 that acts records them through `runflow.AppendRuling` before its signal or dispatch,
 so a retry after a failed delivery finds them present. The signal to a parked
 run and orphan recovery record them beside their guidance. A reject that
@@ -936,6 +1605,32 @@ local-ahead are unchanged. Both findings
 export and story lookup require the server's configured operations root. The same server selector supplies default findings to rejection
 and export; clients never choose a historical review or format forge threads.
 
+The reject row of `available_actions` carries `include_forge` while the current
+PR has unresolved review threads (`withRejectForgeDefault`,
+`api/workstream_availability.go`): the thread half of `attention_count`, set
+after every hold, refusal and ownership check has had its say, only on an
+available row and only where the findings read takes forge findings
+(`rejectFindingsScope`, `api/reject_findings.go`, which the read itself
+answers from). The findings read serves the same row in its
+`available_actions`, so an interactive reject starts with
+`include_forge=true`, and `hashd show` adds `--include-forge` to each
+recorded reject step, keeping its guidance and description, or, with none
+recorded, offers `hashd reject <story> --include-forge` in place of the
+state-derived reject, beside any merge it offers. The detail and snapshot
+reads take `attention_count`'s thread half from the same observation the
+reject row was decided by (`operatorAvailability.prThreads`). It is a selection default, not a permission and not a count of
+findings: the badge counts every unresolved root, while the selection keeps
+its own eligibility (current, non-empty threads, plus current review-level
+change requests) and its head-parity withhold, so the two numbers can differ.
+The Web rejection form (full page and inline, `RejectFindings.ForgeSelected`)
+starts the forge checkbox checked from that row only once the
+`include_forge=true` read returned findings; an empty read leaves it
+unchecked, and a withheld or failed read leaves forge findings unselected and
+disabled. The operator can still edit or deselect every source, and the form
+submits exactly the edited selection through the same findings override. The
+TUI's `PRRejectModal` keeps its own default: it loads with `fetch_forge=False`
+and starts forge findings included whenever they are available.
+
 The PR panel is one server object, `presentation`: `/pr/threads` builds it from
 its own read and `pr_readiness` from the PR watch's latest snapshot. It follows
 the error grammar: a one-line title, each blocker once, the reviews and threads
@@ -950,8 +1645,8 @@ guards judge as before, and a restriction the forge still reports is stated as
 a live blocker.
 
 `POST /workstreams/{id}/reject` accepts optional `findings` (Markdown sections)
-and `include_forge`. Omitted `findings` uses the latest applicable internal
-final review; at `pr_open` and `pr_approved` it also reads the PR's open forge
+and source options `include_forge`, `no_local_findings` and `no_forge_findings`.
+Omitted `findings` uses the latest applicable internal final review; at `pr_open` and `pr_approved` it also reads the PR's open forge
 threads and the bodies of current changes-requested reviews (submitted against
 the PR head, or undatable), with or without `feedback`. At the other gates
 `include_forge` requests those forge findings and they are otherwise left out.
@@ -962,8 +1657,19 @@ without the forge findings and returns the withhold as a
 with a 409 under the same `reject.pr.forge_withheld` source, reporting that the
 forge has not reviewed the latest commits yet, with the withhold notice as its
 explanation. An explicit array replaces the complete selection, including an empty
-array, and never reads the forge. The two options are mutually exclusive. `feedback` is separate human guidance. Non-FIX gates
+array, and never reads the forge. Replacement findings conflict with all source
+options, including when a CLI replacement file or stdin is empty.
+`no_local_findings` skips internal selection; `no_forge_findings` skips forge
+loading and excludes both threads and review-level requests. Both omissions
+may be combined and only subtract from the gate’s existing selection; neither
+enables another source. `include_forge` conflicts with `no_forge_findings`.
+Conflicts return a Diagnostic before auto-merge withdrawal or other reject
+side effects. Explicit dismissals remain usable with replacements and omissions
+through the existing ruling path. `feedback` is separate additive human guidance
+that takes precedence over findings; a FIX needs findings or guidance. Non-FIX gates
 retain their existing rejection semantics and refuse findings options.
+
+Repeatable `--exclude-finding <ref>` (`exclude_findings` on REST) subtracts only the named stored identity from this reject. References must resolve within the target project and workstream before any mutation or forge refresh. A valid reference outside the selection removes nothing and never enables or loads its source. Exclusions record no ruling, resolve no thread and do not affect later rejects. They conflict with replacement findings, including empty files or stdin; explicit dismissals remain usable with replacements. Automatic selection and FIX thread bookkeeping retain identity even for duplicate wording; replacement Markdown matching is unchanged.
 
 Interactive clients load a draft at entry, show internal findings included and
 forge findings excluded, and submit the edited selection without reloading it.
@@ -1009,108 +1715,44 @@ therefore continues to offer merge (check again) and reject (create a FIX) to
 CLI, TUI, Web, and bot. The reject handler atomically writes the FIX plan and
 `active` status through its existing plan CAS; a forge verdict does neither.
 
-A story's `accept` row (`draft`, `requirements_edit_draft`) is withheld while
-`POST /stories/{id}/approve` would refuse for pending blocking clarifications:
-the same count and the same refusal title, and an unreadable count withholds it
-(`withholdAcceptWhileClarificationsPending`). Clients gate Approve on the row.
+The reject row and the reject endpoint are one decision
+(`RejectAvailability`, `server/internal/api/workstream_reject_availability.go`).
+Its activity half is `no_active_work` in every state reject runs in: the
+`reject` edge at `awaiting_human_review`, the edge each extended reject performs
+(`RejectAdmissionTrigger`), and at `active`, which performs no edge,
+`fsm.NoActiveWorkAvailability`. The row keeps the failed guards, lookup
+failures (`GuardResult.Err`) included. `requireRejectAvailable` evaluates the
+same composed row, with fresh probe memos and guard cache, first as the route's
+preflight -- before a `forge_autocomplete` PR's auto-merge is withdrawn -- and
+again under the route's lifecycle lock, before feedback, rulings, a FIX, a gate
+signal or a reset. It chains `fsm.GuardFaults` as the refusal's cause. In a
+`forge_autocomplete` project the route takes the workstream's execution claim
+(`AcquireWorkstreamExecution`, named `run` as the gate signal stores it) before
+the preflight and holds it through the withdrawal and the decision, so no
+workflow can be dispatched between the preflight and the forge write. The decision's own transitions
+-- the parked run's resume and orphan recovery -- are internal, since the
+admitted decision and its continuation claim must not refuse themselves.
 
-An implementing story's `start_edit` row (`requirements_edit_entry_ready`) is
-the linked workstream's `start_requirements_edit` edge and its guards, and
-`enterRequirementsEdit` (`server/internal/api/requirements_edit.go`) judges the
-same guards at entry, so the row and the refusal agree. Among them,
-`no_open_question_for_requirements_edit` (`fsm/guards_recovery.go`) withholds
-the edit while a merge-gate recovery question is pending or an amendment
-decision is open: a pending `requirements_conflict` question or
-`ac_edit_proposal`, or an open `acamend-derive:` / `acamend-apply:` workflow.
-The workflows come from `fsm.Liveness.Amendment`, bound per server to
-`amendmentWorkflowsOpen`, which describes each workflow ID exactly through
-`workflowOpen` (never a visibility listing, which can miss a run just
-started); a list or describe error withholds the row with that cause. The
-reason names what is open and how it settles, and the 409 carries those
-resolutions as help (`requirementsEditUnavailableErr`). The row is offered
-again once the decision settles. `add_commit` and `add_fix_commit` are not
-gated by it; they keep `no_pending_recovery_question`.
+Story forward actions share `storyContentQuestionsRefusal`: pending story-scoped
+clarifications of kind `question` block approval/acceptance, splitting, requesting
+an Arc proposal, starting implementation and approving a ready Arc plan when
+`clarificationBlocking` says they block (including absent urgency). The split's
+`breakdown_proposal` is excluded. Served action rows use the same check; the
+refusal names the questions and `hashd answer` with the story and project.
+The computed Arc recommendation is independent of this admission check.
+Answer paths, accepted Arc planning and `draft_failed` are unchanged.
+
+An implementing story takes no edit: its criteria and content change only in
+planning, which `hashd replan` returns it to. Its `update_criteria` refusal
+(`story.content_locked`) names the replan that keeps the most of its lane:
+from the micro-commit in progress, or whole when none is undone
+(`implementingReplan`). `POST /stories/{id}/edit` on it is refused
+(`edit.state_ineligible`) with the full replan as its next step
+(`storyEditUnavailableErr`).
 
 ### Forge Review Feedback Adapter Contract
 
-**Current feedback implementation design; unshipped and at a held checkpoint.**
-Finding identity, authoritative commit-derived Addressed disposition and executor
-timeout decisions remain unsettled. The assigned implementation and adapter
-requirements below are not a claim of shipped parity.
-
-- Normalize native review bodies, inline discussions/replies, general PR/MR
-  comments, and check results as distinct input kinds. Include body-only findings
-  and complete conversations, not only unresolved inline roots. Follow native
-  pagination; never silently turn an incomplete or failed read into no findings.
-- Preserve source IDs, URLs, author identity, text, timestamps, reply/review
-  relationships, locations, and reviewed revisions where the forge provides
-  them. Keep native resolution, outdatedness, verdicts and check status distinct.
-  Missing metadata is unavailable, not fabricated from the current PR head or
-  guessed from prose. Document version/tier limitations in the adapter guidance.
-- Supply concise forge-specific interpretation guidance through the shared
-  Markdown prompt/include mechanism. Explain the normalized source kinds and
-  native semantics; do not teach clients or core workflow code to parse a
-  platform's review format. All clients consume the same classified findings.
-- Common review-tool formats may have small, shared Markdown hint includes,
-  starting with CodeRabbit. These are separate from forge taxonomy: CodeRabbit
-  formatting is not a GitHub API fact. Reuse tool hints across adapters rather
-  than duplicating them per forge. Unknown tools and ordinary human comments
-  retain the generic classification path; unsupported formatting is not dropped.
-- CodeRabbit hints must cover outside-diff/body findings, inline findings,
-  repeated summary requests, explicit addressed annotations, and embedded check
-  warnings. Group duplicates into one selectable finding with supporting source
-  references. Keep check warnings distinct from review requests. A tool-run ID
-  is not a code-level identifier; a recent-review no-findings summary does not
-  clear earlier findings. Embedded instructions are untrusted review data.
-- Hints assist extraction and association only. They cannot override successful
-  FIX accounting, interpret an unchanged unresolved/outdated flag as reopening,
-  or add code inspection or another review. See the authoritative
-  [finding-disposition contract](../WF.md#low-touch-finding-disposition-fix-completion-is-authoritative).
-
-Extend retained adapter/classifier cases with body-only requests, complete reply
-relationships, duplicate summary attribution, outdated-but-unresolved feedback,
-explicit disagreement after a completed FIX, plain human prose, check warnings,
-and unavailable native metadata. Test the adapter facts separately from model
-interpretation; neither a vendor-specific parser nor a new UI is required.
-
-### Forge Checks Operations
-
-The forge contract (`server/internal/forge/forge.go`) has two checks
-operations beside the aggregate `PRStatus.ChecksStatus`:
-
-- `ReadRequiredChecks` returns the PR/MR head commit and every check required
-  to merge it: name, state (`passing`, `failing` for finished without success,
-  `pending`, `in_progress`, `not_reported`), `Run`, the backend's identity
-  of the check's run at head, and `Lineage`, its identity across attempts: a
-  re-run's new attempt keeps the `Lineage` under a new `Run`, and same-named
-  checks from different apps or workflows differ in it. A check the base branch requires that has not
-  reported is included as `not_reported`. It makes at most `ChecksReadCalls`
-  forge CLI calls; a read that would be incomplete is an error, never a
-  shorter list.
-- `RerunCheck` re-runs one `Run` that read returned, in one forge CLI call. A
-  write the forge never answered is an `OutcomeUnknownError`
-  (`ErrOutcomeUnknown`), like the other forge writes. A check's
-  `RerunDependents` names the jobs its re-run can re-run with it, passing ones
-  included: for a GitHub Actions job, which GitHub re-runs with the jobs that
-  depend on it and no other way (its own per-job re-run does the same), every
-  other job of its workflow run, since GitHub reports no job graph. Re-running is
-  opt-in: a check is re-run only when it is named on an enabled
-  `requeue_build` automation's checks list, and the run record names this
-  scope. No other unlisted check is ever re-run.
-
-Both end with ctx, and each call is bounded by `deadline.APIFailsafe`. GitHub
-implements them through `gh`: one paginated GraphQL read of the head commit's
-check rollup (`isRequired` for the PR) and the base branch's required-check
-names from its protection rule and rulesets, then `POST` to the Actions job
-rerun endpoint for an Actions job or the check-run rerequest endpoint for any
-other app's run. The rollup contexts are the ones the status read's checks
-query selects (`ghRollupContextFields`), decoded into one type, and owner and
-repo are held to GitHub's name charset before either call, as every `gh`
-GraphQL read holds them. A commit status has no run to re-run. GitLab,
-Bitbucket, Gitea, Azure Repos and `NullForge` answer both with
-`*forge.UnsupportedError{Forge,
-Operation}`, matched with `errors.As`, before any call. `forge.SupportsChecks`
-answers per forge type from the backend's own answer.
+The adapter requirements for forge review feedback, a design that is unshipped and at a held checkpoint, are in [FORGES.md](FORGES.md#7-review-feedback-adapter-contract).
 
 ## Public Interface Changes
 
@@ -1146,8 +1788,8 @@ written (`fsm.AlertTierDuration`); clients never compute a tier.
 
 | tier | display duration | kinds |
 |---|---|---|
-| `ordinary` | 20 s | `clarification`, `arc_decision`, `review_blocker`, `required_change`, `unknown_target_repo`, `target_repo_disagrees` |
-| `bigger` | 60 s | every other kind: `run_failed`, `run_blocked`, `interrupted`, `provision_error`, `baseline_failure`, `baseline_unparsed`, `baseline_accepted`, `discovery_failed`, every event-row kind, every `operation_<outcome>` (`operation_blocked` included), `automation_waiting_on_owner` |
+| `ordinary` | 20 s | `clarification`, `arc_decision`, `review_blocker`, `required_change`, `unknown_target_repo`, `target_repo_disagrees`, `operation_continuing`, `operation_cancelled`, `operation_discarded`, `operation_landed`, `stored_references_reported` |
+| `bigger` | 60 s | every other kind: `run_failed`, `run_blocked`, `interrupted`, `provision_error`, `baseline_failure`, `baseline_unparsed`, `baseline_accepted`, `discovery_failed`, every event-row kind, every other `operation_<outcome>` (`operation_blocked` included), `automation_waiting_on_owner` |
 | `sticky` | none | none: no standing kind is sticky now |
 
 A kind with no entry is served as `bigger`, and the server logs a `WARNING:`
@@ -1159,6 +1801,8 @@ Every standing row's `kind` comes from one closed list,
 whose kind depends on its input reads it from that package's named domain --
 the run statuses, the operation outcomes and the event types it turns into
 rows -- so a value outside the domain produces no row rather than a new kind.
+A story rebase's landing takes `operation_landed` from its payload instead:
+`succeeded` stays outside the outcome domain.
 The same package builds the condition vocabulary an automation may name: every
 failure-catalogue code (`failure.Codes`, described by its cause) and every
 standing kind, looked up by exact name only (`standing.LookupCondition`). A
@@ -1267,7 +1911,7 @@ per unit while nothing else is recorded there: `RecordAutomationRun` writes no
 occurrences matched with no recorded head stay distinct. Fourth, before it
 dispatches, the engine asks whether the item's owner can act on the item's
 forge: `resolveOwnerForgeAuth` (`server/internal/api/forge_credentials.go`),
-the credential decision `resolveForge` itself makes, for the workstream's owner
+the credential decision `resolveForge` itself makes, for the linked story's owner
 and the repository the action resolves its forge for, asked once per decision.
 It runs `forge.ResolveAuth` through `resolveForgeAuth` with the mode branch
 unchanged, so no other user's or the server's credential is consulted. When the
@@ -1320,18 +1964,22 @@ again for a new owner at the next observation, the sweep at the latest. The engi
 retires a condition. The action runs as the item's owner in both modes,
 through one code path.
 
-The Telegram bot follows the server's event stream of its project under its
-own credential and pushes an event to its configured chat only when the frame
-carries `attention_toast`. It also polls `GET /alerts` every 10 seconds under
-the same credential and sends each alert row of its project, and each system
-row, that first showed since its previous poll to that chat once; it edits
-nothing and mirrors no dismissal (WF.md "Alerts"). In team mode an account
-pairs by sending a pairing code, after which its commands act as the paired
-user.
+The Telegram bot opens a project event stream and polls `GET /alerts` under each
+paired user's keyring credential. It sends server-marked `attention_toast`
+events and newly visible alerts privately, preserving the first-poll/no-replay
+rule and the existing ten-second poll. Before each send, `GET /telegram/delivery`
+resolves only that caller's bound private account, validates the stored alert
+recipient or work's owner, and rechecks the existing project access policy.
+Project and binding changes invalidate queued sends. Unbound users receive no
+Telegram notifications; there is no shared chat setting or fallback. Solo uses
+the same private pairing path. Telegram requires the user to open the bot and
+Start; rejected deliveries log an actionable Diagnostic directing re-pairing.
 
 Side effects that must happen as part of a transition belong in the Go server
 transition handler, next to the CAS write. They do not belong in a subscriber:
 subscribers can be down, race the transition, and require catch-up machinery.
+
+This contract does not make every SQLite insert a state-change event. Output artifacts in `transcripts`, agent usage records, and log files preserve evidence; storing them does not itself require a duplicate `events` row or a bus notification. Transcript consumers read the stored content through REST. Any accompanying lifecycle change or user-facing notification still goes through the FSM/emitter contract. If a live consumer needs to refresh when an artifact changes, identify that consumer and publish an appropriate notification through the Go emitter; do not send full output blobs over the bus merely because they were stored.
 
 ### Wire format
 
@@ -1374,7 +2022,7 @@ if the Go registry and the Python tags drift apart.
 
 Every event the server serves carries a boolean `attention`, computed on read from one selection in `server/internal/notify`; it is on the event list reads, on `GET /events/{id}` and on `/events/stream` frames, and it is never stored.
 An attention event whose title names a workstream or story also carries `attention_title`, the server-composed title of its class's toast, byte for byte, whether or not that toast still reaches the desktop (`notify.FrameTitle` for a frame, `notify.RowTitle` for a row): a workstream is named by its linked story as `<story id> (<workstream id>)`, or by its id alone when it has none. It is served beside `attention` on the same reads and frames, computed on read and never stored, and omitted for an event that is not selected, for `engine_degraded` and for a title that names no id. The member is not `title`, which `operation_result` frames already carry.
-An attention frame whose event still raises an event toast also carries `attention_toast` true (`notify.FrameToast`, on `/events/stream` frames only). An occurrence that raises an alert (WF.md "Alerts") is announced by the alert, so its event toast is retired: one problem, one alert. The last column names what still toasts. The TUI and Web raise an event toast only from `attention_toast`, and the desktop notifier by the same rule (`notify.Classify`); the TUI and Web still route and count every `attention` frame for history and unread; the Telegram bot sends its own event message only from `attention_toast`, titled by `attention_title`. No surface keeps an event-type selection of its own.
+An attention frame whose event still raises an event toast also carries `attention_toast` true (`notify.FrameToast`, on `/events/stream` frames only). An occurrence that raises an alert (WF.md "Alerts") is announced by the alert, so its event toast is retired: one problem, one alert. The last column names what still toasts. The TUI and Web raise an event toast only from `attention_toast`, and the desktop notifier by the same rule (`notify.Classify`); the TUI and Web still route and count every `attention` frame for history and unread; the Telegram bot sends its own event message only from `attention_toast`, titled by `attention_title`. No surface keeps an event-type selection of its own. Its `attention_notification` also carries `line`, the one-line toast text the TUI and Web event toasts show: the subject's label, the need its class names, and the next command (`notify.Presentation`).
 
 ### State announcement withdrawal
 
@@ -1405,12 +2053,13 @@ explanation.
 | `archive_stop` | `blocked` with a `failure_event_id`, the engine janitor's needs-the-operator escalation of a post-merge archive failure, run or no run | | no |
 | `publication_stop` | `operation_result` with `operation=pr_create` or `operation=pr_push` and `outcome=failed` or `outcome=declined` | | no |
 | `awaiting_approval` | `state_changed` with `to_state=awaiting_human_review` from another state; `run_complete` with `status=ready_to_merge`, the final review's approve that opens the merge gate | a park's `review_needed` and `blocked`; a plan review pause's `blocked`; the runner's `state_changed` into ready_to_merge before the final review | `run_complete` only, the final review's approve; a park's blocked run raises an alert |
-| `review_gate` | `state_changed` with `to_state=final_review_with_concerns` and `from_state=ready_to_merge`; `final_review_concerns_raised`, recorded through the timeline when the workstream already sits at a PR state the concerns leave unchanged | the concerns' `review_needed` | yes: the concerns leave no standing error, so no alert carries them |
+| `review_gate` | `state_changed` with `to_state=final_review_with_concerns` and `from_state=ready_to_merge` or `implementing` (a merge-gate repair's park); `final_review_concerns_raised`, recorded through the timeline when the workstream already sits at a PR state the concerns leave unchanged | the concerns' `review_needed` | yes: the concerns leave no standing error, so no alert carries them |
 | `clarification` | `clarification_changed` with `status=pending` | the `blocked` exit of a run that waits on it | `clarification_changed` with `workstream_id` only: a workstream's question stands only while blocking, which the frame does not say |
 | `arc_decision` | `arc_proposal_awaiting_decision`, recorded through the timeline | | no |
 | `merged` | `state_changed` with `to_state=merged` from another state | the reconcile's `merge_reconciled` | yes, except a person's merge on the forge (`reason` is `eventbus.PersonForgeMergeReason`), which the `forge_merge` alert its archive raises announces |
 | `implemented` | `story_changed` with `status=implemented` | | yes |
 | `engine_degraded` | `engine_degraded` | | no |
+| `refresh_failed` | `refresh_failed` | | no |
 
 Two desktop toasts are sent by the sites that know what happened rather than selected from an event, so the table does not carry them. The workstream creation-failed toast is retired: a provisioning failure leaves a standing `provision_error` or `baseline_failures`, whose alert announces it. The suggestion-reverted notice (`notify.SuggestionReverted`) is kept: a suggestion released back to available after its planning failed leaves no standing error, so no alert carries it.
 
@@ -1420,13 +2069,13 @@ A toast announces an attention event; it is never the only route to the message.
 
 `GET /events`, `GET /stories/{id}/events` and `GET /workstreams/{id}/events` take `attention=true` to serve only the events that read would serve with `attention` true, newest first. The filter is this selection, applied on read (`attentionEventPage` in `server/internal/api`), not a stored column or a second copy of the rule. `limit`, `event_type` and the story read's `since` keep their meaning, and `limit` counts matching events: the server walks the scope in keyset batches until it has enough, so a short page is the whole of the scope. The walk is bounded by `attentionScanBudget` scanned rows; when it reaches the bound with rows left in the scope (a one-row probe tells), or the request is cancelled, the read fails with an `events.attention.scan_bound` Diagnostic naming the narrowing parameters, never a partial page. Without the parameter the reads are unchanged. When older matches exist beyond `limit`, an `attention=true` page carries the `X-Hashd-Next-Cursor` response header, the id of the page's oldest event, and the body stays the plain array; the client sends it back as `cursor=<event id>` for the matches strictly older than that event in `(created_at DESC, id DESC)` order, under the same `limit`, `event_type` and `since`. The header is absent on the last page and on every read without `attention=true`. Each unusable cursor gets a 400 Diagnostic naming the parameter, never the newest page: a cursor that names no event in the project (`events.cursor.not_found`), an event outside the story or workstream the path names (`events.cursor.out_of_scope`), an event of that scope the read does not serve because it is not an attention event or not of the requested `event_type` (`events.cursor.not_selected`; the header only ever names a served event), or a cursor sent without `attention=true` (`events.cursor.requires_attention`).
 
-The TUI's history screen (`hashd_tui/watch/history.py`) lists the current project's attention events from `GET /events?attention=true`, newest first: each row's `created_at`, its entity (`workstream_id` or `story_id`, empty for a project-level event) and its content. `Ctrl+Y` opens it from any screen; it is an App-level binding that no screen binds, and every screen's help lists it beside the toast key. While the last page returned `X-Hashd-Next-Cursor` the screen says older important events exist and `o` loads the next page with that cursor, so it never presents a page as the whole list while a cursor is outstanding. Rows are keyed by event id, so a reread or a loaded page never shows an event twice. Enter opens the event from `GET /events/{id}`: its `diagnostic` when it carries one, else its content and data, with `s` and `w` opening the story or workstream it names. History only reads; it records no event and makes no transition.
+The TUI's history screen (`hashd_tui/watch/history.py`) lists the current project's attention events from `GET /events?attention=true`, newest first: each row's `created_at`, its entity (`workstream_id` or `story_id`, empty for a project-level event) and its content. Nothing in the TUI opens it at present: it has no key, and the command palette has no entry for it. While the last page returned `X-Hashd-Next-Cursor` the screen says older important events exist and `o` loads the next page with that cursor, so it never presents a page as the whole list while a cursor is outstanding. Rows are keyed by event id, so a reread or a loaded page never shows an event twice. Enter opens the event from `GET /events/{id}`: its `diagnostic` when it carries one, else its content and data, with `s` and `w` opening the story or workstream it names. History only reads; it records no event and makes no transition.
 
 On Web, the dashboard Activity panel's "view full event log" footer opens the history page at `/ui/history/{project}` (`page_history.templ`). It lists the same read, `GET /events?attention=true` through `hclient.ListProjectAttentionEvents`, newest first: each row's time, entity and content, keyed by event id in the DOM. While the last page returned `X-Hashd-Next-Cursor` the list ends in a row saying older important events exist, whose load-older control fetches `/ui/history/{project}/older?cursor=<id>` and replaces that row with the next page's rows and a load-older row of its own; the row is gone once a read returns no cursor. Each page holds only events strictly older than the cursor, so appending never repeats an event. A failed older read keeps the rows shown and puts its Diagnostic and a retry for the same cursor in the row's place. A row opens `/ui/history/{project}/events/{id}` from `GET /events/{id}`: its `diagnostic` when it carries one, else its content and data, with links to the story and workstream it names. Live insert rides the existing stream, with no polling and no new transport: `events.js` dispatches each live `hd:attention` frame on `<body>` beside raising its toast (leader and follower tabs alike; `FORWARD` stays the refresh-trigger list), and the page head refetches `/ui/history/{project}/newest?since=<id>` on that, on `timeline_entry`, on `hd:reconnect` and when `events.js` reports the stream live (`hd:connection`), `since` being the highest event id shown; the last covers an event committed between the page's render and its subscription, which no frame announces. The server merges by event id: ids follow insertion but `POST /events` accepts a caller's `created_at`, so when the fresh newest page holds any row shown, each row above `since` is inserted where the page places it; when it does not, the fresh page and its cursor replace the list rather than present a gap as complete. A failed refetch keeps the rows shown and puts its Diagnostic in the head. Every history route is a GET to hashd-server and makes no mutation.
 
 Both clients mark unread history on the entry point, client-side only: nothing is sent to the server, and toast dismissal, expiry and eviction never mark anything read. The TUI counts in session memory (below). Web keeps two ids per project in `localStorage` (`static/history-seen.js`): `hd-history-seen:<project>`, the newest attention event the history page has shown, and `hd-history-latest:<project>`, the newest any page in the browser has rendered. Event ids only increase, so neither value ever moves backwards: every write goes through one guard that refuses a smaller id (`""`, no attention event yet, reads as 0), whatever triggers it -- a page load, a live swap, an `hd:attention` frame or another tab's storage event -- so a stale tab cannot undo what a newer one stored. The history page advances both to its newest row on open and after every live insert; when its read fails it advances seen to latest, marking read everything the browser had been shown, and covers the events live frames announced: each `hd:attention` frame carries its event's `timestamp` (the row's `created_at`, which a `timeline_entry` frame names `created_at`), the newest kept as `hd-history-framed:<project>`, and the failed opening stores it as `hd-history-covered:<project>`. Timestamps are compared as the stored text the events list orders by, never parsed. The failed page also renders the highest event id the plain feed read (`GET /events`) serves, stored with the cover as `hd-history-bound:<project>`; ids follow insertion order, so every event recorded after the opening has a larger one, whether or not any page heard its frame (with no bound, the opening covers nothing). A later read whose newest event has exactly the cover's `created_at` and an id within the bound stores its id as seen, so the clearing outlasts a reload, ties with already-seen or other covered events included; an event recorded after the opening stays unread. Each history page load also writes a unique `hd-history-opened:<project>`, which other tabs hear even when seen did not move. The dashboard Activity footer carries the project's newest attention id and its `created_at` (`GET /events?attention=true&limit=1`) and shows an unread marker while it is greater than seen. With nothing stored, its id is the baseline, so a new browser starts with nothing unread; a project with no attention event yet stores `""` (with no Activity rows the entry point renders hidden, id only), so its first event shows unread, while a failed read with no id carried stores nothing. A failed newest-id read adds "unread status unavailable" with its reason and is compared as the last id the footer carried. The dashboard's live refetch includes `hd:attention` and the stream going live, so the marker follows new events without a reload. A live `hd:attention` frame for the project also shows the marker until the history is next opened or seen advances in another tab, since it proves a newer event arrived even if the reread fails (the frame carries the event's `project`; an engine incident's is empty and counts for nothing). Engine incidents stay out of both, for the reason given below.
 
-A live SSE frame with `attention` true goes to every history screen open on the screen stack (`WatchApp._route_attention_event`, beside the toast dispatch). A bus frame carries no events row id, so each screen rereads the newest page, which replaces the rows held, keyed by id; the emitter wrote the row before it published the frame, so the reread finds it; a row recorded with an earlier `created_at` can sort behind the reread, so the rows past it are unverified and the reread's cursor offers them again rather than present the list as complete, and a frame that lands while a read is out rereads after it. With no history open, the frame counts as unread for its own project (the frame's `project`, so one queued across a project switch counts for the project it came from), and every footer on the screen stack names the history key while the current project's count is non-zero. Engine incidents are system-scoped and outside project history: an `engine_degraded` frame has no project, and its row is recorded only in the ops-root events store, while history reads the project database (`GET /events?attention=true`), so the frame is neither routed to history nor counted as unread. Its standing records are the footer's engine-degraded status (the live `/status` flag), the `/status` incident trail and `hashd doctor`. The marker is footer status, and the footer shows the whole status -- server, engine and marker -- within its two lines: where it does not fit beside every binding, droppable entries give way first, then bindings from the end of the rows (navigation before verbs), never the help key, whose screen lists every key. Every footer lays out again on resize. Opening history clears the current project's count; frames that arrive while it is open are shown, not counted. The count is in-memory and session-only: nothing is sent to the server or persisted, and toast dismissal, expiry and eviction never change it. No timer or poll drives any of this.
+A live SSE frame with `attention` true goes to every history screen open on the screen stack (`WatchApp._route_attention_event`, beside the toast dispatch). A bus frame carries no events row id, so each screen rereads the newest page, which replaces the rows held, keyed by id; the emitter wrote the row before it published the frame, so the reread finds it; a row recorded with an earlier `created_at` can sort behind the reread, so the rows past it are unverified and the reread's cursor offers them again rather than present the list as complete, and a frame that lands while a read is out rereads after it. With no history open, the frame counts as unread for its own project (the frame's `project`, so one queued across a project switch counts for the project it came from), and no footer shows the count. Engine incidents are system-scoped and outside project history: an `engine_degraded` frame has no project, and its row is recorded only in the ops-root events store, while history reads the project database (`GET /events?attention=true`), so the frame is neither routed to history nor counted as unread. Its standing records are the footer's engine-degraded status (the live `/status` flag), the `/status` incident trail and `hashd doctor`. The footer shows the whole status -- server and engine -- within its two lines: where it does not fit beside every binding, droppable entries give way first, then bindings from the end of the rows (navigation before verbs), never the help key, whose screen lists every key. Every footer lays out again on resize. Opening history clears the current project's count; frames that arrive while it is open are shown, not counted. The count is in-memory and session-only: nothing is sent to the server or persisted, and toast dismissal, expiry and eviction never change it. No timer or poll drives any of this.
 
 ### Toasts
 
@@ -1439,6 +2088,73 @@ A failed operator action takes its toast severity from the server's answer, thro
 Attention toasts (the live toasts for frames the server marks `attention_toast`) take their tone from the contract too, in both clients, with no local choice: each event from its `event_type` (or the domain of the value it announces, such as a stage or story status), and `operation_result` from its outcome through the `operation_outcome` domain -- `failed` and `declined` → `danger`, `blocked` → `warning`, `succeeded` → `success`, `code_change` → `neutral`. A selected event the client has no wording for takes its `event_type`'s tone.
 
 The Arc proposal workspace's refused or unknown outcome notice is not a toast but follows the same rule in both clients: it survives the workspace's background re-reads and clears only when (1) the operator sends another workspace mutation, or (2) a re-read shows a different operation state -- a different operation `created_at` or a different `phase`. A re-read that could not read the story shows no state to compare, so the notice stays; leaving the workspace drops it. The TUI compares `_operation_state` (`hashd_tui/watch/arc_proposal_workspace.py`). On Web, `arcProposalRoot` carries the read's `created_at` and `phase` as data attributes (neither when the read failed), and `arcWorkspace` (`static/arc-workspace.js`) puts the outcome its mutation answer brought back into each same-state re-read, under a stable id so the morph keeps the node and its focus.
+
+## Health and readiness probes
+
+`GET /livez` and `GET /readyz` are public in both solo and team modes:
+`AuthMiddleware` (`server/internal/api/auth.go`, `probePaths`) admits them
+without checking any credential (any supplied `Authorization` header is ignored
+so no identity or principal is attached), and both operations carry `MarkPublic`
+to clear the OpenAPI security requirement. Both probes also bypass synchronous
+access logging (`AccessLogMiddleware`), and `/readyz` logs failure diagnostics
+asynchronously so stalled log writes cannot push a response past its bound.
+
+Because `hashd-server` serves exclusively over TLS (`ServeTLS`) and requires
+HTTP/2 (`requireHTTP2`), probe clients must use HTTPS with HTTP/2 and follow
+the existing loopback trust policy: verify the server certificate against the
+installation's persisted CA (`$HASHD_OPS_ROOT/tls/ca.crt`, whose automatic
+serving certificate always covers `localhost`, `127.0.0.1`, and `::1`) or the
+system trust store for a supplied certificate, never skipping TLS verification.
+
+`GET /health` is unchanged: it stays the version and contract-metadata read for
+clients and the restart supervisor (`status`, `version`, `schema_version`,
+`go_version`, `events_contract_hash`, and self-dial fields), and still requires
+a bearer token in team mode (loopback included).
+
+- **`GET /livez`** (`server/internal/api/server.go`): answers HTTP 200
+  `{"status": "ok"}` while touching no dependency. It tells orchestrators only
+  whether the server process is alive and serving HTTPS over HTTP/2.
+- **`GET /readyz`** (`server/internal/api/readiness.go`): runs four bounded
+  checks concurrently and answers HTTP 200 `{"status": "ok"}` only when every
+  check passes:
+  1. **System DB**: a file-touching SQLite read (`SELECT 1 FROM sqlite_master LIMIT 1`)
+     against `Server.AuthDB`.
+  2. **Already-open project DBs only**: the same file-touching read against each
+     handle currently open in `db.Pool` (`OpenProjects`); it never opens
+     unopened project databases.
+  3. **Workflow engine**: Temporal frontend reachability through the server's
+     cached probe (`Server.temporalReachable`, which deliberately opens no
+     engine-health incident) plus confirming `EngineHealth.OpenIncident()`
+     reports no open engine-health incident.
+  4. **Ops root**: independent create/write/close/remove writability and
+     `statfs` free-space checks against `Server.OpsDir` and the fixed 512 MiB
+     floor (`readinessOpsMinFreeBytes`, declared once in server code rather
+     than as a configuration key), reporting both codes when both fail.
+
+`/readyz` deliberately does not check forges, trackers, connectors, LLM
+providers, or unopened project databases, so an upstream outage or an inactive
+project does not take the server out of service.
+
+When any check fails or exceeds its bound, `/readyz` returns HTTP 503 with
+`{"status": "not_ready", "failures": [{"code": ..., "cause": ...}]}`, carrying
+only each failed check's catalogued `code` and catalogue `cause` from the
+[Failure catalogue](#failure-catalogue). Because `/readyz` is unauthenticated
+in team mode, the 503 body never includes raw error text, filesystem paths, or
+project names; those details are written only to the server log.
+
+The five readiness codes (all `ClassWaiting`, `PolicyNone` in
+`server/internal/failure/catalogue.go`):
+
+- `readiness.system_db_unavailable`
+- `readiness.project_db_unavailable`
+- `readiness.engine_unavailable`
+- `readiness.ops_not_writable`
+- `readiness.ops_disk_low`
+
+The container `HEALTHCHECK` in `Dockerfile` probes
+`https://127.0.0.1:1337/readyz` over HTTP/2 with
+`--cacert "${HASHD_OPS_ROOT:-/var/lib/hashd}/tls/ca.crt"` and treats only HTTP
+200 as healthy.
 
 ## Project visibility
 
@@ -1467,19 +2183,25 @@ No visibility changes alter repository credentials or forge permissions.
 
 `DELETE /users/{email}` (`server/internal/api/users.go`) removes a user; `hashd admin user remove` is its CLI client. It is authorized by `serverAdministrator` (`server/internal/api/admin_guard.go`), the same check restart holds and central configuration use: any caller in solo mode, an owner or admin in team mode. The email is trimmed and matched exactly; an unknown email is a 404 with the nearest registered email as a did-you-mean. The server owner cannot be removed, and removing a user who is already removed succeeds as a no-op (`already_removed`).
 
-Removal is a soft delete. The users row is kept with its id, email and display name and its status set to `removed`, so ids are never reused and every record of the person's work stays attributed to them: workstreams, stories and other project rows keep their `user_id`. One transaction on the system DB marks the user removed first, which takes SQLite's write lock before the browser connections are read, and then deletes their auth tokens, Telegram tokens included, their forge tokens, their agent credentials with those credentials' usage-limit marks, and their connector accounts, and revokes their sign-ins through the credential core's owner revocation (`ssocred.Core.Revoke`, on the removal's transaction): their sealed token cache, every credential binding and every account record, leaving the revoked-cache marker. The revocation contacts no provider; hashd forgets the grants, it does not revoke them at Entra. It runs whether or not the core was built, since it writes only through the transaction. Marking the user also clears their password hash, setup key and Telegram binding. Their browser connections are revoked (`revoked = 1`) through the browser store's revocation query and kept, so captures keep their connection and a revoked pairing token cannot be redeemed again. Pairing inserts a connection only when its owner is not removed, checked in the insert statement itself, so a pairing that races removal either lands before it and is revoked with the rest, or lands after it and inserts nothing. Any failed write rolls the whole removal back. Every delete matches `user_id` exactly, so rows with no owner (`user_id` NULL) are untouched.
+Removal is a soft delete. The users row is kept with its id, email and display name and its status set to `removed`, so ids are never reused and every record of the person's work stays attributed to them: stories and other attributed project rows keep their `user_id`; workstream reads derive it from their story. One transaction on the system DB marks the user removed first, which takes SQLite's write lock before the browser connections are read, and then deletes their auth tokens, Telegram tokens included, their forge tokens, their agent credentials with those credentials' usage-limit marks, and their connector accounts, and revokes their sign-ins through the credential core's owner revocation (`ssocred.Core.Revoke`, on the removal's transaction): their sealed token cache, every credential binding and every account record, leaving the revoked-cache marker. The revocation contacts no provider; hashd forgets the grants, it does not revoke them at Entra. It runs whether or not the core was built, since it writes only through the transaction. Marking the user also clears their password hash, setup key and Telegram binding. Their browser connections are revoked (`revoked = 1`) through the browser store's revocation query and kept, so captures keep their connection and a revoked pairing token cannot be redeemed again. Pairing inserts a connection only when its owner is not removed, checked in the insert statement itself, so a pairing that races removal either lands before it and is revoked with the rest, or lands after it and inserts nothing. Any failed write rolls the whole removal back. Every delete matches `user_id` exactly, so rows with no owner (`user_id` NULL) are untouched.
 
 After the transaction commits, and never before, the server drops the core's in-memory state for the user's sign-ins and withdraws their account alerts, a reconcile over that owner's account items observing nothing, under the account-alert serialization; the evaluation the core's change hook queues finds the user removed and withdraws nothing more. It then closes the live browser-extension sockets on the connections it revoked (`browserfeedback.Store.Disconnect`, the relay step `Revoke` takes after its own write) and discards the user's pending Telegram pairing codes. A code redeemed between the commit and the discard is still refused: `POST /telegram/bindings` reads the user inside its own transaction and refuses a removed one (`telegram.binding.user_removed`) without writing a binding or token.
 
 A removed user cannot sign in by password, setup key or Telegram pairing. Password login requires an `active` user, and `RedeemSetupKey` never matches a removed row, so a setup key left on one cannot set them back to `active`. The host-local admin commands refuse them too: `hashd admin user token` and `reset-key` refuse a removed user before minting a token or issuing a key, and `SetUserSetupKey` never matches a removed row, so a `reset-key` racing removal stores no key and reports the same refusal. `hashd admin user add` refuses an email that belongs to a removed user.
 
-A removed user cannot be assigned work. The story and workstream owner writes themselves (`updateStoryOwner`, `updateWorkstreamOwner` in `server/internal/api/mutations_ownership.go`) refuse a removed user with a 409 (`ownership.user_removed`) inside the write's transaction, so assignment, grab, acceptance and draft approval share the refusal and nothing commits. The user row and the owner column sit in different databases, so an in-process lock (`userRemovalMu`) orders the two: an owner write holds it shared from the status check through its commit, and removal holds it exclusively through its commit, so a removal never lands between a write's check and its commit. A removed user's browser captures are kept but no longer delivered: claiming one and the final check before its chat message is inserted both refuse a revoked connection or a removed owner, and both connection revocation routes take `userRemovalMu` exclusively, so no revocation lands between that check and the message commit. Items the user already owned keep that owner; removal reassigns nothing.
+A removed user cannot be assigned work. The story owner write (`UpdateStoryOwner` in `server/internal/api/mutations_ownership.go`) refuses a removed user with a 409 (`ownership.user_removed`) inside the write's transaction, so assignment, grab, acceptance and draft approval share the refusal and nothing commits. The user row and the owner column sit in different databases, so an in-process lock (`userRemovalMu`) orders the two: an owner write holds it shared from the status check through its commit, and removal holds it exclusively through its commit, so a removal never lands between a write's check and its commit. A removed user's browser captures are kept but no longer delivered: claiming one and the final check before its chat message is inserted both refuse a revoked connection or a removed owner, and both connection revocation routes take `userRemovalMu` exclusively, so no revocation lands between that check and the message commit. Items the user already owned keep that owner; removal reassigns nothing.
 
 A removed user is shown everywhere as their display name followed by " (removed)", never as "unknown" or "user #N". On the server, `ownerDisplay` (`server/internal/api/ownership_guard.go`) is the one rendering: it backs the owner fields of workstream, story, dashboard and in-flight reads, ownership-guard refusals, workstream pause holders, ruling and guidance authors, and the author name on fallback-posted story notes. The TUI and web, which resolve decider and requester names from `GET /users`, add the same marker for a row marked `removed`. "user #N" remains only for an id the store cannot resolve.
 
 Removal does not stop running work. A run that started before removal re-creates no credential row: its write-backs (the rotated-secret re-seal, the credential health update and the usage-limit mark) only update an existing credential row and find none. Open event, run-log and chat streams are not cut; the deleted token they authenticated with is refused when they reconnect. The user's agent homes are cleared by the existing post-run and startup clearing.
 
 ## Agent credentials and auth preflight
+
+Remote runner assignments using project or server credential source receive only the selected shared registration's scope and non-secret identity; the runner gives the agent a loopback forwarder address and placeholder key, and each request through the assignment's agent proxy reads the shared key on the server and sends it upstream in the declared API-key header form. The server refuses proxy requests and health reports when the launch-selected source differs from the project's current source. Each upstream response identifies the registration it used to the runner's forwarder, which observes it before removing that metadata from the agent's response; health and limit writebacks therefore follow replacement keys within the selected scope.
+
+The project-wide `agents.credential_source` selects `owner` (the default), `project`, or `server` for every agent launched by its stages. Under `owner`, the personal registration and harness-login policy below applies, and shared registrations are never read. For server-local runs, `project` reads only that project's shared API key and `server` reads only the server's shared API key, in both solo and team mode. Neither shared source falls back to a personal registration, an owner harness login, project credential variables, or the host environment. A missing or dead shared key refuses at preflight and launch, naming the selected scope, `hashd agents login <agent> --scope project|server --method api-key`, and the alternative of setting `agents.credential_source` back to `owner`.
+
+Shared keys reach server-local runs only through the agent's declared API-key proxy: the run gets a loopback forwarder and a placeholder key, every other declared credential variable is cleared, and no owner credential file is materialized. Claude and Codex declare an API-key proxy. Claude's upstream is fixed to https://api.anthropic.com, its base URL is the forwarder's origin, and the key is sent in `x-api-key`. Codex's upstream is fixed to https://api.openai.com, its base URL is the forwarder's origin with the `/v1` prefix Codex appends its request paths to, and the key is sent as `Authorization: Bearer <key>`; a provider or `base_url` set in a Codex `config.toml` does not apply to shared-key runs. An agent without an API-key proxy form, or a launch path its proxy cannot hold to the shared key (Codex's app-server chat transport), is refused before launch, naming the stage and the alternatives of owner source or a different stage agent. The existing local proxy wiring resolves the selected shared registration anew for each upstream request. Completion health and usage-limit subjects identify the shared registration; credential provenance records project (with its name) or server, while work ownership, cost, usage, and lineage attribution continue to identify the work owner.
 
 Agent authentication preflight delegates to the agent CLI's own status command. New agents declare `verify_auth` in `server/internal/config/defaults.yaml`; exit 0 means authenticated, non-zero means unauthenticated. If an agent has no reliable auth-status verb, omit `verify_auth` and skip preflight auth guessing rather than inspecting private credential files.
 
@@ -1490,16 +2212,37 @@ paste-code flow with `POST /agents/{agent}/login/complete` (`runner_id`,
 `sign_in_id`, `code`). `GET /agents/{agent}/login` serves the runner observation,
 available actions and the caller's transient attempt. Only the caller can start
 or see their sign-in challenge; administrator metadata visibility does not grant
-sign-in authority for another owner. The runner uses the existing paired request
+sign-in authority for another owner. A signed-in observation names the provider
+account (`account`, the agent's declared `login_identity` email); the read sends
+it only to the login's own owner (`ownAccountOnly`), so Fleet shows nobody's
+provider email, and the Web's Account > Agent access and the TUI show your own. The runner uses the existing paired request
 transport and #2905's login-home/environment helpers. Interactive sign-in is an
 operator-approved exception to the Temporal rule (2026-11-01): it cannot resume,
 so durability buys nothing. The attempt ends with its connection or the fixed
 five-minute deadline; a new press supersedes it. Partial login files stay in a
 temporary home, removed after process-group cleanup; only a confirmed login is
 promoted. Progress wakes the existing check-in, which emits `runner_changed`.
+Fleet's sign-out is `DELETE /agents/{agent}/login` with a required `runner_id`
+(ID or unique name, through `ReadRunner`); the owner is the acting identity
+alone. It forwards one `sign_out` action over the same path
+(`authorizeRunnerLogin`, `forwardRunnerLogin`), and the runner runs the agent's
+declared `logout_args` in that owner's login folder, as one attempt in the same
+record (`runnerconnect.loginAttempts`), so `GET /agents/{agent}/login` serves
+its progress, outcome and Diagnostic. One check, `runnerLoginActionAvailable`,
+gates both the served `sign_in`/`sign_out` actions; the read also withholds
+`sign_out` for a stale or unreadable observation and a running attempt, and the
+DELETE dispatches only when that same read offers it. The runner's admission
+under its attempt lock stays authoritative against a race. It never touches a
+registered credential; one that runs still receive (`credinject.RunsReceive`,
+the launch policy's own rule) is named in the read's one-line `notice` with
+`hashd agents logout <agent>`. A lost mutation reply, or a connection lost
+after sending, answers 503 for a read to settle, and nothing repeats the
+mutation.
 
 
-Team-server runs act as the workstream owner: users register their own agent credentials (`hashd agents login <agent>`), stored sealed in `agent_credentials` on the system DB (`server/internal/agentcred`), and `server/internal/credinject` injects them into agent subprocesses via the `agents.CredentialInjector` hook in `RunStageWithOptions`. The Web Agent logins page (settings, account scope) leads each row with the agent's own sign-in, read per agent from `GET /agents/{agent}/login`: whether the user is signed in, which login runs use, and the `hashd agents login <agent>` command; registering a credential there is the fallback. The TUI settings modal (`s`) does the same: each agent row leads with the agent's own sign-in, read off the UI thread from `GET /agents/{agent}/login` through `hashd_client.server_client.get_agent_login`, and its credential form (paste or lift) is the fallback. Policy is registered-credential-wins in both modes; with nothing registered, a claude or codex run uses the owner's own signed-in harness login on the host that runs the agent (`credinject` login folders), and with neither, team mode refuses owned runs at the run's preflight stage and at launch. Claude, codex and OpenCode runs are *profiled* (`credinject.runProfiles`): every run starts from its own home, `<homes>/<owner>/<agent>/runs/<run>-*/` (0700), where `<homes>` is the one agent-homes store the server shares with its local runner, in that runner's own root (`runnerlayout.AgentHomesRoot` under `runnerlayout.LocalRunnerRoot`, `<ops>-runner`), set as `HOME` (for claude also `CLAUDE_CONFIG_DIR=<home>/.claude`; for OpenCode `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` inside it, empty `OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR`, and `OPENCODE_DB` plus `XDG_CACHE_HOME` in the owner home `<owner>-opencode/`, whose session database and cache are kept), seeded with a `.gitconfig` holding only the project's `git_name`/`git_email` and `safe.directory` for the worktree, and removed when the run's `Done` fires and at server start. Nothing in the server user's home reaches the run: no agent config, plugins, skills or MCP servers, no `~/.gitconfig`, no `gh` login. A profiled run never uses the host's own agent login, in either mode: with no live registered credential it runs on the owner's own signed-in harness login (claude, codex) when there is one, and otherwise only on a credential variable in the effective launch environment, after project auth-mode filtering and declared-env precedence (`agentAPIKeyEnvVars`, checked through `agents.HasCredentialEnv`), and otherwise refuses with the `credinject.credential_missing` Diagnostic naming `hashd agents login <agent>`. The stage preflight and doctor's agent row ask that policy (`agents.CredentialCheck`, `credinject.Service.Check`) instead of the agent's `verify_auth`, which reads the host login. On a single-user server an unowned run (detect, project describe) uses the server owner's credential. Unowned team runs, and the agents not yet profiled (gemini, copilot, qwen, kimi), keep the previous behaviour: single-user mode falls back to the host environment. Credential health lives on the row (`unverified/ok/expired/revoked/conflict/no_entitlement`): the run classifier's auth family marks dead credentials, so the next dispatch fails fast pointing at re-registration. File-kind credentials materialize into refcounted per-user homes under `<homes>` — plaintext exists only while runs hold a reference — and rotated files (gemini's) are sealed back after each run. A push sign-in (#2893) is an agent's own login file registered as its subscription (claude, codex: agents declaring `push_login` beside `login_expiry` in `defaults.yaml`). Only the server refreshes it: at a launch, in the runner credentials reply (`runnerAgentCredential`, against the assignment's whole-stage deadline) or the server's own launch (`Service.PushAccess`, against the run's context deadline), `LocalStore.PushAccess` runs the agent's declared refresh protocol on a temporary copy when the access token expires before that deadline, under one lock per (owner, agent), and re-seals the result before it is used. The launch gets an access-only projection: the declared variable (claude's `CLAUDE_CODE_OAUTH_TOKEN`) or the login file with only the declared copy fields (codex), never the refresh token, and nothing is written back. There is no new route, worker or timer: a sign-in is refreshed only before a launch. A push sign-in's sign-in mode (`agentcred.ConfigDelivery`, consulted only through `credinject.SignInMode` and `IsManual`/`IsProxy`; #2893 step 5) is `manual`, `push` or `proxy`, unset reading as auto, which is push here. Set to manual, the sign-in stays stored and unused: `credentialFor` and the runner credentials reply treat it as nothing registered, so the run takes the owner's own sign-in on its host and the registration never leaves the server. A push sign-in set to `proxy` (only for an agent declaring `proxy:`) reaches its runs by proxy instead (#2893 step 4): the runner credentials reply carries no secret, and `credinject.Service.Resolve` opens a loopback forwarder (`Service.OpenProxy`; `runnerconnect.OpenLoopbackForward`, shared with the Git transport) and gives the run only its address and a random placeholder in the agent's declared variables. On a runner the forwarder sends each declared path over the paired connection to `POST /runner/assignments/{id}/agent-proxy/{agent}/<path>` (runner-authenticated, `runnerAgentProxyOperation`; served only while the attempt runs, for an agent its stage launches, as `credentialAssignment` and `agentCredentialScope` decide); a launch on the server fronts the same handler in process. `Server.agentProxy` puts `LocalStore.ProxyAccess`'s token on the request -- the push sign-in through the same `PushAccess`, refreshed only once it has expired, since a proxied request needs it only when sent, and taken only while the registration it read still goes by proxy -- strips the run's own credential and cookie headers, merges the declared headers, and streams the provider's answer back unchanged. The materialized credential file is removed when the last reference is released and at server start; codex keeps its `sessions/` directory (the rollouts `codex exec resume` reads) in the owner's home across runs and restarts, and every other agent home is removed whole. A claude run home is removed whole too, after its session files (`.claude/projects/<cwd>/<id>.jsonl`, nothing else) are copied into the owner's `<owner>-claude/projects/`; a resume copies its one session file back into the new run home by id. Startup salvages sessions from abandoned run homes before deleting them; a failed copy retains the source, and an older abandoned session cannot replace a newer saved one. Codex runs always take the owner home as `CODEX_HOME`, whatever the credential method, so their sessions stay there. Claude's project settings source keeps loading (repo `CLAUDE.md`, rules, skills, settings); on a run carrying a registered credential the launch's `--settings` carries a credential guard above it (`agents.claudeCredentialGuardFor`): it pins the endpoint, the credential, provider, proxy and telemetry-exporter env variables the run does not set, the command keys it can make inert, plugin enablement, and deny rules on editing the settings files and `.mcp.json`. The launch is refused (terminal `failure_code: agent.profile_refused`, source `agents.claude_project_settings_refused`) for what no pin can hold: credential helpers, hooks, a credential variable the run itself sets, or an unparsable file. Managed settings are untouched. Claude keeps the existing MCP injection behavior: strict when hashd injects servers, no MCP flags otherwise. The run home removes host-user MCP configuration; repo MCP admission is deferred to #2228. What the agent reported loading at start-up (claude's `system`/`init` frame: plugins, skills, MCP servers, slash commands, subagents, plus the settings files in its config directory) is stored on each attempt's transcript meta as `agent_profile`; a field the agent version does not report reads `not reported by this agent version`. Each such run also replaces the agent's latest report for the project, `<project>/runs/agent_profiles/<agent>.json` (with the run's stage, run id and time), and doctor lists that per-stage agent, or "not reported yet". Doctor starts no agent: a read endpoint must not spend tokens or run a project's hooks. hashd never installs, pins, or updates agent binaries: it detects, reports (`hashd agents`, doctor), and refuses with the install hint. OpenCode is deliberately unsupported for server-side credentials (Anthropic prohibits subscription OAuth in third-party harnesses).
+Team-server runs act as the linked story owner: users register their own agent credentials (`hashd agents login <agent>`), stored sealed in `agent_credentials` on the system DB (`server/internal/agentcred`), and `server/internal/credinject` injects them into agent subprocesses via the `agents.CredentialInjector` hook in `RunStageWithOptions`. The Web Agent logins page (settings, account scope) leads each row with the agent's own sign-in, read per agent from `GET /agents/{agent}/login`: whether the user is signed in, which login runs use, and the `hashd agents login <agent>` command; registering a credential there is the fallback. The TUI settings modal (`s`) does the same: each agent row leads with the agent's own sign-in, read off the UI thread from `GET /agents/{agent}/login` through `hashd_client.server_client.get_agent_login`, and its credential form (paste or lift) is the fallback. In both, removing a registered credential also runs the agent's own sign-out in that row's login folder on the server machine, through the selected-runner sign-out (DELETE /agents/{agent}/login with the server's local runner_id) after DELETE /agents/{agent}/credentials succeeds, and the removal and the sign-out are reported as two outcomes. Under the owner credential source, policy is registered-credential-wins in both modes; with nothing registered, a claude or codex run uses the owner's own signed-in harness login on the host that runs the agent (`credinject` login folders), and with neither, team mode refuses the run at its preflight stage and at launch. Claude, codex, OpenCode, Copilot, Qwen, Kimi and Gemini runs are *profiled* (their `agents.<name>.run_home` declaration in `defaults.yaml`, read through `config.AgentRunHome`): every run starts from its own home, `<homes>/<owner>/<agent>/runs/<run>-*/` (0700), where `<homes>` is the one agent-homes store the server shares with its local runner, in that runner's own root (`runnerlayout.AgentHomesRoot` under `runnerlayout.LocalRunnerRoot`, `<ops>-runner`), set as `HOME` (for claude also `CLAUDE_CONFIG_DIR=<home>/.claude`; for OpenCode `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` inside it, empty `OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR`, and `OPENCODE_DB` alone in the owner home `<owner>-opencode/`, whose session database is kept; for Copilot empty `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`, its `COPILOT_HOME` being the owner home `<owner>-copilot/`, whose `session-state/` is kept; for Qwen empty `QWEN_RUNTIME_DIR`, `QWEN_CODE_TRUSTED_FOLDERS_PATH`, `QWEN_CODE_MCP_APPROVALS_PATH`, `QWEN_CODE_HOOK_APPROVALS_PATH` and `QWEN_CODE_MEMORY_BASE_DIR`, its `QWEN_HOME` being the owner home `<owner>-qwen/`, whose `projects/*/chats` is kept; for Kimi `KIMI_CODE_HOME` the owner home `<owner>-kimi/`, whose `sessions/` is kept; for Gemini empty `GEMINI_CLI_TRUSTED_FOLDERS_PATH` and the auth selectors and credential file that would otherwise route a key-only run to the host's Google login (`GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI`, `CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`, `GOOGLE_APPLICATION_CREDENTIALS`), its `GEMINI_CLI_HOME` being the owner home `<owner>-gemini/`, whose `.gemini/tmp/*/chats` and `.gemini/tmp/*/.project_root` are kept), seeded with a `.gitconfig` holding only the project's `git_name`/`git_email` and `safe.directory` for the worktree, and removed when the run's `Done` fires and at server start. Nothing in the server user's home reaches the run: no agent config, plugins, skills or MCP servers, no `~/.gitconfig`, no `gh` login. A profiled run never uses the host's own agent login, in either mode: with no live registered credential it runs on the owner's own signed-in harness login (claude, codex) when there is one, and otherwise only on a credential variable in the effective launch environment, after project auth-mode filtering and declared-env precedence (`agentAPIKeyEnvVars`, checked through `agents.HasCredentialEnv`), and otherwise refuses with the `credinject.credential_missing` Diagnostic naming `hashd agents login <agent>`. The stage preflight and doctor's agent row ask that policy (`agents.CredentialCheck`, `credinject.Service.Check`) instead of the agent's `verify_auth`, which reads the host login. A project-level run (detect, project describe) uses the credential of the person who asked for it, the server owner on a single-user server. A launch that names nobody is refused before it starts. Single-user host fallback is left only for an agent that is not profiled, and every supported agent is. Credential health lives on the row (`unverified/ok/expired/revoked/conflict/no_entitlement`): the run classifier's auth family marks dead credentials, so the next dispatch fails fast pointing at re-registration. File-kind credentials materialize into refcounted per-user homes under `<homes>` — plaintext exists only while runs hold a reference — and rotated files (gemini's) are sealed back after each run. A push sign-in (#2893) is an agent's own login file registered as its subscription (claude, codex: agents declaring `push_login` beside `login_expiry` in `defaults.yaml`). Only the server refreshes it: at a launch, in the runner credentials reply (`runnerAgentCredential`, against the assignment's whole-stage deadline) or the server's own launch (`Service.PushAccess`, against the run's context deadline), `LocalStore.PushAccess` runs the agent's declared refresh protocol on a temporary copy when the access token expires before that deadline, under one lock per (owner, agent), and re-seals the result before it is used. A refresh is a sign-in-again refusal (failure `agent.needs_login`, whose next step signs in again in the owner's chosen delivery) only when the agent's protocol refuses it in its reply -- codex's `account/read` answering with no account, or a reply error the agent classifier reads as an auth refusal -- or when it completes leaving no usable sign-in in the login file (other than claude's unchanged, below). Every other outcome is the server's or the provider's, never `agent.needs_login`, and points at retrying: the agent not starting (not installed: `credinject.push_no_binary`), its output ending before the reply, the deadline or cancellation, an unsuccessful exit, or a reply error naming a network or provider fault, all as `credinject.push_refresh_failed` with the cause kept and, for a fault the classifier recognises, the failure code it maps to (`agent.transient`, `agent.upstream_overloaded`); a credential store or refresh home failing is `credinject.push_refresh_store` or `credinject.push_refresh_home`. The reply is read only for that classification and never kept or reported. A refused server-kept sign-in stands as one critical `agent_sign_in` alert to its owner (team: that owner, none for an unowned credential; solo: the server owner) until a new sign-in, a successful renewal, or removal of the credential or user; it stands against a registration whatever its sign-in mode, manual included, and no mode change ends it: the refusal and its delivery or clear intent commit together, the alert writer consumes the intent in the alert's own transaction (`prepareAgentSignInRefusal`), so a repeat refusal, a restart's replay (`RestoreAccountAlerts`) or a dismissal never raises it twice. It carries the refusal Diagnostic rendered whole and the recovery steps for the owner's current sign-in mode (`credinject.SignInAgainSteps`): `--push` or `--proxy` sign-in for those modes, and for manual, whose stored sign-in a plain `hashd agents login` does not replace, a `--push` sign-in followed by `hashd agents mode <agent> manual`; the alert's action is the first step. Any mode change rewrites the standing alert's steps in place, delivering nothing again and leaving a dismissed alert dismissed, and a restart re-reads each delivered alert from its registration's current mode. Claude's stream-JSON initialize replies `success` whether its refresh was refused or could not reach the provider, so a claude refresh is judged by its login file: emptied is a refusal, left unchanged and expired is a refresh that did not complete (`credinject.push_refresh_failed`). The launch gets an access-only projection: the declared variable (claude's `CLAUDE_CODE_OAUTH_TOKEN`) or the login file with only the declared copy fields (codex), never the refresh token, and nothing is written back. The server also keeps every stored push sign-in renewed whatever its sign-in mode, manual included: `LocalStore.Refresh` is the `agent` participant of the sign-in refresh action, registered at server construction beside the existing credential stores and run by the housekeeping sweep (**Sign-in refresh health reports**). It visits every owner's registrations, unowned ones included, in solo and team mode alike and with no project or run, and under the same (owner, agent) lock renews one only once its declared login expiry has passed, storing the result through `UpdateSecretOf` and projecting nothing: a renewed sign-in reaches a run only through `PushAccess` and `ProxyAccess`, which still keep to the selected mode. A refusal there stands and alerts as above; one sign-in's failure stops no other. There is no new route, worker or timer. A push sign-in's sign-in mode (`agentcred.ConfigDelivery`, consulted only through `credinject.SignInMode` and `IsManual`/`IsProxy`; #2893 step 5) is `manual`, `push` or `proxy`, unset reading as auto, which is push here. Set to manual, the sign-in stays stored and unused: `credentialFor` and the runner credentials reply treat it as nothing registered, so the run takes the owner's own sign-in on its host and the registration never leaves the server. A push sign-in set to `proxy` (only for an agent declaring `proxy:`) reaches its runs by proxy instead (#2893 step 4): the runner credentials reply carries no secret, and `credinject.Service.Resolve` opens a loopback forwarder (`Service.OpenProxy`; `runnerconnect.OpenLoopbackForward`, shared with the Git transport) and gives the run only its address and a random placeholder in the agent's declared variables. On a runner the forwarder sends each declared path over the paired connection to `POST /runner/assignments/{id}/agent-proxy/{agent}/<path>` (runner-authenticated, `runnerAgentProxyOperation`; served only while the attempt runs, for an agent its stage launches, as `credentialAssignment` and `agentCredentialScope` decide); a launch on the server fronts the same handler in process. `Server.agentProxy` puts `LocalStore.ProxyAccess`'s token on the request -- the push sign-in through the same `PushAccess`, refreshed only once it has expired, since a proxied request needs it only when sent, and taken only while the registration it read still goes by proxy -- strips the run's own credential and cookie headers, merges the declared headers, and streams the provider's answer back unchanged. The materialized credential file is removed when the last reference is released and at server start; codex keeps its `sessions/` directory (the rollouts `codex exec resume` reads); copilot its `session-state/` (what `copilot --resume` reads); qwen each project's `projects/<cwd>/chats/` (what `qwen --resume` reads); kimi its `sessions/` (what `kimi --session` reads); and gemini each project's `.gemini/tmp/<project>/chats/` with the `.project_root` beside it (what `gemini --resume` reads; cleanup descends into `.gemini/` and removes the credential files beside them) in the owner's home across runs and restarts, and every other agent home is removed whole. A claude run home is removed whole too, after its session files (`.claude/projects/<cwd>/<id>.jsonl`, nothing else) are copied into the owner's `<owner>-claude/projects/`; a resume copies its one session file back into the new run home by id. Startup salvages sessions from abandoned run homes before deleting them; a failed copy retains the source, and an older abandoned session cannot replace a newer saved one. Codex runs always take the owner home as `CODEX_HOME`, whatever the credential method, so their sessions stay there. Claude's project settings source keeps loading (repo `CLAUDE.md`, rules, skills, settings); on a run carrying a registered credential the launch's `--settings` carries a credential guard above it (`agents.claudeCredentialGuardFor`): it pins the endpoint, the credential, provider, proxy and telemetry-exporter env variables the run does not set, the command keys it can make inert, plugin enablement, and deny rules on editing the settings files and `.mcp.json`. The launch is refused (terminal `failure_code: agent.profile_refused`, source `agents.claude_project_settings_refused`) for what no pin can hold: credential helpers, hooks, a credential variable the run itself sets, or an unparsable file. Managed settings are untouched. When hashd injects MCP servers for Claude, it passes `--mcp-config` without `--strict-mcp-config`, so Claude's own MCP discovery stays on; only the `browser_classify` launch keeps an empty strict config (`--mcp-config {"mcpServers":{}} --strict-mcp-config`), and launches with no injected servers pass no MCP flags. The run home removes host-user MCP configuration. When `mcp.project_servers` is on, hashd injects the servers the repository's root `.mcp.json` defines at the story's pinned base commit (`repomcp.Read` in `RunStageWithOptions`): absent, no-servers, and no-pinned-source inject none, while a refused read refuses the launch before the agent starts with no fallback to the working tree, lane, or branch tip. Servers the harness discovers on its own come from the working tree and its other sources, not the pinned base, and the harness's own precedence decides a shared name. Each attempt's transcript meta records the MCP configuration hashd delivered as `mcp_delivery`: `project_servers`, `project_servers_source`, `project_source_outcome` (`disabled`, `absent`, `no_servers`, `servers`, or `no_pinned_source`), `repository` and full `commit` when a pinned read ran, and every delivered server in `servers` (`name`, `origin` as `project` or `hashd`, `transport` as `stdio` or the definition's declared type, plus `command` and sorted `env_keys` for `stdio` servers — env variable names only, never env values, header values, args, or harness-substituted values). Launches refused for MCP reasons record no attempt. What the agent reported loading or connecting at start-up (claude's `system`/`init` frame: plugins, skills, MCP servers, slash commands, subagents, plus the settings files in its config directory) remains stored separately on each attempt's transcript meta as `agent_profile`; a field the agent version does not report reads `not reported by this agent version`. Each such run also replaces the agent's latest report for the project, `<project>/runs/agent_profiles/<agent>.json` (with the run's stage, run id and time), and doctor lists that per-stage agent, or "not reported yet". Doctor starts no agent: a read endpoint must not spend tokens or run a project's hooks. hashd never installs, pins, or updates agent binaries: it detects, reports (`hashd agents`, doctor), and refuses with the install hint. OpenCode subscription sign-ins are deliberately unsupported for server-side credentials (Anthropic prohibits subscription OAuth in third-party harnesses); OpenCode registers by provider API key only.
+
+OpenCode registers by API key only: its credential's `model` carries the provider in OpenCode's `provider/model` notation, a stage may select another model from that same provider, and a different provider is refused rather than run on the host's credentials. Subscription logins stay excluded.
 
 ### Stage-agent resolution
 
@@ -1645,6 +2388,49 @@ the four roles and reports shape gaps as warnings instead of refusing; a
 stage the agent has no shape for stays on that agent and its launch is
 refused (`stage.shape`), never moved to another agent.
 
+### MCP tool declarations
+
+A tool hashd gives its agents as an MCP server is declared once, as a
+`config.MCPTool` (`server/internal/config/mcp_tools.go`): its server name, the
+project setting that turns it on or off, the agent hooks that belong to it,
+the prompt templates that describe it, and a prompt variable. The declaration
+has three readers, and none of them decides on its own what goes with a tool:
+
+- **The launcher** (`agents`) builds the tool's server definition with its
+  declared hooks on it (`MCPServerDefinition.Hooks`). An agent's launch
+  installs the hooks of the servers it carries, so a server that is left out
+  takes its hooks with it.
+- **The prompt renderer** is handed the project's `mcp` settings by its
+  caller (`prompts.RenderFor`): the server's prompt read for a runner stage,
+  discovery, add-commit and detection each know their project and pass them.
+  It renders an off tool's sections as nothing and gives every template the
+  tool's variable; it reads no configuration itself, and `prompts.Render`,
+  which is given no settings, refuses a tool's section. Stage prompt
+  builders do not check the setting.
+- **The server** answers for the setting where a runner cannot read it.
+
+The code graph (`config.CodeGraphTool`, setting `mcp.code_graph`, project
+scope, on by default) is the one tool declared. With it off:
+
+- `agents.checkoutCodeMap` does not refresh the launch checkout's code map
+  and names none, so the launch has no `code` server and no grep redirect
+  hook.
+- `runflow.IndexCodeMap`, the one path that indexes a workstream's checkout
+  (provisioning, activation, reset, checkpoint reset, a rebuilt checkout),
+  still records the story-named code-map name first and then indexes
+  nothing. A runner learns that from the name record's answer
+  (`RunnerStageWorkstream.code_graph_off`); the server's own index step
+  (`Server.IndexWorkstreamCBM`) reads the setting itself. Startup does not
+  rebuild a missing index for the project.
+- The code query routes refuse through `Server.requireCodeGraph` (409,
+  `code.code_graph.off`), in `resolveCodeTarget` and the code-map tool route.
+
+Each reader takes the setting as it stands when a stage starts; nothing is
+migrated when it changes. See docs/AGENT_MANAGEMENT.md, **hashd's MCP tools
+and the code graph**. Injection of repository-declared MCP servers from the
+pinned `.mcp.json` is controlled separately by `mcp.project_servers`; see
+docs/AGENT_MANAGEMENT.md, **`mcp.project_servers`**.
+
 ### Agent error classification
 
 The agent launcher (`agents.RunStageWithOptions`) classifies final agent output as `success`,
@@ -1652,13 +2438,53 @@ The agent launcher (`agents.RunStageWithOptions`) classifies final agent output 
 agent-auth family (`agent_needs_login` / `agent_needs_api_key` /
 `agent_invalid_api_key` -- non-retryable but resumable after re-auth),
 `usage_limit` (a 429 whose body names the account's session/usage limit --
-non-retryable, carrying the reset time when parseable), `transient`, or
+at most one immediate retry), `transient`, or
 `upstream_overloaded` (the 429/503/529 capacity family, carrying the parsed
 status). `prelaunch_refused` (`agents.ClassifyPrelaunchRefusal`) classifies
 the invocation error rather than output: the runner refused the launch on
 configuration (a `stage_effort` value the agent does not accept), so no agent
 ran. It is never retried and carries the refusal Diagnostic -- key, layer,
 accepted levels, remediation -- which consumers surface unchanged.
+`delivered_read_refused` (`agent.delivered_read_refused`) is an attempt whose
+harness's own permission layer refused to read an input the launch delivered:
+the harness's adapter (`harness.ReadRefusalReader`) reads the refused paths and
+their whole stated reasons from its own error records, never the agent's
+narration or a tool's output, plus every permission notice of the run that no
+record ties to one call (OpenCode runs tool calls concurrently, so its stderr
+lines cannot be paired with them), which the message carries apart, except an
+OpenCode `external_directory` rejection, each of whose patterns names a
+refused directory itself and so is a refusal of it on its own (a shell read leaves
+only that line); core resolves each (a relative one against
+the directory the attempt launched in) and matches it against the directories
+the launch delivered for reading. It fails the attempt even when the process
+exited 0 or gave no answer, and is never retried: neither the empty-response
+allowance nor a retry header schedules another attempt. The evidence rides
+structured on `StageResult.ReadRefusal`, and `agents.ReadRefusalDiagnostic`
+is its one Diagnostic: title, every refused location with the harness's whole
+reason in `detail` and under `data.refused`, the unpaired notices under
+`data.notices`, code `agent.delivered_read_refused`, and the recovery (allow
+the harness's own permission configuration to read the paths, which the fence
+already permits; the run transcript holding the records). The shared failure
+carriers return it whole and unbounded -- `agents.NewCallFailure` (judges),
+`agents.SignInFailure` (implement and the other stages that already surface a
+sign-in Diagnostic), and review's terminal map. A refused attempt usually
+returns a nil invocation error, and one a stage timeout followed returns a
+`RunStageError` beside the evidence, so consumers ask the result through
+`agents.ReadRefusalError` before the invocation error, before reading output and
+before any fallback: chat (no fresh send after a refused resume, no reply
+persisted, the refusal Diagnostic stored on the turn's user row and served
+as its message's `failure`), both repo routers (no fallback route), the planner (never a retried
+planner timeout) and discovery (before its resume fallback), the failing-tests
+reader (whose refusal stops the build, test and baseline stages instead of
+logging, and is returned whole rather than as a classification failure's
+cause), the docs update, adjudication's re-author leg (the judge's failed stop,
+through `runflow.newJudgeFailure`), and the conflict resolver, whose attempt
+loop stops on it as on a prelaunch refusal. A runner whole-stage result
+carrying the code is non-retryable (`runnerconnect.wholeStageError`), so no
+stage workflow launches it again. It outranks implement's
+made-no-changes, unusable-output and declared-stop handling and its fresh
+fallback: an implement resume it ends gets no fresh session and is not read for
+clarifications, and the stage's `run_failed` record stores the Diagnostic.
 
 The classifier reads only the agent's own text. Each agent declares, beside
 its `stdout_format`, the paths inside its JSON stdout events that carry tool
@@ -1704,8 +2530,9 @@ clears after an interval hashd does not retry within; `terminal` -- it needs a
 human), a cause (one sentence naming what the received error establishes) and
 a policy naming the existing retry path: `PolicyNone` (no automatic retry),
 `PolicyAgentAttemptLadder` (the agent-run attempt ladder gated by
-`agents.IsRetryableClassificationKind`) or `PolicyMergeflowBackoff`
-(`mergeflow.retryWithBackoff`). A policy names the path only; its counts and
+`agents.IsRetryableClassificationKind`), `PolicyMergeflowBackoff`
+(`mergeflow.retryWithBackoff`) or `PolicyRunnerRequestRetry` (the runner's
+request retry loop, `runnerconnect` `Client.retryRequest`). A policy names the path only; its counts and
 waits stay in the function it names. A row is `transient` exactly when its
 policy is not `PolicyNone`, and each row's class states what hashd does with
 that failure today.
@@ -1734,39 +2561,23 @@ retries it) or `agent.retry_declined` (`false`; it stops, `terminal`). An empty
 reply retries whatever the header says. The agent transient rows
 (`agent.transient`, `agent.upstream_overloaded`, `agent.empty_reply`,
 `agent.retry_requested`) name the agent ladder, not mergeflow's backoff.
-`usage_limit` is `terminal`: it fails the run. A reported reset can schedule
-one separate retry; the failed run itself never waits or remains in flight.
+The agent ladder permits at most one immediate retry for an account usage limit. A failed run releases its slot on exit and can be retried manually.
 
 Known gap: for an agent other than claude or codex, overload text such as
 `service_unavailable` classifies `upstream_overloaded`, but the ladder's
 retry check reads only `genericRetryablePatterns` for those agents, which do
-not name it, so the attempt stops while its code reads `transient`. `AgentErrorClassification.RetryAfter` is the
-UTC instant `RetryAfterSeconds` names from the caller's receipt time, zero
-without one. Usage-limit resets are read only from the structured error
-envelope, never from agent prose. Classification and retry do not read the catalogue.
+not name it, so the attempt stops while its code reads `transient`. Classification and retry do not read the catalogue.
 
-Implementation and final-review usage-limit retries use `usage-limit:<project>:<workstream>:<failure-event-id>`
-Temporal workflows. The server-owned `runs.usage_limit_retry` records the
-failure event, absolute reset and retry state. Client-written events cannot
-authorize a retry. The existing housekeeping sweep repairs an interrupted handoff to
-Temporal using the same deduplicated workflow ID. Temporal persists the timer
-across worker/server restarts. The timer owns no run or runner claim. Its wait
-is a restart-hold boundary: a restart hold, or a reservation of its
-workstream, asks it to check its holds (`execution-hold-requested`), it
-acknowledges at once instead of at the reset,
-and it sends no retry while a hold stands. At expiry it checks the exact failed run, latest dispatch, workstream
-state and operator supersession before one normal run-dispatch attempt in
-every autonomy mode. Owner-authorized workstream/story actions supersede the
-pending retry. No reset means no timer; account limit marks never gate launches.
-Assignment/unassignment also supersedes the retry. If the timer closes before
-consuming its intent, housekeeping retires the intent and records the failure
-in one transaction; it never recreates that attempt.
-Dispatch is single-shot: an unconfirmed attempt is reported for inspection,
-not blindly sent again. The normal failure actions remain available throughout.
+The review judge (adjudicate with `KindReview`, `server/internal/stages/adjudicate`,
+driven by `runflow/adjudicatedriver.go`) classifies the verdicts that name the
+wrong level of the authority hierarchy: `adjudicate.plan_defect`,
+`adjudicate.ac_conflict`, `adjudicate.ruling_defect` and
+`adjudicate.ruling_conflict`. Each is `terminal` with `PolicyNone`: it needs a
+human's change to the level it names, and hashd never retries it.
 
-The same record carries a second trigger, `sign_in` (migration 000134 records
-the additive shape; its down retires scheduled `sign_in` intents, which an
-earlier server would read as due at time zero). A run whose `run_failed` has
+On the upgrade from a release with reset timers, during the old server’s drain, list open timers directly with `temporal workflow list --namespace hashd --query "WorkflowType = 'UsageLimitRetryWorkflow' AND ExecutionStatus = 'Running'"` against the deployment’s Temporal service. Terminate each listed execution by its exact workflow and run IDs. Repeat the listing and confirm it returns zero executions before replacing the worker. The new worker has no timer handler. Housekeeping retires outstanding reset-time intents without dispatching them.
+
+The run row records recovery triggered by sign-in or server availability. A run whose `run_failed` has
 failure code `forge.needs_sign_in` records the intent in the outcome
 encoder's own transaction (`recordRunOutcome`, under whichever authority the
 outcome carries: its occurrence, a whole test stage's included, or, for an
@@ -1775,9 +2586,7 @@ execution chain, `checkRunExecution`, which also owns that leg's release
 (`DeregisterRunnerInput.Execution`) and records a `pr_fold_publish` sign-in
 failure though it gets no intent), state `scheduled`, with `trigger: sign_in`,
 `owner_id`, `credential_key` and `account` taken from the failure's `owner_id`,
-`host` and `username`, and no `retry_at`. It uses no timer:
-`ScheduleUsageLimitRetry` and the housekeeping recovery never start a
-`usage-limit:` workflow for it, and the failure's standing row says hashd
+`host` and `username`, and no `retry_at`. The standing failure says hashd
 retries once when the owner can use that key again. Operator supersession is
 unchanged. A failure publishing to the open PR writes no intent: at
 `pr_fold_publish`, or a commit stage's push of a fix to the PR, whose payload
@@ -1834,7 +2643,7 @@ through `RetryUsageLimit` itself (its match accepts a `sign_in` intent with no
 `retry_at`): lifecycle lock, `failedRunStillCurrent`, CAS `scheduled` to
 `fired`, `dispatchWorkstreamRunWithTransitional`, then the receipt, Operation
 `sign_in_retry`. Unlike the timer, it is not called while the failed run's
-own workflow is open (`fireSignInRetry`): the failure's handoff runs inside
+own workflow is open (`fireTriggeredRetry`): the failure's handoff runs inside
 that workflow, and admission would refuse the dispatch and spend the attempt.
 Housekeeping (`recoverUsageLimitRetries`) fires a scheduled `sign_in` intent
 whose key reads usable, and reports a `fired` one unconfirmed at once, under
@@ -1842,6 +2651,31 @@ the lifecycle lock, never resending it: it has no timer execution to wait for.
 Supersession is the timed intent's: an operator action, a newer run or a
 closed workstream retires it, and a retried run that fails the same way gets
 its own intent on its own run row.
+
+A third trigger, `available`, waits out a server that could not serve a stage.
+A runner stage that ended on the server's own 503 answer to one of its calls
+carries failure code `server.unavailable` (`waiting`), set by the runner's
+whole-stage error unless the server's Diagnostic named a code of its own other
+than a transient one: a 503 carrying a transient code still fails with
+`server.unavailable`. That
+answer, and only it, is the mark: neither Temporal's default retryability nor
+the runner's default retry flag makes a failure wait. The outcome encoder
+records its intent the way it records a `sign_in` one (`runRetryIntent`,
+`recordRetryIntent`), with `trigger: available`, no `retry_at` and the same
+`pr_publication` exclusion. It uses no timer: each housekeeping sweep
+(`recoverUsageLimitRetries`) fires a scheduled one through `fireTriggeredRetry`
+and `RetryUsageLimit`, receipt Operation `available_retry`. The dispatched run
+is the check: a run that meets the answer again fails with an intent of its
+own, so the workstream waits sweep by sweep. `fireTriggeredRetry` leaves a
+sign-in or available intent scheduled while the failed run's workflow is open,
+and `RetryUsageLimit` takes a triggered intent's execution admission before its
+CAS and holds it through the dispatch, so a restart hold or a pause that stands
+or begins refuses before the attempt is spent and leaves the intent scheduled.
+A commit-stage `server.unavailable` failure on a workstream with an open PR is
+marked `pr_publication`, as a credential refusal there is, and gets no intent.
+A `fired` one is reported unconfirmed as a `sign_in` one is. The standing row says hashd runs it again when the
+server can serve it, checked at each housekeeping sweep. `hashd run <ws>`
+supersedes it like any other intent.
 
 Two credential removals move a scheduled `sign_in` intent to `retired`
 (`retireSignInRetries`, keyed by owner with an optional key over the same
@@ -1975,9 +2809,10 @@ identifier of `ssocred` names an MSAL type, and forge code never calls MSAL.
   ```
 
   Code write covers PR threads and inherits Code read (`vso.code`), including
-  policy evaluations. Boards uses a separately supplied connector credential:
+  policy evaluations. Boards uses the separate `ResourceAzureBoards` resource:
   Work write (`vso.work_write`) includes Work read (`vso.work`), including
-  work-item search, and is not requested by forge sign-in.
+  work-item search; Code read (`vso.code`) covers the PR-relation lookup.
+  The repository resource does not request Work permissions.
   There is no `user_impersonation` or
   `.default` compatibility request. MSAL selects cache entries by the complete
   scope set and refuses partial grants. An unknown resource is refused with a
@@ -2038,10 +2873,19 @@ held-account reuse, cached acquisition and silent renewal without an
 unconditional consent prompt. Cache persistence, owner locks and compare-and-swap
 remain unchanged; no rollout marker or migration is used.
 
-Forge sign-in does not acquire or refresh the Boards connector's separately
-supplied credential. Connector accounts and their PAT/Bearer credential delivery
-remain separate; the connector's credential supplier must grant and renew its
-own access. See [the scope audit](AZURE_DEVOPS_SCOPES.md) for endpoint evidence.
+Boards can select the owner's renewable Entra binding for its organisation,
+alongside PAT and pasted access-token methods. `openPersonalAccount` acquires
+`ResourceAzureBoards` through `ssocred.Core.Token`; it never uses the forge's
+repository-token callback. `personalAccountHost` retains only the selection and
+acquires the current token on every invocation under the core's owner lock.
+This covers reads, tools, outbound notes and connector events, independently
+of housekeeping refresh. A removed or refused selected binding stops delivery
+before any fallback-account path. Delivery outcomes and their durable failure
+records preserve provider Diagnostics, including explanations and recovery steps.
+Credentials are handed only to the connector subprocess environment, stay out
+of Temporal inputs/results, and are redacted from connector output. Pasted
+tokens still require replacement by their supplier. See
+[the scope audit](AZURE_DEVOPS_SCOPES.md) for endpoint evidence.
 
 `server/internal/ssocred/entrafake` is a fake Entra for tests: a TLS server
 answering the tenant OpenID metadata and `/oauth2/v2.0/token`, with scripted
@@ -2472,6 +3316,9 @@ registration.
 
 ### Forge credentials
 
+This section is core's choice of credential. What a backend does with the
+one it is given: [FORGES.md](FORGES.md), section 8.
+
 `resolveForgeAuth` (`server/internal/api/forge_credentials.go`) is the one
 place that chooses a forge credential. For a forge type with an Entra
 resource (`azuredevops`, `ssocred.ResourceAzureDevOps`, mapped beside the
@@ -2519,28 +3366,59 @@ and newer events must not evict it. A
 project command refused this way (`commandcred.CommandCredentialUnavailable`)
 keeps the sign-in Diagnostic's data, its code included.
 
-Keys without a binding, and every other forge type, resolve exactly as
-before: `forge.ResolveAuth`'s CLI-then-stored-token precedence in solo, the
-stored token alone in team.
+For keys without a binding, and every other forge type, a workstream's forge
+operation (`ForgeFor`, `ForgeForWorkstream`, `ForgeForOwner`; resolution
+scope `forgeScopeOwner`) uses the story owner's stored token alone, in
+solo and team alike, so it acts as the same person as the workstream's git
+operations. The host's forge CLI login is never consulted for it: that login
+is whoever last signed in on the host. A workstream with no owner is refused
+(`ForgeOwnerRequired`) in both modes rather than reading the unowned
+namespace; an owner with no token is refused with `ForgeCredentialMissing`;
+and a solo server without its credential store refuses with
+`ForgeTokenStoreReady` instead of using the CLI unchecked. The runner
+credentials route's forge credential follows the same rule. The project-level
+forge feedback route (`forgeForProject`) and project clone
+(`resolveCloneToken`) belong to no workstream and keep `forge.ResolveAuth`'s
+precedence: the CLI login, then the stored token, in solo; the stored token
+alone in team.
 
 Git network operations against origin take the owner's stored credential.
 `GitCredentialForWorkstream`, beside `ForgeForWorkstream`, resolves inside
-the worker activity for the workstream's owner through
-`gitCredentialForOwner`, the one choice the server's own invocations and the
+the worker activity for the linked story's owner through
+`GitCredentialForOwner`, the one choice the server's own invocations and the
 runner credentials route share. Given the URL one git invocation reaches, the
 URL's own transport picks the credential (`forge.RemoteTransport`): for an
 SSH remote (`git@host:path`, `ssh://`) the owner's SSH key for the URL's key
 (`forge_ssh_keys`, `hashd forge login ssh`), with the host key pinned when it
-was stored; for an HTTPS remote the owner's sign-in when the key is bound
-(`signInSource`, shared with `resolveForgeAuth`), otherwise the owner's
-stored token, sent as HTTP Basic under the user name the forge documents
-(`forge.GitTokenCredential`; GitHub refuses an empty one). A plain `http://`
-remote is given no credential, which it would carry in cleartext; a runner
-asking for one is refused (`runner.credentials.uncredentialed_transport`). A forge CLI's login
-is never chosen, and the choice never refuses for a forge that is not
-configured or detected. The unowned namespace is solo's: a team workstream
-with no owner holds no stored token or key, and is refused a key that has an
-unowned binding. The merge cores take it as
+was stored, and never an HTTPS token or sign-in; for an HTTPS remote the
+owner's sign-in when the key is bound (`signInSource`, shared with
+`resolveForgeAuth`), whose refusal is the answer and is never passed over,
+otherwise the owner's stored token, sent as HTTP Basic under the user name
+the forge documents (`forge.GitTokenCredential`; GitHub refuses an empty
+one). An owner with neither for the URL's transport is refused with
+`ForgeCredentialMissing` (`forge.credentials.missing`), naming the command
+that stores the one the transport takes. A destination that cannot carry a
+forge credential -- a plain `http://` remote, which would carry it in
+cleartext, or `git://` -- is refused before git runs
+(`forge.credentials.uncredentialed_transport`; a runner asking for one is
+refused earlier, `runner.credentials.uncredentialed_transport`), as is an
+HTTPS or SSH URL naming no forge credential key
+(`forge.credentials.unkeyed_remote`),
+and a server without its credential store with `ForgeTokenStoreReady`'s
+refusal. A forge CLI's login is never chosen, and the choice never refuses
+for a forge that is not configured or detected. A destination reached
+through the local filesystem (an absolute path or `file://`,
+`runnerworkspace.LocalTransport`, or a relative path as git keeps one
+configured: no `://`, and no colon or a slash before the first one, git's own
+rule, so every scp-like address, an unreadable one included, is SSH and
+refused) takes no credential and runs locally; it is the resolver's only nil answer. Every other destination needs an acting person:
+a nil owner is refused with `ForgeOwnerRequired`
+(`forge.credentials.owner_missing`) in solo and team alike, before any
+credential store or binding is read, so git never resolves the unowned
+namespace, and no workstream, story or recorded initiator ever falls back to
+the host's git configuration. Each refusal travels as the
+invocation's `GitResult.CredentialErr`, a non-retryable credential failure
+carrying the whole Diagnostic. The merge cores take it as
 `mergeflow.Deps.RemoteAuth`, and the runner's as `runflow.Deps.RemoteAuth`,
 each through its `Deps.Remote`. The merge, PR and resolve fetches, pulls,
 `ls-remote` calls and pushes, and the runner's -- the provisioning base fetch,
@@ -2582,8 +3460,9 @@ public key and a known_hosts holding only the pinned host key, with
 types and `BatchMode=yes`. The private key never touches disk, and
 `NetworkAuth.Close`, which every caller defers past the child's exit, removes
 the key and the directory. The host's agent, `~/.ssh` keys and known_hosts
-and `gh` login are never used. A key without a binding keeps git's argv and
-environment exactly as before on the server; a runner refuses it.
+and `gh` login are never used. A nil source, which the server's resolver
+answers only for a local-filesystem destination, keeps git's argv and
+environment exactly as before.
 
 The host key is pinned at `hashd forge login ssh`: the server reads the key
 the forge's SSH host presents on port 22 (`forge.ScanHostKey`, trust on
@@ -2605,9 +3484,10 @@ the forge API credential of the assignment's origin (`forge_type`, `host`,
 resolvers are `runnerconnect.GitResolver` and `runnerconnect.ForgeAuth` (for
 `forge.NewAuthenticated`, whose sign-in source asks the route on every call);
 from there git and forge code run on the runner exactly as on the server. A
-credential the owner has not stored is refused (`runner.credentials.git_unbound`,
-`runner.credentials.forge_unbound`) with the command that stores the one the
-transport takes, `hashd forge login ssh --host <host>` for an SSH origin.
+credential the owner has not stored is refused (`forge.credentials.missing` for
+`git`, `runner.credentials.forge_unbound` for `forge`) with the command that
+stores the one the transport takes, `hashd forge login ssh --host <host>` for an
+SSH origin.
 
 Local projects (a successfully inspected configured repository with no `origin`)
 use that repository on the hashd server as the runner's origin. The stable
@@ -2647,16 +3527,20 @@ the branch's configured upstream, so the URL its credential is chosen for throug
 `gitnet.SelectCredential` and `gitnet.AuthenticateSelected` is the one it
 reaches. A bound URL runs under `git.network_timeout` with the controlled
 environment replaced and the value redacted from git's output; a credential
-failure is returned as itself. Without a resolver, or with that URL unbound
-(whatever origin's push URL is), the sync's bare `git fetch` is unchanged, as
-git's own configuration selects the remote and refspec.
+failure is returned as itself. Without a resolver, or for a local-filesystem
+origin, the only URL the server's resolver answers no source for, the sync's
+bare `git fetch` is unchanged, as git's own configuration selects the remote
+and refspec; a network origin the owner has no credential for is refused,
+never fetched bare.
 
 A REQS write given a resolver (`CommitReqsOptions.Credentials`) pushes, and
 fetches for a push-retry replay, the same way. Each push and fetch decides
 when it runs, from the binding of the URL that command reaches on origin
-alone: bound, it names origin and the checked-out branch explicitly and is
-authenticated by that binding; unbound, it is the bare `git push` or `git
-fetch` it was before. What is unpublished -- what the drain pushes and what a
+alone: with a source, it names origin and the checked-out branch explicitly
+and is authenticated by it; with none -- no resolver, or a local-filesystem
+origin -- it is the bare `git push` or `git fetch` it was before. A network
+origin the owner has no credential for is refused as a credential failure,
+never pushed or fetched bare. What is unpublished -- what the drain pushes and what a
 failure reports -- is measured against the push's destination: for a push
 naming origin, `refs/remotes/origin/<branch>` (all of HEAD's history before
 that ref was ever fetched; another branch holding a commit does not count),
@@ -2721,7 +3605,11 @@ The REQS writers that pass a resolver, and whose binding each uses:
   `project gitleaks init` remains a control-repository initializer using
   `reqs.BeginDocumentCommit` and the requesting user's credential resolver.
   Existing misplaced ignore files are left untouched.
-- The merge gate uses the checkout's `.gitleaks.toml` for its per-file scans,
+- Every hashd push scans all outgoing commits before publication; the merge
+  gate uses the same scanner over every commit since the branch's merge base.
+  Removed-at-tip secrets and merge-commit resolutions are included. Scanner
+  failure refuses the push, including archive publication that bypasses the
+  repository hook. The shared policy uses the checkout's `.gitleaks.toml`,
   unless `GITLEAKS_CONFIG` or `GITLEAKS_CONFIG_TOML` overrides it in gitleaks'
   native precedence. Gitleaks resolves and validates extended-file contents at
   scan time; hashd neither parses them nor fingerprints the extension chain.
@@ -2739,12 +3627,17 @@ The REQS writers that pass a resolver, and whose binding each uses:
 Discovery's REQS sync (`reqs.SyncCheckout`, from `pm.RunDiscoveryAgent`)
 authenticates as the requesting user (`resolveActingUserID`, recorded as
 `DiscoveryInput.RequestedBy`) through `Server.gitCredentialResolver` on every
-agent attempt. An older run with no recorded requester passes a nil owner
-through the same resolver. Unbound keys use the same stored-token fallback
-and SSH behavior as every other owner-bound path. A sign-in refusal ends the
-run with its whole Diagnostic on `discovery_failed`; it does not degrade to
-the stale-REQS notice. An infrastructure failure retries under the agent
-leg's policy.
+agent attempt. An older run with no recorded requester passes a nil owner,
+which the resolver refuses with `forge.credentials.owner_missing` for any
+network destination. The requester's credential is chosen as on every other
+owner-bound path: the sign-in for a bound HTTPS key, otherwise the stored
+token, the stored SSH key for an SSH origin, and a refusal
+(`forge.credentials.missing`) when the requester has none. A sign-in refusal ends the
+run with its whole Diagnostic on `discovery_failed`; it is not reported as a
+requirements refresh failure. An infrastructure failure retries under the
+agent leg's policy. Any other outcome of that sync (`*reqs.SyncOutcomeError`)
+ends the run the same way, before REQS is read or the agent runs, with a
+`discovery.reqs_refresh` Diagnostic on `discovery_failed`.
 
 Egress set-remote (`reqs.SetRemote`, from `POST /projects/{name}/set-remote`)
 authenticates its pushes as the requesting user (`resolveActingUserID`,
@@ -2753,7 +3646,12 @@ the remote URL names). Each of `push --all origin` and `push --tags origin`
 asks `gitnet.AuthenticateRemote` first: a bound key's push runs with that
 binding's Authorization alone, the controlled environment replaced and the
 value redacted, and the static or CLI token `resolveCloneToken` picks is not
-sent; an unbound key's push carries that token exactly as before. Its
+sent; an unbound key's push carries that token exactly as before. This is
+the one caller for which the resolver's missing-credential refusal
+(`forge.credentials.missing`) reads as an unbound key: set-remote is project
+onboarding, not a workstream operation, and its forge authentication is
+outside the owner's-credential-only rule, so it keeps its token fallback
+(recorded at the call site in `egress_dispatch.go`). Its
 https-only check, private-host check (`assertRemoteHostAllowed`) and network
 guard stay in force for both: the SSRF proxy rides into the authenticated
 child as a command-line config entry (`gitnet.Child.Config`, read before
@@ -2767,15 +3665,15 @@ credential failure is `SetRemote`'s error as itself, not
 `forgeResolutionError`: the sign-in Diagnostic for a refusal, 500 for an
 `*InfrastructureError`. The remote stays set.
 
-The workstream git operations that pass a resolver, each as the workstream's owner (ws.UserID, through Server.gitCredentialResolver):
+The workstream git operations that pass a resolver, each as the linked story's owner (ws.UserID, through Server.gitCredentialResolver):
 
 - `removeWorkstream`'s forge cleanup: the remote branch `ls-remote --heads
   origin <branch>` probe and its `push origin --delete <branch>`, both through
   `mergeflow.RunRemoteGit` under `git.network_timeout`. A credential failure
   there stays a nonfatal cleanup warning, rendered by `forgeFailureText` (the
   sign-in Diagnostic for a refusal), and removal completes.
-- `branchForkPoint`, the base fetch that reset, replan and a requirements
-  revision's approval share through `resetWorktreeToBase`: its
+- `branchForkPoint`, the base fetch that reset and replan share through
+  `resetWorktreeToBase`: its
   `runflow.CurrentBaseCommit` read of origin's base runs as the workstream's
   owner under `git.network_timeout`. A credential failure answers through
   `forgeResolutionError` (the sign-in Diagnostic at 4xx for a refusal, 500 for
@@ -2783,13 +3681,22 @@ The workstream git operations that pass a resolver, each as the workstream's own
   or `git reset --hard` touches the worktree. When reset or replan closed a
   parked run first, `parkedRunAfterCloseError` adds that closure to the
   credential Diagnostic as a fact rather than reframing it.
-- `checkpointUnpublished`, checkpoint reset's publication check: the
-  `ls-remote <url>` and the missing-object history `fetch --stdin <url>` for
-  every URL `remote -v` lists, through `mergeflow.RunRemoteGitOn` under
-  `git.network_timeout`, the binding chosen separately for each remote URL.
-  A credential failure answers through `forgeResolutionError` (the sign-in
-  Diagnostic at 4xx for a refusal, 500 for an `*InfrastructureError`), not as
-  a publication failure, before the backup ref or the worktree is touched.
+- Explicit checkpoint/full reset and replan observe origin as the workstream
+  owner before changing the checkout, ask the existing PR rewrite rule, and
+  publish the reset target through the shared explicit force-with-lease path.
+  The runner's reset stage asks the rule with `requested` set only for
+  `commitrecord.OperationReplanDiscard` (`runWholeResetWorktreeBody`), so a
+  person's review does not refuse a replan's publication while a failed or
+  incomplete PR read still does (`reset.rewrite_refused`); reset, checkpoint
+  reset pass `requested` false and stay review-protected.
+  A rewrite refuses while another open workstream's recorded target branch
+  uses this story branch as its base. Reset events retain the old origin SHA.
+  The checkpoint backup and full-reset lease receipt retain that original
+  lease across retries, refusing an intervening remote tip unless it already
+  equals the reset target. A full-reset receipt is retired only against its
+  committed reset/replan event, through runner receipt cleanup.
+  Credential failure refuses before the backup ref or worktree is touched.
+  Retry soft-reset still refuses published agent-attempt commits.
 - `readPRThreads`' origin fetch, the `fetch origin <branch>` that freshens
   the tracking ref after the PR threads read (shared by GET
   `/workstreams/{id}/pr/threads` and reject's thread read), through
@@ -2800,26 +3707,29 @@ The workstream git operations that pass a resolver, each as the workstream's own
   the existing tracking ref.
 - `previewMergeConflicts`' optional fetch, the `fetch origin <refspec>` of
   the target branch behind GET `/workstreams/{id}/conflicts/preview`, as the
-  workstream owner through `mergeflow.RunRemoteGit` under
+  story owner through `mergeflow.RunRemoteGit` under
   `conflictPreviewFetchTimeout`. A credential failure is surfaced through
   `forgeResolutionError` (the sign-in Diagnostic at 4xx for a refusal, 500
   for an `*InfrastructureError`) rather than reported as `FetchFailed`; any
   other fetch failure still sets `FetchFailed` and the preview reads the
   last-known tracking ref.
 - `inspectConflictInfo`'s optional fetch, the `fetch origin main` behind GET
-  `/workstreams/{id}/conflicts`, as the workstream owner through
+  `/workstreams/{id}/conflicts`, as the story owner through
   `mergeflow.RunRemoteGit` under its 5-second bound. A credential failure is
   surfaced through `forgeResolutionError` rather than reported as
   `GitProbeFailed`; any other fetch failure still sets `GitProbeFailed`. The
   snapshot's call passes `fetch=false` and makes no network call.
-- `tryClearBaselineGate`'s origin refresh, the `fetch origin <refspec>` of
+- `tryClearBaselineGate`'s origin refresh (`refreshBaselineBase`), the `fetch origin <refspec>` of
   the target branch before a baseline-blocked run dispatch rechecks whether
-  the base moved, as the workstream owner through `mergeflow.RunRemoteGit`
+  the base moved, as the story owner through `mergeflow.RunRemoteGit`
   under `git.network_timeout`. A credential failure refuses the dispatch
   through `forgeResolutionError` (the sign-in Diagnostic at 4xx for a
   refusal, 500 for an `*InfrastructureError`) and clears nothing in the
   baseline gate; any other fetch failure still refuses with the 500 naming
-  the redacted git output.
+  the redacted git output. The same refresh runs before a plain Go at a
+  `baseline_unparsed` provisioning stop; there a moved base is recorded and
+  the run dispatches to provisioning, which judges the baseline at the new
+  head, rather than clearing to active.
 
 Both WIP cleanups refuse while the REQS file has uncommitted changes
 (`refuseDirtyReqs`). Every REQS writer commits its own edit under the REQS
@@ -2887,11 +3797,54 @@ The canonical user-facing state model lives in `WF.md`. Derived display fields
 such as `runtime_status`, transitional status, and current errors are computed
 server-side so CLI, TUI, bot, and future clients do not drift.
 
-AI-resolve dispatch captures the preserved `merge_gate` origin in `ResolveInput`.
-For that origin, `RunAIResolve` returns to `implementing`; `ResolveWorkflow`
+AI-resolve dispatch captures the preserved `merge_gate` origin or an unfinished
+FIX publication in `ResolveInput`. The latter is identified by the next undone
+FIX and its completed commit intent, even after the runner stage is cleared.
+For either origin, `RunAIResolve` returns to `implementing`; `ResolveWorkflow`
 uses `ResumeWorkstreamRun`, shared with AC amendments, to dispatch the ordinary
 runner through `Server.ResumeWorkstream` and its lifecycle lock and FSM guards.
+Before each dispatch, after a completed resolution or a scheduled FIX
+(`continueRun`), the resolve runs `awaitHoldBoundary` at
+`workflows.ResolveContinuationBoundary`, site `resolve-continuation-<n>`, each
+its own `GetVersion` change: held, it is acknowledged like any boundary and
+released by `ReleaseAcks` -- `StartupReleaseAfterReady` after a restart, an
+exact-request unpause after a pause -- and the completed result stays in its
+history, so nothing is resolved, recovered or rolled back again. Startup
+recovery (`listInterruptedWorkstreams`) is not broadened for it: the
+acknowledged resolve is the preserved hand-off. Only
+`ContinuationHeldDiagnostic` -- admission's own pre-start refusal of a hold
+that landed after the check -- returns the loop to the boundary, at the next
+site; a site a history recorded before the boundary replays unversioned and
+records that refusal as below.
+A continuation that is not confirmed started -- the operator's cancel after the
+resolve completed, a hold's refusal under a history from before the boundary,
+or any other dispatch failure, whose start stays unconfirmed and which is never
+redispatched -- is recorded on the
+disconnected rollback context by `RecordResolveContinuationStop`: one
+`resolve_continuation` operation_result on the workstream
+(`RecordOperationResult` inside the write, published after commit) naming what
+completed and was kept, the reason, the dispatch's Diagnostic in `related`, and
+`hashd show` then `hashd run`, the unconfirmed record saying a run may already
+be running. Deliberately its own operation, not `ai_resolve`, so a scheduled
+FIX's handoff record keeps its slot; and not a run outcome, whose run and
+execution authority (`checkRunExecution`, `recordedRunStart`) refuses an
+outcome with no `run_started` row. The activity takes the source execution from
+its runtime, records nothing when a run started since the workstream's last
+move into `resolving`, and its row retires on a later `run_started`
+(`workflows.ResolveContinuationRunKey`, the requirements-run retire signal). An
+execution that scheduled the earlier run outcome replays it
+(`resolve-continuation-record`).
+The FIX's recorded rewrite lineage keeps its resolution out of the implementer;
+normal verification and commit recovery finish the same plan entry.
 PR presence only selects the destination for publish/merge-origin resolution.
+AI resolve is a requested rewrite of the PR's branch
+(`mergeflow.rewriteAllowed`): its admission (`resolveRewriteRefusal`) and its
+push both ask `RewriteDecisionFor` with `requested` set, so a person's review
+does not refuse it, while a failed or incomplete PR read, or a
+`pr.completion` the forge cannot honour, does
+(`mergeflow.resolve.rewrite_refused`), and the push keeps its publication
+lease. It takes no acknowledgment input. Every automatic push site passes
+`requested` false and stays review-protected, with its push-time recheck.
 Every leg verifies the resolved tree before it pushes or records success: the
 semantic leg from `merge_test_failed` runs the build at the tip
 (`regenerateTip`, committing what the build rewrites) and then the merge gate's
@@ -2904,6 +3857,53 @@ caveat plus any standing `RequiredChecks`, and it skips the verification
 entirely when none stands. The semantic leg leaves it unset: dispatched over a
 recorded gate failure, it reports an unconfigured gate as the failure, and the
 unconfigured hard-fail itself stays with the merge, which is landing work.
+
+A recorded command failure creates an obligation independent of repair retention.
+A completed passing execution of that exact argv by hashd for the same lane,
+ordered after the corresponding failure, pays it once. A go-anyway acceptance
+for exactly that execution's revision and failures also pays a test obligation
+without rewriting its nonzero process outcome or failure evidence. Later rebases (including
+document-only target advances) do not revive a paid obligation. Another recorded
+failure renews only its command; replacing `current_failure` preserves other
+unpaid commands and prior discharges. Configuration changes and skip flags do
+not pay obligations. Manual `hashd test`, base comparisons, other lanes,
+narrowed checks and incomplete outcomes cannot pay them.
+
+The server narrows execution reads by lane and command before decoding evidence.
+New failure anchors keep the server's durable execution-order floor; historical
+anchors use their corresponding failed execution's insertion order, or the
+original failure's server timestamp when available. `repair.created_at` never
+dates a later `current_failure`, and runner clocks never establish this order.
+When a historical failure has no execution anchor, the upgrade's execution-order
+watermark conservatively admits later verifications; it does not preclude
+provable passes before upgrade. No timestamp or pass is invented for historical records. Chute build and test
+failures use their existing run evidence and retirement stamps even without a
+repair row and never create or spend an automatic-FIX allowance. Re-entering
+merge without a gate keeps each unpaid chute command; a qualifying pass stays
+paid across restart, another attempt and later preparations in the merge lock.
+Each preparation reads current obligations rather than retaining the attempt's
+initial required-check snapshot. New chute records also carry the execution-order floor. Required
+verification executes an unpaid command rather than borrowing an older content
+cache pass. This changes command obligations only: retained evidence, ruling,
+FIX binding, spent allowance and reset/checkpoint-reset/replan retirement
+boundaries remain intact. Merge and FIX gates consume this same outstanding-command
+projection. Each qualifying execution pays its command even if a later check
+blocks the gate. Discharged commands add no execution beyond ordinary gate
+policy. Reused verification retains its original lane and execution order;
+a configured-suite match or a full/fast pair alone cannot discharge a check.
+Assigned context reads retain the raw repair separately for recovery ownership
+and allowance decisions.
+
+Explicit recovery and shared post-rebase verification retain each completed
+command execution before the aggregate outcome, including when a later command,
+regeneration commit, or publication fails. Each qualifying unrestricted pass
+pays only its own command through the shared resolver; the retained repair
+adds no replay after that discharge. Ordinary configured checks and cache
+eligibility still apply. Reuse keeps its original execution reference and time,
+and a touched-file fast pass never becomes an unrestricted command execution.
+The successful-command list used to retire recovery clarifications is separate
+from this evidence: an argv list alone cannot discharge an obligation.
+
 Every failed verification exits through `parkVerification`, which repairs
 nothing itself: no code-editing agent, no commit, no reset. It returns
 `ctx.Err()` untouched on a cancelled context; otherwise it stores a failure
@@ -3134,7 +4134,13 @@ continues to `implementing` and its `mc_selected` row names the admission. An
 admission refusal is a `diagnostic.Error` carrying the admission's data, which
 `RunnerSelect` returns as a non-retryable `select_outcome` ApplicationError
 with `failureDetailsFromDiagnostic`, so the `run_failed` record carries it
-whole and the workstream stays at `merge_test_failed`.
+whole and the workstream stays at `merge_test_failed`. Select fires `start_impl`
+every time it hands out a micro-commit, after any bound-FIX hand-off. The
+contract allows it from `active` and `awaiting_human_review` into `implementing`
+(with its `state_changed`) and from `implementing` as an internal self-row that
+records nothing; from any other state the table refuses it, and the run fails at
+select with a `select_outcome` refusal naming the state, recording no
+`mc_selected` row and starting no implementer.
 `operationResultRetireSignals.FixCommitDone` retires a record naming a
 `fix_commit` once the plan marks that FIX done, and `RecoveryQuestionClosed`
 retires a park naming the recovery question it left pending
@@ -3207,7 +4213,73 @@ a resolution or starting `ResumeWorkstreamRun`, and `RollbackResolve` and
 `maybeHealStaleResolving` land a workstream left at `resolving` over that record
 (`ResolveRecordedPublicationFailure`) at the same exit; the crash leg writes
 its system_error but no crash operation_result over a standing publication
-record. The semantic leg retires the break its passing gate suite answered
+record.
+
+A resolved landing has one server-owned `resolved_landings` row. Immutable
+facts bind its project, workstream, repository, branch, execution, runner and
+placement, original tip/WIP, resolved tip/base, original remote lease,
+publication obligation, return state, resolver origin, continuation parent and,
+for a story rebase, every generated file it resolved with the base's copy (the
+land step is handed that list from the result of the step that completed the
+rebase, which reports every file its replay took across continues, kept in the
+rebase's `taken` record; a take recorded before it was made counts only if its
+stop's resolution is the base's copy, and a stop continued outside hashd before
+the take was recorded is refused as an unknown replay rather than guessed; the
+server checks each is a path in the repository).
+Git refs retain objects and record atomic local moves; they do not certify
+publication. Events project the row for operators, never infer its state or count.
+
+Before publishing, the assigned stage records `resolved`, then `publishing`.
+Exact origin confirmation records `published`; an actual `BehindBase` verdict
+records `refused_base_moved` only for resolved work. A proven no-send/refusal is
+`not_published`; a lost outcome is `unconfirmed`. A later no-send retry cannot
+cancel evidence of an earlier possible write. Recovery never pushes. It may
+confirm the exact published tip, finish a known landing, or restore a proven
+unpublished attempt and record `undone`. Equality with the old remote lease is
+not proof that no push happened. Exact parity satisfies publication without
+claiming a remote code change. The ordinary push retry policies are unchanged.
+
+Local application is acknowledged through the record. Acceptance commits the
+base, existing return transition, ordinal and standing operation result together.
+A story rebase's succeeded result also carries the landing's facts, read from
+its record, as one typed payload (`mergeflow.StoryRebaseLanding`, key
+`rebase_landing`): the base it landed onto, whether the push moved origin's
+branch, whether uncommitted work was carried, every generated file kept from
+the base, and how many base-moved continuations preceded it (its parent's
+ordinal). That row (`mergeflow.StoryRebaseLandingRecord`) is classed
+`invalidated_by: code_change` and stands as the landing's notice
+(**Standing-record evidence and rendering**, story-rebase outcomes).
+Active recovery refs are forgotten only after acceptance; identified retained
+refs preserve the resolved objects. An AI resolve returns to `implementing` for
+a runner origin, otherwise `pr_open` or `ready_to_merge`. A resolved story rebase
+whose base moved keeps its rebased branch and carried work rather than undoing it.
+
+A refused landing fixes one successor before dispatch. Runner-origin resolves
+continue through the ordinary run admission; PR/ready resolves and story rebases
+continue through the ordinary rebase admission. Story-rebase continuations use
+ContinueAsNew, with AI conflict handling only when the prior origin was AI;
+manual origins still wait for a person. No gate, lease or final-review guard is
+bypassed. Exact Temporal identity and the landing memo reconcile lost start
+responses; an unrelated live workflow does not count as a started continuation.
+
+The accepted parent/child series permits ten automatic continuations. The
+eleventh refusal keeps the resolved work and stops with its revision and the
+existing `hashd run` or `hashd rebase <story> -y` command. Duplicate acceptance
+cannot increment or reset this ordinal. Operator dispatch starts a new series;
+confirmed publication fulfills the outstanding obligation. A rebase retains a
+first-publication obligation across cancellation and an explicit retry. An
+unconfirmed handoff or a successor that ends without landing records a durable
+stop naming the retained revision, `hashd show`, and the continuation command.
+A snapshot cannot settle a pending landing from a clean checkout.
+
+The transport is internal: typed `resolved_landing` on existing stage-context,
+and a typed change/receipt on existing stage-run-evidence, one operation per
+call under `StageWrite`. Assignment and workflow facts supply authority; the
+runner supplies Git evidence only. There is no new URL, user-facing REST field,
+CLI, setting, FSM state/trigger or timer. Server and runners upgrade together;
+there is no compatibility shim for the old publication flags.
+
+The semantic leg retires the break its passing gate suite answered
 before it pushes, as the textual legs do. A later succeeded
 operation_result -- `pr push`, a merge, a resolve -- retires the record through
 the existing success sweep. A pass of the gate's own command calls
@@ -3257,6 +4329,20 @@ transaction and publishes the flip after commit. A refused command returns its
 own Diagnostic and leaves the question pending. Every other kind keeps
 `reqs.ResolveOptionAnswerMatched`'s whole-answer index match.
 
+**Verdict-gate records have no answer path.** The kinds `plan_defect`,
+`ac_conflict`, `ruling_defect` and `ruling_conflict` (`reqs.VerdictGateKinds`)
+record a review judge's verdict naming the level of the authority hierarchy
+it found wrong: a micro-commit's description, an acceptance criterion, a
+prior operator ruling, or two rulings against each other. Each is
+workstream-scoped and always non-blocking (`ValidateClarificationDrafts`), so
+it trips no pending-clarification guard and the run `hashd approve` starts
+does not park again at its clarification check. No answer resolves one: the
+workstream route, the by-id route and both answer availability reads refuse
+any answer while one is pending (`verdictGateAnswerRefusal`,
+`answer.verdict_gate`), naming the gate's own verbs, `hashd approve` and
+`hashd reject`. None enters the acceptance-criteria amendment path, which
+stays `requirements_conflict` / `ac_edit_proposal` only.
+
 ### Current activity readers
 
 This is the existing implementation inventory.
@@ -3265,7 +4351,7 @@ shipped state and execution-ownership boundaries. The readers below use
 different liveness and outcome rules; no shared activity-result implementation
 is claimed here.
 
-**The forge's reviewer, dated against head**: hashd's own reviewer is re-run every cycle, so its `request_changes` is always an answer about the commit at head — it cannot be stale, and it drives `changes_required` on its own. A forge's aggregate CHANGES_REQUESTED is not: it is a derived state built from a past review event that no forge recomputes when new commits land, so on its own it drives nothing. What drives the status is the freshness test the merge stop already ran (`mergeflow.ClassifyChangesRequested`, recorded on that stop's row and handed back to the derivation as `fsm.ForgeChangesRequestedFreshness` by the workstream reads). **At-head** — a reviewer requested changes on the commit the PR points at now — reads exactly like the internal verdict: `changes_required`, alongside the current error the merge stop's own fault record already carries, titled "Changes requested by &lt;reviewer&gt; on &lt;head&gt;" -- or worded as unpublished local work when the branch holds commits the PR has never been shown ([WF: The local branch against the published head](../WF.md#the-head-test-on-a-forge-changes-requested-verdict)). The derivation drives the status only: the record is the one error row, so `hashd show` prints the sentence once and the dashboard badge counts one problem once. **Stale** (every changes-requested review predates the head) and **undecidable** (the review read failed, no head to compare against, or a backend that cannot attach a commit to a review — always GitLab and Bitbucket, and Gitea whenever the read drops `commit_id`) drive neither status nor error: the aggregate decision field is the thing the test exists to distrust, and undecidable is the case where it is all we have, so the stop stays a notice — visible, never red. The derived state needs no clearing rule of its own: the record it is read off classes itself `invalidated_by: code_change`, and when that retire drops the record the status goes with it. The retire fires on a *declared* code change, and only the publishers that record an outcome row of their own declare one — the two `pr_*` verbs, `ai_resolve`, and the runner's fix push to an open PR, which records under `pr_push` for exactly this reason: it is the run this record's own help prescribes, so it has to be able to drop the verdict it addressed (in autonomous mode; in gatekeeper and supervised that run publishes nothing, and the operator's `hashd pr push` is what drops it -- the autonomous run that publishes a branch its open PR does not carry runs the `pr push` verb's own `RunPRPush` and declares on that verb's row).
+**The forge's reviewer, dated against head**: hashd's own reviewer is re-run every cycle, so its `request_changes` is always an answer about the commit at head — it cannot be stale, and it drives `changes_required` on its own. A forge's aggregate CHANGES_REQUESTED is not: it is a derived state built from a past review event that no forge recomputes when new commits land, so on its own it drives nothing. What drives the status is the freshness test the merge stop already ran (`mergeflow.ClassifyChangesRequested`, recorded on that stop's row and handed back to the derivation as `fsm.ForgeChangesRequestedFreshness` by the workstream reads). **At-head** — a reviewer requested changes on the commit the PR points at now — reads exactly like the internal verdict: `changes_required`, alongside the current error the merge stop's own fault record already carries, titled "Changes requested by &lt;reviewer&gt; on &lt;head&gt;" -- or worded as unpublished local work when the branch holds commits the PR has never been shown ([WF: The local branch against the published head](../WF.md#the-head-test-on-a-forge-changes-requested-verdict)). The derivation drives the status only: the record is the one error row, so `hashd show` prints the sentence once and the dashboard badge counts one problem once. **Stale** (every changes-requested review predates the head) and **undecidable** (the review read failed, no head to compare against, or a backend that cannot attach a commit to a review — always GitLab and Bitbucket, and Gitea whenever the read drops `commit_id`) drive neither status nor error: the aggregate decision field is the thing the test exists to distrust, and undecidable is the case where it is all we have, so the stop stays a notice — visible, never red. The derived state needs no clearing rule of its own: the record it is read off classes itself `invalidated_by: code_change`, and when that retire drops the record the status goes with it. The retire fires on a *declared* code change, and only the publishers that record an outcome row of their own declare one — the two `pr_*` verbs, `ai_resolve`, and the runner's fix push to an open PR, which records under `pr_push` for exactly this reason: it is the run this record's own help prescribes, so it has to be able to drop the verdict it addressed (in every autonomy mode; a run that publishes a branch its open PR does not carry runs the `pr push` verb's own `RunPRPush` and declares on that verb's row).
 
 **Publish liveness**: `pr create` and `pr push` dispatch as their own workflows (`prcreate:{project}:{ws}` / `prpush:{project}:{ws}`) but never move the workstream into a stage of their own — a push runs while the workstream sits at `pr_open`. No macro stage carries their liveness, so the API read helpers probe the workflow ID directly and feed the answer to the derivation, where it outranks the review verdict: a push executing over a `request_changes` review reads `running`, not `changes_required`. It outranks nothing above that. The run-derived `failed`/`blocked` verdict and a blocking clarification are both decided first, so a genuine run failure or blocked verdict still beats a live push (pinned by the `open_publish_does_not_mask_failed_run` case). The probe therefore changes the answer only where the workstream has no failed/blocked last run and no blocking clarification; `merge_test_failed` and a post-FIX `awaiting_human_review` are reached precisely *with* such a run, so the breadth below buys nothing there. That is the intended trade — reporting `running` over a real failure would hide the thing the operator has to act on — and its cost is that those stages still pay for a probe whose answer is discarded. Which probe fires is each dispatch endpoint's own precondition, so the read cannot be blinder than the operation it reports — a workstream with a `pr_number` is probed for a push **in any stage** (push imposes no stage gate, and a PR survives `pr_changes_requested` back to `active`, the merge-track parks, and a FIX run's `awaiting_human_review`), and one without is probed for a create only from `create_pr`'s sources (`ready_to_merge`, `final_review_with_concerns`), which a create cannot outlive because the endpoint refuses to dispatch once a PR exists. The two are mutually exclusive: at most one workflow ID asked about per workstream, none at all for a workstream that can neither push nor create, and none for a row whose answer the derivation would discard anyway (a terminal stage, or set runner fields — both decided by earlier branches). That last skip belongs to the derivation only. Availability has no later branch to discard the answer — the probe alone decides whether the verb is offered — so the `pr_push` row asks about the push workflow unconditionally, and a live push at `implementing` (a plain push is not runner-gated) or at a terminal stage still withholds the verb. A per-request memo makes the repeat question free: the detail read asks once for the status and once for the affordance, and pays one RPC. Unlike the active-operation probe this one fails **closed**, on a sub-second bound. There the macro stage is independent evidence that work is underway and the probe only asks whether it is still alive; here the probe is the only evidence, so answering alive on a visibility error would paint every PR-stage workstream as running. For the same reason the signal never yields `interrupted`: nothing records that a publish was dispatched, so a workflow absent because it died is indistinguishable from one that was never started.
 
@@ -3283,7 +4369,7 @@ Where each consumer landed:
 | Site | Reads | Why |
 |---|---|---|
 | `fsm/current_errors.go` suppress branch | publish-free | Emptying the error surface on `running` is right for a runner producing the next verdict, wrong for a publish producing none |
-| `api/current_errors.go` (detail + list/dashboard paths) | publish-free | Same; feeds `hashd show`, the TUI error panel and the dashboard `[!N]` marker. The same file also computes `current_notices` -- see [Stopped-operation records](../WF.md#stopped-operation-records) |
+| `api/current_errors.go` (detail + list/dashboard paths) | publish-free | Same; feeds `hashd show`, the TUI error panel and the dashboard `[!N]` marker, and the error half of each lane read's `attention_count`, to which `unresolvedPRThreads` (`api/pr_readiness.go`) adds the current PR's unresolved review threads from its `pr_watch` snapshot ([The attention total](../WF.md#stopped-operation-records)). The same file also computes `current_notices` -- see [Stopped-operation records](../WF.md#stopped-operation-records) |
 | `api/snapshot.go` `LoopExit` / `LoopProgress` gates | publish-free | A push does not put a loop in flight; the publish-inclusive value made the panel claim a live attempt whenever someone pressed push |
 | web `RunnerBusy` | publish-free | Hides the whole merge/pr/push/close bar **and** the approve/reject/reset card — a push took approve/reject off the page, with no reason shown, for the minutes a pre-push hook ran |
 | web `canReset` | publish-free | Reset is an operator verb |
@@ -3306,7 +4392,7 @@ Where each consumer landed:
 
 **Not consumers of `runtime_status`** — they compare the literal string `"running"` against a different state machine, and no publish input reaches them: `web/internal/service/http_service_plan.go` and `hashd_tui/watch/plan.py` (×5) read the **discovery / plan-run** status; `hashd_tui/watch/detail_display.py` reads a **per-stage record's** `status` inside a run. Listed so this table reads as the closed inventory it is, rather than costing the next reader the same re-derivation.
 
-The same probe backs the affordance, not only the status — and the two halves are at different stages of delivery. **Create is enforced end-to-end**: the `no_active_publish` guard (`server/internal/fsm/guards_publish.go`) sits on both `create_pr` edges, `requirePRCreateAvailable` 409s on it, and the TUI withholds P while the row is blocked, so a second `pr create` is not offered and does not reach the Temporal singleton. The reason does not ride the footer -- that is a key legend, not a status line -- it rides `hashd show`, whose next-steps block prints the blocked action with its failed guard's reason (`printActionSuggestion` over `firstGuardFailureReason`, `cli/show.go`). **Push is enforced server-side and read by the two panel clients**: the `pr_push` capability row (`server/internal/api/workstream_availability.go`) reads `available: false` with the reason while a push runs, and `requirePRPushAvailable` (`server/internal/api/mutations_pr.go`) 409s on that row, so a blind second press is refused with the reason rather than reaching the Temporal singleton — which stays the backstop for the race the row cannot see, a push whose start visibility has not caught up with. The row is also unavailable while a merge workflow is open for the workstream, with the `no_active_merge` guard's reason, so a plain or `--sync` push cannot be dispatched over a running PR-mode merge. The endpoint passes the workstream's status at dispatch to the push workflow as `expected_status`, and the push's terminal transition is source-checked against it; a workstream that moved during the push is left where it is and the push records a failed outcome instead. The TUI's P key takes its presence and its press from that row once a PR exists -- a blocked row withholds the key, the same as a verb that does not apply (`_server_gated_binding("P", "push", "create_pr", CAPABILITY_PR_PUSH)` in `watch/detail.py`, with merge mode still deciding whether PR is the route); the web reads `wsGateAction(vm, "pr_push")` and disables the `hashd pr push` button on it (`web/internal/web/page_workstream_detail.templ`). The CLI is the one surface that does not: `actionSuggestion` (`cli/show.go`) has no `pr_push` case, so `hashd show` drops the row entirely and a push during a push still collects the 409 on press. Adding that case is the follow-up. Server binds the guard seam and the read helper to one probe, so what the row reports and what the derived status says cannot disagree.
+The same probe backs the affordance, not only the status — and the two halves are at different stages of delivery. **Create is enforced end-to-end**: the `no_active_work` guard (`server/internal/fsm/guards_activity.go`) asks about the create wherever one can run and sits on both `create_pr` edges, `requirePRCreateAvailable` 409s on it, and the TUI withholds P while the row is blocked, so a second `pr create` is not offered and does not reach the Temporal singleton. The reason does not ride the footer -- that is a key legend, not a status line -- it rides `hashd show`, whose next-steps block prints the blocked action with its failed guard's reason (`printActionSuggestion` over `firstGuardFailureReason`, `cli/show.go`). **Push is enforced server-side and read by the two panel clients**: the `pr_push` capability row (`server/internal/api/workstream_availability.go`) reads `available: false` with the reason while a push runs, and `requirePRPushAvailable` (`server/internal/api/mutations_pr.go`) 409s on that row, so a blind second press is refused with the reason rather than reaching the Temporal singleton — which stays the backstop for the race the row cannot see, a push whose start visibility has not caught up with. The row is also unavailable while a merge workflow is open for the workstream, with `no_active_work`'s merge reason (`fsm.ActiveMergeReason`), so a plain or `--sync` push cannot be dispatched over a running PR-mode merge. The endpoint passes the workstream's status at dispatch to the push workflow as `expected_status`, and the push's terminal transition is source-checked against it; a workstream that moved during the push is left where it is and the push records a failed outcome instead. The TUI's P key takes its presence and its press from that row once a PR exists -- a blocked row withholds the key, the same as a verb that does not apply (`_server_gated_binding("P", "push", "create_pr", CAPABILITY_PR_PUSH)` in `watch/detail.py`, with merge mode still deciding whether PR is the route); the web reads `wsGateAction(vm, "pr_push")` and disables the `hashd pr push` button on it (`web/internal/web/page_workstream_detail.templ`). The CLI is the one surface that does not: `actionSuggestion` (`cli/show.go`) has no `pr_push` case, so `hashd show` drops the row entirely and a push during a push still collects the 409 on press. Adding that case is the follow-up. Server binds the guard's publish sources (`fsm.PushActivity`, `fsm.CreateActivity` in the activity providers) and the read helper to one memoized probe, so what the row reports and what the derived status says cannot disagree; the guard keeps the probe's lookup failure (`publishExecution.Err`) where the derived status reads it as not open.
 
 ## Story identity
 
@@ -3325,8 +4411,9 @@ A story's identity is its project-scoped, immutable `stories.number`; its textua
 - Story-only versus multi-kind: an argument built with `storyref.StoryOnly` takes a bare number; one built with `storyref.MultiKind(otherForms...)` refuses it, even when no other kind could match, with a Diagnostic whose help names the prefixed forms and the argument's other forms (such as `S-<id>`). This is CLQ-457's rule, with CLQ-466 settling that an argument naming a story or its workstream is story-only.
 - Refusals are Diagnostics: a malformed reference is `story.ref_malformed` and a refused bare number `story.ref_bare_refused`, both made before any lookup and both a 400. A well-formed reference with no match is `story.not_found`, the existing story 404 (`projectStoryNotFoundError`, sharing `storyNotFoundError`'s body), whose did-you-mean is drawn from the request's project only and stays advisory help and data, never applied.
 - A resolved request keys everything on the returned story's stored `id`: admission, FSM CAS, `reqs.WithStory` ownership, planning claims, Arc proposal operations, Temporal singleton IDs and the structured links it stores. Every server story entry point calls the resolver before any lookup, guard, lock or write, so the alias forms of one story share one admission identity.
-- Workstream references: `storyref.ResolveWorkstream(ctx, queries, project, ref)` is the resolver's entry for an argument naming a workstream (CLQ-466: story-only, so a bare number is accepted). A story form resolves to the story by (project, number), then to its workstream through `workstreams.story_id` (`GetWorkstreamForProjectStory`, `server/queries/workstreams.sql`); a story with no workstream is `workstream.story_has_none`, a 404 naming the story. A story form never falls back to an exact workstream-ID lookup. Any other reference is the legacy workstream ID, looked up exactly as before. Every `/workstreams/{id}` handler, the `run-log/stream` SSE route and the `workreads` resolver rebind the path ID through it first (`rebindWorkstreamRef` / `resolveWorkstreamRef`, `server/internal/api/story_ref.go`), so admission, FSM CAS and the `run:` / `merge:` / `prcreate:` singletons of every alias key on the one stored workstream ID.
+- Workstream references: `storyref.ResolveWorkstream(ctx, queries, project, ref)` is the resolver's entry for an argument naming a workstream (CLQ-466: story-only, so a bare number is accepted). A story form resolves to the story by (project, number), then to the workstream whose link holds that number (`workstreams.story_number`, `GetWorkstreamForProjectStory`, `server/queries/workstreams.sql`); a story with no workstream is `workstream.story_has_none`, a 404 naming the story. A story form never falls back to an exact workstream-ID lookup. Any other reference is the legacy workstream ID, looked up exactly as before. Every `/workstreams/{id}` handler, the `run-log/stream` SSE route and the `workreads` resolver rebind the path ID through it first (`rebindWorkstreamRef` / `resolveWorkstreamRef`, `server/internal/api/story_ref.go`), so admission, FSM CAS and the `run:` / `merge:` / `prcreate:` singletons of every alias key on the one stored workstream ID.
 - Workstream query and body parameters go through the same entry before use, and the IDs a response echoes are the stored ones: `workstream_id` on `GET /stories`, `GET /commits`, `GET /flow-runs` and `GET /projects/{name}/code-tool-calls`; `ws_id` on `GET /cost`; `workstream` on `GET /directives`, `PUT /directives/workstream` and `GET /reports/workstream-series` / `-stages`; `worktree_id` on every `GET /code/*` route and `POST /code/*/batch` query (`cbmForWorkstream`); `workstream_id` on `POST /events`, `POST /code/tool-calls` and `POST /agent-invocations/*`, resolved before the run-scope check (`resolveReportedWorkstreamID`); `entity_id` with `entity_type` `workstream` on `/active-invocations/*`; and `target_id` with `target_kind` `workstream` on chat sessions. The `{id}` of `GET /flow-runs/status/{id}` in a story form resolves to the story, whose flow runs include its workstream's; any other `{id}` is matched exactly against the project's stories and legacy workstream IDs.
+- A `POST /events` body naming both a `workstream_id` and a `story_id` must name the workstream's own story: one naming another story, or any story for a workstream with none, is refused with a 422 before anything is written (`refuseStoryOutsideWorkstream`, `server/internal/api/mutations_events.go`). A workstream and its story are one identity, and a row is numbered by the story it names, where the reads keyed by the workstream's story would not find it. A run token meets the same rule in the run-scope check. Rows stored before the refusal keep their numbers.
 - Clients: a client passes a story reference to the server as typed (GET /stories/{ref}: `resolveStoryTarget` in the CLI, `resolve_story_ref` in Python) and takes the workstream path only when the server refuses it as `story.ref_malformed`; every other refusal, `story.not_found` with its did-you-mean included, is shown as served. Display text shows the served `story_label`, or the stored id when none is served (`storyDisplay` in the CLI, `story_display` in Python). A view opened through an alias keys on the stored id the server returned, never the typed text. Only `hashd lineage` and `hashd lineage export` refuse a bare number, because their target also names a commit or a file; every other story-or-workstream argument accepts one (CLQ-466).
 
 ### Structured consumers
@@ -3342,7 +4429,7 @@ Evidence keeps its recorded text: no event, transcript, attachment, capture, int
 | `suggestions.story_id` | `server/contracts/schema.sql`; `server/queries/suggestions.sql`; `claimSuggestionAndCreateStory`, `WriteSuggestionStoryLink` / `ApplySuggestionDataUpdate`, batch and clone writers; `reqs.DecodeSuggestionLinks` and API list/detail projection | The target's stored `stories.number` in the suggestion's project: decimal text in the TEXT column and a JSON number in `data.story_id`. Migration 000174 resolves each recorded association independently; unresolved column text is kept verbatim under `links_legacy` bit 4, and a pre-existing non-text mirror under bit 8, with no textual lookup fallback. `storyref.Targets` / `LinkTarget.Served` serve both fields as textual stored IDs (CLQ-467), preserving absent/null/blank associations. Live-import lookup and archived-suggestion deletion join project and number; dismissal policy is unchanged. | **Done: STORY-0387 suggestion planning claims only.** Dependency/deferred links retain STORY-0386 storage and projection. |
 | `suggestions.depends_on` | `server/contracts/schema.sql` (`suggestions.depends_on`); `server/queries/suggestions.sql`; written by `rewriteSuggestionDependsOn` (`server/internal/reqs/suggestion_batch.go`) from the numbers `validateSuggestionBatchDependsOn` resolved; decoded by `reqs.DecodeSuggestionLinks` (`server/internal/reqs/suggestion_links.go`) for `server/internal/api/suggestion_actionability.go`, the served suggestion reads (`server/internal/api/suggestions.go`) and discovery's open-suggestion context (`server/internal/pm/discovery_section.go`) | Mixed JSON array of `storyref.Link`: a story dependency is its target's `stories.number` within the row's project, read back by `storyref.Targets` and served as its stored id (`story_number_label` once the story is deleted); an `S-<suggestion id>` reference to a sibling suggestion is kept text, which `reqs.SuggestionRef` picks out and actionability resolves as a suggestion. Migration 000142 rewrote each entry that `story_ref_number(entry, 0)` -- the multi-kind parse, which refuses a bare number -- resolved in the row's project; `S-` entries, blanks, bare numbers and entries that named no story stay as recorded, are served as recorded and are never satisfied as a story, a `null` entry became blank text, and a list the textual reader could not parse -- one already holding a number included -- was left byte-identical and marked in `suggestions.links_legacy` (bit 1), so it stays unreadable. Order and duplicates are kept | Operator ruling (CLQ-459, 2026-10-21): "suggestions.depends_on -> STORY-0386, extend its scope to this dependency link.": done |
 | `suggestions.data.deferred_from` | `suggestions.data` key `deferred_from` (`reqs.DeferredFromKey`), written by `SaveDeferredSuggestions` (`server/internal/reqs/suggestion_batch.go`) from the planned story it is given (`storyref.LinkFor`); matched by `DeleteAvailableDeferredSuggestions` (`server/queries/suggestions.sql`, a stored integer equal to `story_number`, never kept text or a marked value) to replace a planned story's deferred suggestions on re-plan; served in the suggestion's `data` by `reqs.SuggestionLinks.ServedData` | `storyref.Link` inside JSON: the planned story's `stories.number` within the row's project, so a re-plan after a retype still replaces its own rows, and served as the story's stored id. A value that named no story when migration 000142 ran is kept as its text, and one that was already not text is kept and marked in `suggestions.links_legacy` (bit 2); neither links a story or is matched by a re-plan | Operator ruling (CLQ-463, 2026-10-21): "STORY-0386: extend its scope to suggestions.data.deferred_from, beside suggestions.depends_on, which the same writer (SaveDeferredSuggestions) stores.": done |
-| `workstreams.story_id` | `server/contracts/schema.sql` (`workstreams`, unique `idx_workstreams_project_story`, and the workstream delete trigger that tests `stories.id = old.story_id`); `server/queries/workstreams.sql` (`InsertWorkstream`, `ListWorkstreamLinksForStory`, `CountWorkstreamsForStory`, `CountWorkstreamsPerStory`, `ListWorkstreamIDsForProjectStory`, `GetWorkstreamForProjectStory`) | Textual story ID; one implementation workstream per (project, story ID) | STORY-0387 ("Migrate workstream ... story links") |
+| `workstreams.story_id` | `server/contracts/schema.sql` (`workstreams.story_number`, `story_id`; unique `idx_workstreams_project_story` on (project, `story_number`) and `idx_workstreams_project_story_text` on kept text; the workstream delete trigger `workstreams_ad`); `server/queries/workstreams.sql` (`InsertWorkstream`, `CountWorkstreamsForStory`, `CountWorkstreamsPerStory`, `ListWorkstreamIDsForProjectStory`, `GetWorkstreamForProjectStory`, `WorkstreamIDReserved`, `ListDetachedWorkstreamStoryStatuses`, and every read returning a workstream row); `LockStoryToWorkstream` (`stories.sql`); `ListStoryRunsForRunDirPrune` and `ListClosedStoryWorkstreamsWithRuns` (`runs.sql`); `CountPendingClarificationsForStory` (`misc.sql`); the workstream-recorded attribution of the report call reads (`agent_calls.sql`); `server/internal/upgrade/m025_facts.go` (`managedRootWorkstreams`, which reads a database before it migrates) | `workstreams.story_number`: the linked story's `stories.number` within the workstream's project, `story_id` then NULL. `InsertWorkstream` stores the number the story-run claim passes from its resolved story, and canonicalizes a direct caller's text as `InsertClarification` does. Ownership (one implementation workstream per (project, number), terminal rows included), the story-run lock and its refusal, `storyref.ResolveWorkstream`, the edit gate's and the `story_has_no_workstreams` guard's count, the dashboard's per-story count, sole-implementation and archive checks, run-dir pruning, pending-question counts, report attribution, ID reservation and the delete trigger all key on (project, number), with no textual fallback and no lookup across projects. NULL, blank, malformed, unknown and deleted-target text stays in `story_id` as recorded with no number; it names no story, keeps the text uniqueness it had, and on delete is linked to no implemented story, as before. Every workstream read serves textual `story_id` (CLQ-467): the story's stored id, `story_number_label(story_number)` once the story is deleted, or the kept text. Migration 000199 resolved each `story_id` by `story_ref_number` on its trimmed text within the row's project; the down migration writes the stored id or label back, and refuses, before changing anything, when that text equals another workstream's kept text in its project, which the restored text index cannot hold | STORY-0387 ("Migrate workstream ... story links"): done |
 | `arc_proposals` and its links | `server/contracts/schema.sql` (`arc_proposals.story_number` with `FOREIGN KEY (project, story_number) REFERENCES stories(project, number) ON DELETE CASCADE`, whose parent key is `idx_stories_project_number`; `idx_arc_proposals_story`, `idx_arc_proposals_story_version`, `child_story_ids`); `server/queries/arc_proposals.sql`; `server/internal/reqs/arc_proposal.go` (the operation writers key the row on the resolved story's number, `arcProposalStoryNumber`, and match a row to its story by `ArcProposalOfStory`; `ApproveArcProposal` writes `child_story_ids`, `DecodeArcChildren` reads it and `ArcChildTargets` reads its links back) | `story_number`: the story's `stories.number` within the row's project; every query keys on (project, number), and `ListProjectLatestArcProposalOperationAttempts` joins it to the story for its stored id. `child_story_ids`: a JSON object mapping each child key to an `ArcChildRecord`, whose `story_id` is a `storyref.Link` -- the child's number, or text that named no story when migration 000141 ran -- and whose optional `release` records the child's release `status` and `error`, which the migration kept byte-for-byte; a null `story_id`, which the textual reader read as blank, became blank text, and a value that is no record (the flat key-to-ID map approvals wrote before child records) was kept verbatim. A mapping whose record already held a number, which no writer stored and the textual reader refused, was kept whole and marked in `child_story_ids_legacy`, so `DecodeArcChildren` still refuses it rather than reading it as links; an approval writing a mapping clears the mark. The release recording (`RecordArcChildRelease`) reads each child by its number in the operation's project and refuses a child that does not resolve, never looking up served text. Reads serve each child's stored id, or `story_number_label` for a child deleted since, in the flattened key-to-ID wire form | STORY-0386 ("Arc proposal links"; "every ... Arc proposal record survives"), preserving each child's nested `story_id` and its `release` record: done |
 | Arc workspace reads | `server/internal/api/story_arc.go` (`storyArcChildren`, `StoryArcChild.ID` / `.DependsOn`); `server/internal/api/story_arc_proposal.go`; `server/internal/types/wire_story_arc_proposal.go`; rendered by `packages/hashd-tui/src/hashd_tui/watch/arc_proposal_workspace.py` and `web/internal/web/section_story_overview.templ` | Stored IDs of the Arc and its children as served on the wire, read back from the links behind them: the Arc's children by `stories.arc_number`, each child's `depends_on` and each Arc proposal child record by number (`reqs.ArcChildTargets` for the served `child_story_ids`) | Served label: STORY-0383 ("the Arc proposal workspace reads ... carry the label"). Delivered (STORY-0383). Links behind the reads: STORY-0386 ("the Arc proposal workspace behave the same before and after a story is retyped"): done. Client rendering: STORY-0384 ("web (including the Arc proposal workspace)"): done |
 | `clarifications`, including Arc bindings | `server/contracts/schema.sql` (`clarifications.story_number`, `story_id`, `arc_operation_id`, `arc_execution_id`; `idx_clarifications_story`); `server/queries/misc.sql` (`InsertClarification`, `CountClarificationsByStory`, `ListAnsweredStoryClarifications`, `SupersedePendingStoryClarifications`, `ListPendingArcClarificationsByExecution`, `CancelPendingArcClarificationsByExecution`); `server/internal/api/mutations_clarify.go`; `server/internal/reqs/arc_proposal.go`; `clarifications.data.source_story_id`, written for breakdown proposals by `buildClarificationRow` (`server/internal/reqs/clarifications.go`) and decoded by `breakdownProposalData` (`server/internal/api/plan_split_apply.go`) | `clarifications.story_number` and integer `data.source_story_id`: targets’ `stories.number` within the row’s project, independently resolved; `InsertClarification` canonicalizes direct inputs too. Counts, lists, superseding, terminal filtering, applied stamps and edit restoration match project and number with no textual fallback. NULL, blank, malformed, unknown and deleted-target text stays as recorded; kept numeric-looking text remains text. Row reads and mutation returns serve textual `story_id` (CLQ-467): the target’s stored ID, its STORY label when deleted since conversion, or kept text. Answer rewrites preserve integer source links exactly. `arc_operation_id` / `arc_execution_id` keep their exact operation/attempt IDs and project/execution selection; `arc_proposals` links and lifecycle are unchanged | STORY-0387 ("clarification ... story links"; "arc_execution_id binding"), `data.source_story_id` included as a clarification story link: done |
@@ -3368,8 +4455,8 @@ Evidence keeps its recorded text: no event, transcript, attachment, capture, int
 | Runner assignments | `runner_assignments.input` and `input_sha256` (`server/queries/runner_assignments.sql`, `InsertRunnerAssignment`), written by `runnerassign.Store.Offer` (`server/internal/runnerassign/store.go`): the whole `RunnerStageInput`, including `RunnerAssignmentIdentity.StoryID` (`server/internal/types/wire_runner_assignments.go`), is stored as JSON and digested into `input_sha256`; start and result receipts bind to that digest, and a re-offer with a different digest is a conflict | Textual story ID inside immutable, digest-bound JSON, separate from the REST read of the same input and from the Temporal runner stage inputs | pending: Arc-revision proposal (COMMIT-STORY_ID_INV-FIX-001). Suggested owner STORY-0385, beside the runner stage inputs it is built from: an existing assignment's `input` is never rewritten, since a rewrite breaks its digest and every receipt bound to it; it keeps the stored ID until its lifecycle ends |
 | REQS WIP markers | `<!-- BEGIN WIP: <ID> -->` ... `<!-- END WIP -->` regions in the project's REQS file, matched by `wipMarkerIDPattern` (`server/internal/reqs/apply.go`); `WIPMarkerEntityIDs` feeds `CleanupTerminalWipMarkers` (`server/internal/reqs/wip.go`), whose `terminalOrMissingMarkerOwners` looks the IDs up with `ListStoryStatusesByIDs` and treats an unmatched ID as a missing story whose markers are stripped; `CleanupWipMarkersForStory` / `stripStoryMarkers` strip one story's markers by exact text | Textual story ID written into REQS text, binding a requirement region to its story | pending: Arc-revision proposal (COMMIT-STORY_ID_INV-FIX-001). Suggested owner STORY-0382 ("A structured reference extracted from recorded text still resolves to the same record after that record is retyped. The recorded text is not rewritten"). Documentation only: no change to REQS or marker behavior is proposed here. The pattern checks are in the prefix-sniffing table |
 | Attention titles | `server/internal/notify/classify.go` (`attentionTitle`, `RowTitle`, `FrameTitle`, and `toast`, which besides `LinkedStory` reads the frame's own `f.StoryID` directly in its `story` helper (Arc decision, implemented), `ClassClarification` and `ClassArchiveStop`); `attention_title` in `server/internal/api/lineage_endpoints.go` and `server/internal/api/sse.go`; shown as sent by `web/internal/web/attention_toast.go` | The linked story's textual ID rendered into the title (`STORY-1 (ws1): merged`) | Newly composed titles: STORY-0383 ("attention titles included"). Delivered (STORY-0383). Stored attention history: STORY-0388 ("attention history"; "No ... stored attention title ... is ... relabelled"): done |
-| Engine janitor | `server/internal/api/dispatch_engine.go` (`sweepFamilies`, `entityReclaimable`): the `plan:` / `edit:` / `plansplit:` / `arcproposal:` families are read through `temporal.ParseStoryWorkflowID`; a new-form story segment is looked up by project and number (`GetStoryByProjectNumber`), a legacy one by textual ID (`GetStory`), under the same disposition rules. The `arcdecision:` family is not in `sweepFamilies` | Both forms: the stored number for a new-form ID, the textual story ID for a legacy one, so a live new-form run is never read as its story's absence | STORY-0387 ("janitor/housekeeping passes find the same records for a retyped story") |
-| Housekeeping | `server/internal/api/housekeeping.go`, `mutations_plan_reconcile.go` (`suggestionClaimOrphaned`, `freeClaimedSuggestion`), `suggestions.go`, `inflight.go` | Suggestion claims resolve stored numbers only within their own project; kept unresolved text is never looked up. Release rechecks the scanned project and association inside its transaction, including absent/blank links, so reassignment wins. The claim/drafting timeout policy and STORY-0385 probes retain stored workflow IDs and legacy/new workflow forms. Drafting/editing cleanup still owns stories by stored `story.ID`. | **Done: STORY-0387 suggestion-claim housekeeping only.** Drafting/editing identity ownership is unchanged. |
+| Engine janitor | `server/internal/api/dispatch_engine.go` (`sweepFamilies`, `entityReclaimable`): the `plan:` / `edit:` / `plansplit:` / `arcproposal:` families are read through `temporal.ParseStoryWorkflowID`, whose parsing of both forms is unchanged; a new-form story segment is looked up by project and number (`GetStoryByProjectNumber`), a legacy one as a story reference by project and number (`storyref.Resolve`, `StoryOnly`), under the same disposition rules. A legacy segment that carries no number, or names no story of the project, reads as the story's absence; any other lookup error leaves the workflow alone. The `arcdecision:` family is not in `sweepFamilies` | Both forms: the story's stored number within the project, so a live run of a retyped story, or one spelled in another prefix form, is never read as its story's absence | STORY-0387 ("janitor/housekeeping passes find the same records for a retyped story"): done |
+| Housekeeping | `server/internal/api/housekeeping.go` (`recoverEditingStories`, `recoverArcProposalSourceEdits`), `mutations_plan_reconcile.go` (`failStaleDraftingStories`, `suggestionClaimOrphaned`, `freeClaimedSuggestion`), `suggestions.go`, `inflight.go` | Suggestion claims resolve stored numbers only within their own project; kept unresolved text is never looked up. Release rechecks the scanned project and association inside its transaction, including absent/blank links, so reassignment wins. The claim/drafting timeout policy and STORY-0385 probes retain stored workflow IDs and legacy/new workflow forms. Drafting and editing cleanup act on the rows they list by project and status, through the shared story-content writers under the listed row's stored id. | **Done: STORY-0387 suggestion-claim housekeeping and drafting/editing record lookups by project and number.** |
 | Planning claims | `claimSuggestionAndCreateStory`, `revertClaimedSuggestionStory`; `reqs.TransitionSuggestionWithData` / `ApplySuggestionDataUpdate`; `pm.suggestionOwnedBy`, `suggestionOwnedByOther`, `suggestionDoneForStory`, `planningClaimConflict` and `finishStory` | Incoming references resolve through `storyref.Resolve`; writers use the resolved record's stored number in both claim fields. Ownership, retry, conflict and completion compare project and number, with lifecycle, execution-owner and planning-handoff fences retained. Revert resolves its deletion target by project and number. Conflict messages and served associations use stored textual IDs. | **Done: STORY-0387 planning claims;** uses STORY-0381's shared resolver. |
 | Temporal workflow inputs | `StoryID` (`json:"story_id"`) in `server/internal/temporal/workflows`: `PlanningInput` (`planning.go`), `EditInput` (`edit.go`), `PlanSplitInput` (`plan_split.go`), `ArcProposalInput` (`arc_proposal.go`), `ArcDecisionInput` (`arc_decision.go`), `StoryNotesInput` (`story_notes.go`), `ConnectorEventsInput` (`connector_events.go`), the AC-amendment inputs (`ac_amendment.go`), the runner stage inputs (`runner_stages.go`), `size_offer.go`, `pm.go`, and `MergeFailureInput.StoryID` (`*string`, `merge.go`), which `MergeLogError` and the legacy-history `MergeRecordFailure` activity use to attribute durable merge errors to the story | Textual story ID carried in persisted workflow history | STORY-0385 ("Recorded histories"; "Signals, queries, cancellation, activity retries ... keep finding them") |
 | `PlanningWorkflowID`, `PlanningNumberWorkflowID` | `server/internal/temporal/dispatch.go` (legacy `plan:{project}:{story}`, new `plan:{project}:{number}`; `DispatchPlanning` starts only the new form through `startStoryWorkflow`, refused while the legacy form is open) | Both forms: new starts key the stored `stories.number`; the legacy textual-ID form is read, never started, for runs started before the move (**Story workflow identity transition**) | STORY-0385 ("workflow IDs derived from project and immutable number") |
@@ -3406,20 +4493,19 @@ Where a site's other branch takes a workstream ID, that ID is a legacy alias of 
 | `server/internal/cli/show.go:isStoryID` | Retired: the wrapper is removed, and every `cli` row below asks the server through `resolveStoryTarget` (`server/internal/cli/workstream_helpers.go`) | yes | STORY-0384 ("Prefix-sniffing in `cli/show.go`"): done |
 | `server/internal/cli/show.go:newShowCmd` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): story show, or workstream show on `story.ref_malformed` | yes | STORY-0384 ("Prefix-sniffing in `cli/show.go`"): done |
 | `server/internal/cli/close.go:newCloseCmd` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): story close, or workstream close on `story.ref_malformed` | yes | STORY-0384 ("Client surfaces pass story references to the server unchanged and carry no story-ID grammar"): done |
-| `server/internal/cli/assign.go:assignPath` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): `/stories/{stored id}/assign`, or `/workstreams/{id}/assign` on `story.ref_malformed` (`storyOrWorkstreamPath`) | yes | STORY-0384 (as above): done |
+| `server/internal/cli/assign.go:assignPath` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): `/stories/{stored id}/assign`; a legacy workstream alias resolves through its existing detail read to the same story endpoint | yes | STORY-0384 (as above): done |
 | `server/internal/cli/workstream_helpers.go:resolveOptionalWorkstreamID` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): the story's workstream (`storyWorkstreamRef`), or the argument as a workstream on `story.ref_malformed` | yes | STORY-0384 (as above): done |
 | `server/internal/cli/log.go:resolveLogTarget` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): story log target, or workstream log target on `story.ref_malformed` | yes | STORY-0384 (as above): done |
 | `server/internal/cli/answer.go:entityClarificationsPath` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`), now in `showEntityClarifications`: the story's clarifications path by its stored id, or the workstream's on `story.ref_malformed` (`storyOrWorkstreamPath`) | yes | STORY-0384 (as above; "Commands whose argument accepts story or workstream show the server's Diagnostic refusing a bare number"): done |
 | `server/internal/cli/answer.go:submitAnswer` (`--wait` refusal) | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): refuses `--wait` when the server served a story | yes | STORY-0384 (as above): done |
 | `server/internal/cli/answer.go:submitAnswer` (answer path) | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): `/stories/{stored id}/answer`, or `/workstreams/{id}/answer` on `story.ref_malformed` (`storyOrWorkstreamPath`) | yes | STORY-0384 (as above): done |
 | `server/internal/cli/cancel.go:newCancelCmd` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): cancels the served story by its stored id; `story.ref_malformed` is refused (`cancel.id`) | yes | STORY-0384 ("Client surfaces pass story references to the server unchanged and carry no story-ID grammar"): done |
-| `server/internal/cli/run.go:newRunCmd` (name override) | GET /stories/{ref} (`resolveStoryTargetAtOpsDir`): refuses a second positional name when the server served a story | yes | STORY-0384 (as above): done |
-| `server/internal/cli/run.go:newRunCmd` (dispatch) | GET /stories/{ref} (`resolveStoryTargetAtOpsDir`): story run by its stored id, or workstream run on `story.ref_malformed` | yes | STORY-0384 (as above; "Commands whose argument accepts story or workstream ..."): done |
+| `server/internal/cli/run.go:newRunCmd` (name override) | GET /stories/{ref} (`resolveStoryTarget`): refuses a second positional name when the server served a story | yes | STORY-0384 (as above): done |
+| `server/internal/cli/run.go:newRunCmd` (dispatch) | GET /stories/{ref} (`resolveStoryTarget`): story run by its stored id, or workstream run on `story.ref_malformed` | yes | STORY-0384 (as above; "Commands whose argument accepts story or workstream ..."): done |
 | `server/internal/cli/chat.go:resolveChatScope` | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): story-scoped chat by its stored id, or on `story.ref_malformed` the workstream's story | yes | STORY-0384 ("Client surfaces pass story references to the server unchanged and carry no story-ID grammar"): done |
 | `server/internal/cli/approve.go:newApproveCmd` (`--force`) | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): refuses `--force` unless the server served a story | yes | STORY-0384 (as above): done |
-| `server/internal/cli/approve.go:newApproveCmd` (`--start-over` / `--keep-code`) | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): refuses a revision continuation unless the server served a story | yes | STORY-0384 (as above): done |
 | `server/internal/cli/approve.go:newApproveCmd` (dispatch) | GET /stories/{ref} (`resolveStoryTarget`, `workstream_helpers.go`): story accept by its stored id, or workstream gate approval on `story.ref_malformed` | yes | STORY-0384 (as above; "Commands whose argument accepts story or workstream ..."): done |
-| `server/internal/cli/review.go:resolveReviewWorkstreamIDAtOpsDir` | GET /stories/{ref} (`resolveStoryTargetAtOpsDir`): the story's workstream (`storyWorkstreamRef`), or the argument as a workstream on `story.ref_malformed` | yes | STORY-0384 ("Client surfaces pass story references to the server unchanged and carry no story-ID grammar"): done |
+| `server/internal/cli/review.go:resolveReviewWorkstreamID` | GET /stories/{ref} (`resolveStoryTarget`): the story's workstream (`storyWorkstreamRef`), or the argument as a workstream on `story.ref_malformed` | yes | STORY-0384 ("Client surfaces pass story references to the server unchanged and carry no story-ID grammar"): done |
 | `server/internal/cli/lineage.go:storyIDPattern`, used by `newLineageCmd` | `storytype.ParseRef(target, false)`; a bare number is refused (`bareNumberTargetError`, before any request). A prefixed form is story lineage, sent as typed for the server to resolve; else commit or file lineage. `storyIDPattern` and the upper-casing are removed | yes | STORY-0384 ("Prefix-sniffing in ... `cli/lineage.go`"): done |
 | `server/internal/cli/lineage_export.go:newLineageExportCmd` | `storytype.ParseRef(target, false)`; a bare number is refused (`bareNumberTargetError`, before any request). A prefixed form is story export, sent as typed; else commit export | yes | STORY-0384 ("Prefix-sniffing in ... `lineage_export.go`"): done |
 | `server/internal/refs/refparse/parse.go:storyIDPattern`, used by `classify` | `storytype.ParseNumber` over the upper-cased `@`-name: `KindStory` with the upper-cased name, else built-in or connector; `refs/builtins.go` then loads the story with `storyref.Resolve` (`MultiKind`) by number in the chat's project | yes | STORY-0382 (done) |
@@ -3530,7 +4616,7 @@ The Arc's children may not change a public contract until the operator has agree
   - `hashd lineage` and `lineage export` refuse one too.
   - Workstream-only arguments are not story references.
 - *Operator ruling (CLQ-466, 2026-10-21).* "(b) Operator rule: stories and workstreams are 1:1 and can never collide; a workstream's main id is its story's id, and workstreams have no identity of their own. So a bare number is accepted wherever an argument names a story OR its workstream, including hashd show, close, assign, unassign, log, answer, answer show, run, approve, review, review findings, watch, flow status, chat and chat session commands, and GET /flow-runs/status/{id}. A bare number is refused only where it could be a commit SHA (hashd lineage and lineage export)."
-- *Implementation note for STORY-0381.* On dev, `workstreams.id` is a column separate from `workstreams.story_id`, and its value is free-form: this story's own workstream is `story_id_inv`. The ruling makes the story the identity. So the resolver reads a bare number, or a prefixed form, given where a workstream is named as a story reference: it resolves to the story, then to that story's workstream through `workstreams.story_id` (unique per project and story, `idx_workstreams_project_story`). A workstream's own `id` string is still accepted where it is accepted today, as a legacy alias (CLAUDE.md, "Architecture: Story And Workstream Identity"): every workstream-ID argument and `/workstreams/{id}` route below names the story's workstream, and moves toward the story's id rather than gaining a workstream-only id, name or route.
+- *Implementation note for STORY-0381.* On dev, `workstreams.id` is a column separate from `workstreams.story_id`, and its value is free-form: this story's own workstream is `story_id_inv`. The ruling makes the story the identity. So the resolver reads a bare number, or a prefixed form, given where a workstream is named as a story reference: it resolves to the story, then to that story's workstream through `workstreams.story_id` (unique per project and story, `idx_workstreams_project_story`). A workstream's own `id` string is still approved where it is accepted today, as a legacy alias (CLAUDE.md, "Architecture: Story And Workstream Identity"): every workstream-ID argument and `/workstreams/{id}` route below names the story's workstream, and moves toward the story's id rather than gaining a workstream-only id, name or route.
 - **Agreed. A bare number is accepted** at every argument below. It resolves within the request's project.
   - **REST, story arguments:**
     - The `{id}` path parameter of every `/stories/{id}` route: `GET /stories/{id}`; `POST .../answer`, `.../approve`, `.../arc-proposal`, `.../arc-proposal/cancel`, `.../arc-proposal/retry`, `.../assign`, `.../cancel`, `.../clone`, `.../close`, `.../complete-arc`, `.../dependencies`, `.../edit`, `.../run`, `.../split`, `.../transition`, `.../unapprove`, `.../update-criteria`, `.../update-fields`; and `GET .../attachments`, `.../attachments/{attachment_id}/captures/{capture_id}/files/{index}`, `.../clarifications`, `.../dump`, `.../events`, `.../events/count`, `.../review-images/{image_id}`, `.../transcripts`, `.../transcripts/count`.
@@ -3542,12 +4628,13 @@ The Arc's children may not change a public contract until the operator has agree
       - `entity_id` on `POST /active-invocations/register` and `/unregister` with `entity_type` `story`;
       - `arc_id` and `depends_on` on `POST /plan/quick`;
       - `add` and `remove` on `POST /stories/{id}/dependencies`.
+      - `story` on `GET /reports/story-stages`.
   - **REST, story-or-workstream arguments:**
     - The `{id}` path parameter of `GET /flow-runs/status/{id}`.
     - Query parameters naming a workstream:
       - `workstream_id` on `GET /stories`, `GET /commits`, `GET /flow-runs` and `GET /projects/{name}/code-tool-calls`;
       - `ws_id` on `GET /cost`;
-      - `workstream` on `GET /directives`, `PUT /directives/workstream`, `GET /reports/workstream-series` and `GET /reports/workstream-stages`;
+      - `workstream` on `GET /directives`, `PUT /directives/workstream`, `GET /reports/workstream-series`;
       - `worktree_id` ("Workstream/worktree ID") on `GET /code/body`, `/code/callees`, `/code/callers`, `/code/commit-symbols`, `/code/diff-symbols`, `/code/find-definition`, `/code/list-symbols`, `/code/map`, `/code/nearby`, `/code/references`, `/code/search` and `/code/signature`. The `pattern` parameter on `GET /code/search` stays free text.
     - Body fields naming a workstream:
       - `workstream_id` on `POST /events` (`RecordEventBody`), `POST /code/tool-calls` (`CodeToolCallInputBody`), and `POST /agent-invocations/start`, `/end`, `/killed`, `/retry`;
@@ -3557,13 +4644,13 @@ The Arc's children may not change a public contract until the operator has agree
     - The `{id}` path parameter of every `/workstreams/{id}` route. The ruling's rule ("wherever an argument names a story OR its workstream") reaches these. Its "including" list names commands, not every workstream route.
   - **CLI, story arguments:**
     - `hashd cancel <story-id>`.
-    - Every `hashd story` subcommand taking `STORY-xxx`: `clone`, `edit`, `retry`, `arc` and its Arc proposal `approve` / `discard` / `revise` / `cancel` / `retry` subcommands, `depends-on` (with `--add` / `--remove`), `complete-arc`, `unapprove`, `split`, `dump`, `cost <story-id>`, `descope-ac`, `rescope-ac`, `edit-ac` and `delete-ac`.
+    - Every `hashd story` subcommand taking `STORY-xxx`: `clone`, `edit`, `retry`, `arc` and its Arc proposal `approve` / `discard` / `revise` / `cancel` / `retry` subcommands, `depends-on` (with `--add` / `--remove`), `complete-arc`, `unapprove`, `split`, `dump`, `cost <story-id>`, `descope-ac`, `edit-ac` and `delete-ac`.
     - `hashd plan story` and `hashd plan bug`, for `--arc` and `--depends-on`.
   - **CLI, story-or-workstream arguments:**
     - The commands the ruling names: `hashd show [id]`, `close [id]`, `assign <id>`, `unassign <id>`, `log [id]`, `answer [entity]`, `answer show <entity>`, `run [id]`, `approve [id]`, `review [id]`, `review findings ID`, `watch [id]`, `flow status <story-id|workstream-id>`, `chat [context]`, and `chat session list [context]` / `new [context]`.
     - Under the same rule, every argument that names a workstream. This list is a sweep of every cobra command in `server/internal/cli` (`Use:` lines, `cmd.Use` assignments and string flags), not only the ones a review named:
       - Positional: `hashd use [id]`, `open <id>`, `merge <id>`, `reject [id]`, `replan [id]`, `reset [id]`, `skip [id]` (its first argument), `conflicts [id]`, `docs [id]`, `refresh [id]`, `diff <id>`, `pr push [id]` / `create [id]` / `feedback [id]`, `archive delete <id>`, `review list <ws>`, `code stats [workstream-id]`, `project gitleaks list <workstream-id>`, `directives workstream <ws>`, `directives edit workstream <ws>` and `directives ai-edit workstream <ws>`.
-      - Every `hashd workstream` subcommand: `use [id]`, `feedback <ws-id>`, `edit-commit <ws-id>`, `add-commit <ws_id>`, `remove <id>`, `pause` / `unpause` / `reserve` / `release <ws-id>`, `commit <ws-id>`, `resolve-oscillation <id>`, `adjudicate <id>`, `acknowledge [<ws>]`, `acknowledged <ws>` and `cost <ws-id>`.
+      - Every `hashd workstream` subcommand: `use [id]`, `feedback <ws-id>`, `edit-commit <ws-id>`, `add-commit <ws_id>`, `remove <id>`, `pause` / `unpause` / `reserve` / `release <ws-id>`, `commit <ws-id>`, `adjudicate <id>`, `acknowledge [<ws>]`, `acknowledged <ws>` and `cost <ws-id>`.
       - Flags: `hashd directives all --workstream` (`-w`); `hashd code --workstream`, a persistent flag on every `code` query subcommand; `hashd code stats --ws`; `hashd doctor flows --workstream`; `hashd chat session list --target` and `chat session new --target` with `--target-kind workstream`; and the hidden plumbing flag `hashd code mcp-shim --workstream`.
       - The same sweep's story arguments not listed under **CLI, story arguments** above: `hashd chat session list --target` and `chat session new --target` with `--target-kind story`. With `--target-kind clq`, `--target` names a clarification and is not a story reference.
 - **Agreed. A bare number is refused** at `hashd lineage <target>` and `hashd lineage export <target>`, where it could be a commit SHA. The refusal is a Diagnostic naming the prefixed forms.
@@ -3585,11 +4672,13 @@ The Arc's children may not change a public contract until the operator has agree
 
 ## Story content ownership
 
-Story responsibility is `stories.user_id`, distinct from the content ownership below. Filing uses the existing create-time acting-user attribution; API `acceptStory` commits acceptance and `updateStoryOwner` together. The existing `/stories/{id}/assign` route shares that owner write and records `story_changed` in the same transaction, publishing after commit. CLI, TUI and Web all use these server paths and retain the existing authorization policy. The `/workstreams/{id}/assign` route supersedes usage-limit retries, writes `workstreams.user_id` and records a `workstream_owner_changed` timeline row in one transaction through `RecordTimelineEntry`, publishing its `timeline_entry` frame, which names the project and the workstream but not the linked story, after commit. Assignment never updates the linked workstream or a content lease.
+Story responsibility is stored only in `stories.user_id`, distinct from content ownership below. Workstreams have no stored owner. The `workstream_read` SQL view joins their indexed `(project, story_number)` identity to the story and supplies that story's `user_id` to shared reads, including NULL for unassigned work. Filing uses the existing create-time acting-user attribution; API `AcceptStory` commits acceptance and `UpdateStoryOwner` together. The `/stories/{id}/assign` route writes the owner and records `story_changed` in the same transaction; for a linked workstream it also records `story_owner_changed` to retire archive authorization and refresh linked readers. Both publish after commit. A story-owner change advances its linked workstream's command generation in the same transaction, invalidating pending command authority. Assignment supersedes usage-limit retries and never changes a content lease. CLI legacy workstream aliases resolve to their story and use the story assignment endpoint, as TUI and Web do. There is no separate workstream assignment endpoint.
 
 The TUI story footer and Web story controls display the actual owner-named assignment action. `i` assigns to the caller and does nothing when already assigned to them; release is a separate action. On a team server (connection status `mode == "team"`) the TUI footer also offers `I`, which opens a teammate picker over `GET /users`: a filter over the handles with the current assignee marked. `GET /users` keeps listing removed users, marked `removed`, so the names of owners they left behind still resolve; neither the TUI picker nor the Web picker below offers them. Choosing another teammate posts the handle through the same assign route and worker as `i`/`o`, under the same pending guard; Esc or the current assignee sends nothing, and the Assigned header changes only from the re-read. The Web story head carries the same picker as an "assign to…" menu beside the assignment button, in team mode only: each open fetches the rows fragment `GET /ui/stories/{project}/{id}/assignees` (over `GET /users`, current owner marked), and choosing another teammate posts `display_name` to the story's `/assign` action under the head's shared in-flight state, so the assignment button and `i` are withheld while it runs, a refusal lands on the head's error line, and the owner tag changes only from the re-read. Escape, outside click or the current owner sends nothing. Web shortcut help uses the existing Popover from More actions or `?`, preserves the opener on Escape, and leaves pointer focus alone on outside dismissal. Character keys are withheld while typing, submitting or using a floating surface. There is currently no Web character-shortcut enable/disable preference; this adoption does not introduce settings or remapping machinery.
 
-`reqs.WithStory` reserves SQLite's writer before loading and joins existing transactions through `db.Queries.WithTransaction`. `MutateStoryContent` owns field persistence and indexed mirrors, and carries the row's `implemented_at_ns` unchanged; `MutateStoryContentStamped` is the same write for the one stamper of `implemented_at`, storing the stamp's text and number in its one `SaveStoryContent` statement. Until the text is retired, the `stories_epoch_guard` triggers refuse any write that leaves the two disagreeing. `TransitionStoryContent` combines snapshot validation, an FSM transition and its metadata. Eligibility belongs to the participating operation, not to another independently keyed lock.
+`reqs.WithStory` reserves SQLite's writer before loading and joins existing transactions through `db.Queries.Write`, the one door for a write transaction: it takes the write lock at BEGIN, names the write, and refuses a database still busy after the wait as "Could not <write>: the database was busy" (503). No other code begins a write transaction; a test in `server/internal/db` scans for one. `MutateStoryContent` owns field persistence and indexed mirrors, and carries the row's `implemented_at_ns` unchanged; `MutateStoryContentStamped` is the same write for the one stamper of `implemented_at`, storing the stamp only as `implemented_at_ns` in its one `SaveStoryContent` statement. `TransitionStoryContent` combines snapshot validation, an FSM transition and its metadata. Eligibility belongs to the participating operation, not to another independently keyed lock.
+
+Story abandonment is one function, `abandonStory` (`server/internal/api/abandon.go`), run by the close route after its pre-destructive checks and again, whole, by a re-run of the close on a story left `abandoning`. Each step is safe to repeat. A failed step answers through `abandonFailed`, which keeps the failed step's own Diagnostic and records it on the story's timeline.
 
 Arc abandonment uses `arcAbandonmentRefusal` (`server/internal/api/story_arc.go`)
 inside the reserved write: `abandonStoryInTx` joins `reqs.WithStory` for the
@@ -3616,35 +4705,39 @@ inconsistent abandoned Arcs and attached children are preserved.
 
 | Participating writer | Enforcement |
 |----------------------|-------------|
-| REST field/criteria edits and availability | `api.mutateStoryContent`, `reqs.StoryContentLocked`; authorization and eligibility checked inside the mutation. |
-| Planner/edit acquisition and results | `reqs.AcquireStoryContent`, `pm.finishStory` / `failStory`; planning also matches the dispatch handoff marker, `content_owner` is supplied by the Temporal adapters, and `UpdateStoryStatusCAS` revokes it on stage exit. An acquisition that moves the story into `drafting` or `editing` records its pre-entry status and data (`reqs.ClaimOriginKey`, `reqs.NewClaimOrigin`) in the same write; every exit from those stages removes the record. Before its transaction `pm.finishStory` settles only its own owner's REQS-write marker (`reqs.SettleContentApplying`). A success leg that ended unreported goes to `pm.RunResultLost`, whose `failStoryAs` with `ownedOnly` writes nothing, feedback included, unless its execution still owns the story in stage. `pm.saveDroppedEdit` appends only a dropped-edit record, checks no owner, and is detached from cancellation so a stopping worker still saves the feedback. Planning carries the acquired prompt snapshot through result acceptance, reusing the edit prompt/criteria helpers. |
-| Tracker target repository | `pm.ApplyTrackerTargetRepo` (`server/internal/pm/tracker_target_repo.go`), one `reqs.MutateStoryContent` write checked by `reqs.CheckContentOwner` for the planning execution (from `PlanningRoute`), or by `reqs.CheckStageOwner` for the edit execution in the stage it holds (`editing`, `requirements_editing` or `arc_proposal`, the stage its capture also names), after `attachments.PrepareCaptures`. It records `tracker_target_repo` from the projection that execution's capture pinned for the story's `import_reference`, and sets `target_repo` only for a story with none, none preset, and a primary or active repo of exactly that name; it writes only when the record or the target changes. |
-| Forced acceptance (`force_accept`, pending -> accepted) | `POST /stories/{id}/approve?force=true&expected_updated_at=...` through `acceptStory` with the `forceAcceptEligible` precondition, followed in the same precondition by the size-verdict rule (`approve.size_verdict`, waived by `confirm_split=true`): status still `pending`, `updated_at` still the reviewed revision, no pending blocking clarification and every prerequisite `implemented` or `abandoned`, all re-read inside the same `reqs.WithStory` transaction as the CAS and the `story_changed` event row, so it and dependency release's `unblock` (pending -> queued) cannot both take the story. Open edit or planning workflows, or an in-flight check that cannot complete, refuse it before the write. The story read's `force_accept` availability row evaluates the same precondition for the Web. |
+| spec_mode admission (REQS/SPEC writers) | A REQS/SPEC writer that follows spec_mode acts only when the project's resolved mode admits it, read from `(*config.ProjectConfig).ResolveSpec` (`server/internal/config/spec_mode.go`) and never from whether a file exists. `config.SpecModeRefusal` refuses the REQS/SPEC document save and create routes, `hashd docs` (at dispatch and again when the docs run executes) and discovery (at admission and when it runs) in `external` and `none`; there every REQS writer stands down on `SpecMode.HasDocuments`: the Planner REQS apply below (`reqs.ApplyPlanningAnnotationsDetailed`), `reqs.CleanupWipMarkersForStory` (strip and burn), `reqs.CleanupTerminalWipMarkers`, `reqs.ReconcileSplitScope` (and `reqs.SplitScopeFinished` owes nothing) and the merge archive's REQS burn. Each of those `reqs` writers rereads the mode under the REQS lock (`reqs.lockedSpecMode`), and a settings write leaving a mode with documents for one without holds that lock across its write (`api.refuseStrandingWipClaims`). In `local` each of those `reqs` writers -- and the WIP markers of the Planner REQS apply below, the sweep's push retries, `reqs.RecordRequirementBurned`'s locator, `reqs.SyncCheckout`, the pm refine and edit attempts and discovery's `reqs.ReadDocumentAtDefaultBranch` -- resolves `reqs.ResolveWorkspace` to the hashd-owned document store (`reqs.EnsureLocalStore`, `{ops_dir}/projects/{name}/documents/`) and commits there, as do the REQS and SPEC document routes (`api.documentLocation`); a writer whose snapshot predates a switch between `local` and `repo` decides from the current mode (`reqs.liveSpecConfig`) and, like `reqs.SyncCheckout`, resolves again under the lock (`reqs.lockedWorkspace`); recorded under `commitrecord.DocumentsRepository`, with no push, never touching the project repository's REQS; the merge archive's REQS burn and descoped-criteria append commit in the store too: `ArchiveRequirementsTarget` names `commitrecord.DocumentsRepository` on `reqs.LocalStoreBranch`, which `reqs.ResolveTargetRepoPath` resolves to the store, so on any runner the archive acquires it from the server Git service and publishes only there, whatever the archive's push setting (`mergeflow.ArchiveDelivers`), with `HandleRunnerGit` holding the REQS lock across that receive-pack, and its `requirement_burned` locator names it. The archive (and its M032 documentation publication) registers, generates and publishes SPEC in `repo` and `local` (`mergeflow.ArchiveAdmission`), in `local` in the store beside the REQS burn, through the same requirements destination, with nothing registered in a project repository; an archive finishes under the mode its documentation was prepared in and refuses a retry under a mode admitting other documents or another store (`ArchiveDocuments.Store`) while that documentation is unpublished. The runner reads its archive's spec_mode before the archive's records, and asks for the store that mode admits (`RunnerArchiveRead.Store`): the server answers only that store's REQS target (`ArchiveRequirementsTarget`) and SPEC path, whatever the current mode, so one store's settings never refuse an archive bound for the other. Naming the store creates nothing; `ServerGitAssignment` creates it when a runner fetches it, after the archive's spec_mode refusal, and serves it outside `local` only once it exists. The merge's managed-file sweep (`mergeflow.AutoCommitProjectFiles`) and the worktree editor's managed documents treat REQS.md and SPEC.md as workflow-owned only while `SpecMode.OwnsRepoArtifacts` holds (`repo` and `none`); a settings write moving the mode off `repo` is refused while REQS holds WIP claims. Semantics: WF.md, **Spec Mode**. |
+| REST field/criteria edits and availability | `api.MutateStoryContent`, `reqs.StoryContentLocked`; authorization and eligibility checked inside the mutation. |
+| Draft descope's criterion return (`descope-ac` on a draft) | `api.startCriterionReturn` marks the story (`pm.MarkCriterionReturnPreparing`, the preparation's execution ID under `criterion_return`) through `api.MutateStoryContent`, refused unless the story is as the route read it, before starting `criterionreturn:{project}:{number}`; every other criteria change is refused while the mark stands. The workflow's leg, `api.Server.PrepareCriterionReturn`, admits only a draft still marked by its execution and prepares with no transaction held. A no-text outcome checks REQS under `reqslock`, then descopes the criterion and records `ReturnNoText` in one `MutateStoryContent` write. A return of prose rechecks the mark, ownership and unchanged story, publishes directly through `reqs.ReconcileSplitScope` (which acquires `reqslock` itself), then runs one `MutateStoryContent` write (admitted only while the story is unchanged and `CanChange` passes as the requester) that descopes the criterion, records `ReturnRecorded` and removes the mark; nothing is held under `criterion_return`, and draft approval neither publishes nor resumes a criterion return. `workflows.RecordCriterionReturnOutcome` clears a mark that is still the execution's when the preparation did not finish, in the same transaction as its `operation_result` and `story_changed`. |
+| Chat descope completion | Action params bind to the preparation's `flow_execution_id` before dispatch. `RecordCriterionReturnOutcome` completes pending actions in its outcome transaction with full review data. Binding to an already-completed preparation reconciles its exact recorded outcome; older completions cannot overwrite a newer execution. |
+| Planner/edit acquisition and results | `reqs.AcquireStoryContent`, `pm.finishStory` / `failStory`; planning also matches the dispatch handoff marker, `content_owner` is supplied by the Temporal adapters, and `UpdateStoryStatusCAS` revokes it on stage exit. An acquisition that moves the story into `drafting` or `editing` records its pre-entry status and data (`reqs.ClaimOriginKey`, `reqs.NewClaimOrigin`) in the same write; every exit from those stages removes the record. Before its transaction `pm.finishStory` settles only its own owner's REQS-write marker (`reqs.SettleContentApplying`). `pending` is a restorable origin of `editing`: an edit whose recorded origin is `pending` (`pm.editReturnsToPending`) lands through `pm.finishStory` back in `pending` (`edit_complete`) instead of `draft`, and `failStoryAs` returns it there (`draft_fail`) with its prior content and no `failure_cause` instead of `draft_failed`, recording the failed `operation_result` and the dropped edit as for any edit. A success leg that ended unreported goes to `pm.RunResultLost`, whose `failStoryAs` with `ownedOnly` writes nothing, feedback included, unless its execution still owns the story in stage. `pm.saveDroppedEdit` appends only a dropped-edit record, checks no owner, and is detached from cancellation so a stopping worker still saves the feedback. Planning carries the acquired prompt snapshot through result acceptance, reusing the edit prompt/criteria helpers. |
+| Tracker target repository | `pm.ApplyTrackerTargetRepo` (`server/internal/pm/tracker_target_repo.go`), one `reqs.MutateStoryContent` write checked by `reqs.CheckContentOwner` for the planning execution (from `PlanningRoute`), or by `reqs.CheckStageOwner` for the edit execution in the stage it holds (`editing` or `arc_proposal`, the stage its capture also names), after `attachments.PrepareCaptures`. It records `tracker_target_repo` from the projection that execution's capture pinned for the story's `import_reference`, and sets `target_repo` only for a story with none, none preset, and a primary or active repo of exactly that name; it writes only when the record or the target changes. |
+| Forced acceptance (`force_accept`, pending -> approved) | `POST /stories/{id}/approve?force=true&expected_updated_at=...` through `acceptStory` with the `forceAcceptEligible` precondition, followed in the same precondition by the size-verdict rule (`approve.size_verdict`, waived by `confirm_split=true`): status still `pending`, `updated_at` still the reviewed revision, no pending blocking clarification and every prerequisite `implemented` or `abandoned`, all re-read inside the same `reqs.WithStory` transaction as the CAS and the `story_changed` event row, so it and dependency release's `unblock` (pending -> queued) cannot both take the story. Open edit or planning workflows, or an in-flight check that cannot complete, refuse it before the write. The story read's `force_accept` availability row evaluates the same precondition for the Web. |
 | No-changes close's met requirement (`abandon`) | `hashd close <story> --no-changes`: one `MutateStoryContent` write of `requirement_met` after the story's `abandon` transition, in the workstream close's transaction, so a refused abandon rolls it back; `reqs.burnsRequirement` reads it. |
-| Requirements revision approval (`requirements_edit_draft` -> `implementing`, `accept`) | `POST /stories/{id}/approve?continuation=start_over\|keep_code` through `pm.ApproveRequirementsEdit` in one `MutateStoryContent` transaction: the stored proposal, the release of the workstream hold, the plan replaced by the revised story's skeleton (`reqs.WritePlanCAS`), the held workstream's pending breakdown refusals superseded and not answered (`reqs.SupersedeBreakdownRefusals`, the guarded `UpdatePendingClarificationSuperseded` write, their `clarification_changed` published only after commit), the retired attempt's records discarded (`runflow.DiscardAttemptRecords`, shared attempt disposal) and, for `keep_code`, the `requirements_edit` guidance row the next breakdown consumes. Start over resets the worktree to its base (`resetWorktreeToBase`) before that transaction; a failure between them leaves the revision awaiting approval with the code reset, reported as such, and the same approval re-run completes it. The continuation is required for a revision and refused on any other approval. |
-| Retry, dependency release, timeout and failed dispatch | `TransitionStoryContent` checks the inspected/handoff row; the retry route records the story's pre-entry state (`reqs.ClaimOriginKey`) in its `retry` move to `drafting`, since the planner's later acquisition does not move the story; housekeeping rechecks editing expiry inside its mutation. Dependency release reports a stopped story only after its failure transition commits. |
+| Retry, dependency release, timeout and failed dispatch | `TransitionStoryContent` checks the inspected/handoff row; the retry route records the story's pre-entry state (`reqs.ClaimOriginKey`) in its `retry` move to `drafting`, since the planner's later acquisition does not move the story; housekeeping rechecks editing expiry inside its mutation (`recoverEditingStories`, `server/internal/api/housekeeping.go`) and returns a timed-out edit to `draft`, or to `pending` when its recorded origin is `pending`, recording for an edit from any state, in the same write and before the owner goes, a `failed` edit `operation_result` and the feedback `pm.RunEditBegin` recorded in the entry's `reqs.ClaimOrigin` as a `timeout` dropped edit (`pm.RecordEditTimedOut`), beside the "editing timed out" `story_changed`. Dependency release reports a stopped story only after its failure transition commits. |
 | Repository routing and workstream claim | `mutations_story_run.go`: snapshot check, row replacement, linkage and FSM transition commit before orphan cleanup or dispatch. |
-| Split application | `applyPlanSplitProposalTx`: source snapshot, pending proposal and its server-stamped `source_content_hash`; manual extraction uses the current handler snapshot. The proposal itself is inserted by `RunPlanSplit` under `reqs.WithStory`, which rechecks in the insert's transaction that `SplitSourceHash` still equals the hash the proposal was planned from and that the content is not locked (`StoryContentLocked`), and otherwise inserts nothing and fails the split with `plan_split.source_changed`; an ordinary split holds no story ownership, the content hash is its whole fence. The operator's `POST /stories/{id}/answer` reaches it (a draft story, or an accepted one whose pending set is a breakdown proposal; any other answer on an accepted story is refused before a write), and in autonomous mode the split step reaches it itself for the proposal of a split the autonomous size take requested (`PlanSplitInput.AcceptProposal`, `ActivityHost.AcceptSizeSplit` -> `Server.AcceptSizeSplit` -> `answerSplitProposal` with the breakdown rows only, under the answer route's admission). No clarification reaches it for an Arc: both answer routes refuse a `breakdown_proposal` on an arc-type story with a 409 before any write (`arcBreakdownAnswerRefusal`). An Arc's children come only from its approved Arc proposal (`applyArcProposal`, through this writer); they are created `feature` with its `arc_id`, never Arcs; outside supervised mode a child waiting on nothing is inserted `pending` with an empty `depends_on`, and the approval's release leg (`ReleaseArcDecisionChildren`) runs `recoverStrandedDependents`, whose `unblock` release (`TransitionStoryContent`) queues it for planning; its planning-slot acquisition moves it to `drafting`. The recovery scan releases an empty list only for an Arc child: a story that predates `depends_on` reads `[]` from the column default and has no `arc_id`. |
-| Arc proposal operation (`request_arc_proposal` / `cancel_arc_proposal`) | `server/internal/reqs/arc_proposal.go`, every write inside `reqs.WithStory` and every move through `fsm.TransitionStory`, each phase change recording `story_changed` in the transaction and publishing after commit. `ReserveArcProposal` re-checks the caller's eligibility rule (the API's `arcProposalEligibilityRefusal`) inside the write, records `ArcProposalSourceRevision` before writing ownership, moves draft/accepted -> `arc_proposal`, inserts the queued `arc_proposals` row and sets `content_owner` to the execution through `MutateStoryContent`. Ownership lifetimes are one per-phase rule, `arcProposalHeld`, read by `arcProposalFence`: `content_owner` names the execution while the operation's work runs or waits on its exit (`queued`, `planning`, an unresolved `failed`, `needs_input`, `applying`) and is absent at `proposal_ready`, where the row's execution is provenance only and grants no write authority; at `editing` it names the agent edit's own execution once that acquires, decided by `arcProposalSourceEditFence`, not `arcProposalHeld`; the `pm:{project}` planning slot is a separate scheduler, held only while the plan step runs and never during review. `BeginArcProposalPlanning` (queued -> planning), `StoreArcProposal` (planning -> proposal_ready) and `FailArcProposal` (queued/planning -> failed, the whole Diagnostic) admit only the story's current row for that execution while the story is `arc_proposal` and `content_owner` is that execution; `StoreArcProposal` releases the story in the same write, removing `content_owner` through `MutateStoryContent` after its CAS, and also requires the source revision unchanged since the reservation, keys the children A, B, ... AA, ... in proposal order, resolves `depends_on` titles to keys and stores the whole proposal under the story's next `proposal_version`. `AskArcProposal` (planning -> `needs_input`), which `PlanArcProposal` takes instead of the store for a validated result carrying `questions`, admits the same way and requires the same unchanged source revision; in one write it keeps `content_owner`, stores any proposal returned alongside the questions whole on the row as evidence with `proposal_version` NULL (`AskArcProposalCAS`) -- never a version, the review target or approvable -- and creates the questions as one round of blocking clarifications through `CreateArcQuestionRound`, bound to the row's `operation_id` and the asking execution; its publisher announces `story_changed`, then the round's `clarification_changed`, after commit. The same writes serve every attempt kind, each admitted only for the attempt's own execution while it is the effective row of the story's latest operation. For a revision attempt, or a retry whose chain (`retried_execution_id`) starts at one, `PlanArcProposal` builds the plan_split revision input from the stored rows whole (`arcProposalAttemptPlan`: the target version's stored proposal, the revision's guidance, the initial guidance and every earlier revision record with its target version and status), and the revision store, `StoreArcProposal`, keeps every carried key, gives each new child the next key no child in the operation's history has used, stores each child's `derived_from`, refuses an unresolvable key or derivation as `arc_proposal.validation`, and writes the result on the attempt's own row as the operation's new review target, never the target version's row; a revision's failure writer is the same `RecordArcProposalFailure` / `FailArcProposal`, which leaves the attempt `failed` with its guidance and the target unchanged. The help recorded on a failed attempt, by `RecordArcProposalFailure` and by the request routes' recorded dispatch failures, has one builder, `ArcProposalFailureHelp`: a revision chain's retry, revision cancel, target read and bound target discard, or an initial chain's whole-operation cancel, retry and read, each with its CLI command and followed by the Arc proposal workspace, never a route or a concrete version: every Arc help line takes its command from one builder, `reqs.ArcProposalCommand` (`hashd show <story>`, the decisions and source edit with `--arc-version <version>`, cancel and retry, each naming the story's project with `--project <project>`), which `TestArcProposalHelpNamesRealCommands` holds to the CLI's commands and flags. `CancelArcProposal` marks the current row cancelled, returns the story to the row's `origin_status` and then removes `content_owner` in one write, except for a revision chain over a stored target, whose cancel is the `cancel_arc_revision` row below; with no live operation it refuses with `ErrNoArcProposal`, a `proposal_ready` row is refused with `ArcProposalReadySource` (a stored proposal ends only by a bound decision), an `editing` row with `ArcProposalReadySource` and `ArcProposalEditingReason`, and an `applying` row with `ArcProposalApplyingSource` (its application may already have reached REQS). A reserve against a story already in `arc_proposal` is refused before the eligibility rule runs. A refused fence is `ErrStoryOwnership` (execution) or `ErrStoryChanged` (source revision) and writes nothing. `ArcProposalSourceRevision` hashes `SplitSourceHash`'s column fields and only the operator-authored data keys `arcProposalSourceKeys` lists, so ownership and run bookkeeping never change it; `SplitSourceHash` is unchanged. None of these writes touches the story's type, title, problem, criteria, non-goals, `depends_on`, `target_repo`, size estimate, REQS or clarifications, except that `AskArcProposal` creates its attempt's round and an exit ending an attempt in `needs_input` cancels that attempt's pending questions. An initial chain parked in `needs_input` reaches `cancel_arc_proposal` through this server availability rule (`arcProposalExitAvailability` reading the extended `arcProposalHeld`), not a new FSM row: `CancelArcProposal` ends it as it ends a failed one and, in the same write, flips the round's still-pending clarifications (`arc_execution_id` = the asking attempt) to `cancelled` through `CancelPendingArcClarificationsByExecution`, column and data `status` together, answered ones keeping their answers; it returns the flipped rows and the route publishes their `clarification_changed` after the `story_changed` publisher. Entry is `POST /stories/{id}/arc-proposal` and `POST /stories/{id}/arc-proposal/cancel` (`server/internal/api/story_arc_proposal.go`): the request refuses on `arcProposalRequestRefusal` (`arcProposalEligibilityRefusal`, then the edge's guards through `storyTransitionRefusal`, the rule its `request_arc_proposal` row reads) and on an open or unanswerable `arcproposal` workflow probe before `ReserveArcProposal`, then dispatches; a definite start failure, or an AlreadyStarted run whose memo names another execution, is recorded through `FailArcProposal`. The dispatch runs detached from the request once the reservation is written, and after the start the request re-reads the operation and, when its execution was cancelled meanwhile, cancels that execution's run. The cancel route without a binding runs `CancelArcProposal`, which returns the cancelled execution, then cancels its run. Both cancels go through `cancelArcProposalRun`: only the open run whose memo names that execution, by its exact run ID, so a later request's run under the reused workflow ID is never stopped; every `arc_proposal` story carries the decision rows `discard_arc_proposal` and `approve_arc_proposal`, the `cancel_arc_revision` row and, in every phase but `proposal_ready` and while not `Revising`, a `cancel_arc_proposal` row, withheld at `applying` with `ArcProposalApplyingReason` and at `editing` with `ArcProposalEditingReason` (`arcProposalExitAvailability`). The CLI's `hashd story arc cancel <story>` (`server/internal/cli/story_ops.go`) posts this route with no binding, and the server decides between this cancel and the revision cancel. The Web workspace's cancel control (`POST /ui/stories/{project}/{id}/arc-proposal/cancel`, `web/internal/web/handlers_arc_proposal.go`) posts the unbound cancel route. |
+| Split application | `applyPlanSplitProposalTx`: source snapshot, pending proposal and its server-stamped `source_content_hash`; manual extraction uses the current handler snapshot. The proposal itself is inserted by `RunPlanSplit` under `reqs.WithStory`, which rechecks in the insert's transaction that `SplitSourceHash` still equals the hash the proposal was planned from and that the content is not locked (`StoryContentLocked`), and otherwise inserts nothing and fails the split with `plan_split.source_changed`; an ordinary split holds no story ownership, the content hash is its whole fence. The operator's `POST /stories/{id}/answer` reaches it (a draft story, or an accepted one whose pending set is a breakdown proposal; any other answer on an approved story is refused before a write), and in autonomous mode the split step reaches it itself for the proposal of a split the autonomous size take requested (`PlanSplitInput.AcceptProposal`, `ActivityHost.AcceptSizeSplit` -> `Server.AcceptSizeSplit` -> `answerSplitProposal` with the breakdown rows only, under the answer route's admission). No clarification reaches it for an Arc: both answer routes refuse a `breakdown_proposal` on an arc-type story with a 409 before any write (`arcBreakdownAnswerRefusal`). An Arc's children come only from its approved Arc proposal (`applyArcProposal`, through this writer); they are created `feature` with its `arc_id`, never Arcs; outside supervised mode a child waiting on nothing is inserted `pending` with an empty `depends_on`, and the approval's release leg (`ReleaseArcDecisionChildren`) runs `recoverStrandedDependents`, whose `unblock` release (`TransitionStoryContent`) queues it for planning; its planning-slot acquisition moves it to `drafting`. The recovery scan releases an empty list only for an Arc child: a story that predates `depends_on` reads `[]` from the column default and has no `arc_id`. |
+| Arc proposal operation (`request_arc_proposal` / `cancel_arc_proposal`) | `server/internal/reqs/arc_proposal.go`, every write inside `reqs.WithStory` and every move through `fsm.TransitionStory`, each phase change recording `story_changed` in the transaction and publishing after commit. `ReserveArcProposal` re-checks the caller's eligibility rule (the API's `arcProposalEligibilityRefusal`) inside the write, records `ArcProposalSourceRevision` before writing ownership, moves draft/approved -> `arc_proposal`, inserts the queued `arc_proposals` row and sets `content_owner` to the execution through `MutateStoryContent`. Ownership lifetimes are one per-phase rule, `arcProposalHeld`, read by `arcProposalFence`: `content_owner` names the execution while the operation's work runs or waits on its exit (`queued`, `planning`, an unresolved `failed`, `needs_input`, `applying`) and is absent at `proposal_ready`, where the row's execution is provenance only and grants no write authority; at `editing` it names the agent edit's own execution once that acquires, decided by `arcProposalSourceEditFence`, not `arcProposalHeld`; the `pm:{project}` planning slot is a separate scheduler, held only while the plan step runs and never during review. `BeginArcProposalPlanning` (queued -> planning), `StoreArcProposal` (planning -> proposal_ready) and `FailArcProposal` (queued/planning -> failed, the whole Diagnostic) admit only the story's current row for that execution while the story is `arc_proposal` and `content_owner` is that execution; `StoreArcProposal` releases the story in the same write, removing `content_owner` through `MutateStoryContent` after its CAS, and also requires the source revision unchanged since the reservation, keys the children A, B, ... AA, ... in proposal order, resolves `depends_on` titles to keys and stores the whole proposal under the story's next `proposal_version`. `AskArcProposal` (planning -> `needs_input`), which `PlanArcProposal` takes instead of the store for a validated result carrying `questions`, admits the same way and requires the same unchanged source revision; in one write it keeps `content_owner`, stores any proposal returned alongside the questions whole on the row as evidence with `proposal_version` NULL (`AskArcProposalCAS`) -- never a version, the review target or approvable -- and creates the questions as one round of blocking clarifications through `CreateArcQuestionRound`, bound to the row's `operation_id` and the asking execution; its publisher announces `story_changed`, then the round's `clarification_changed`, after commit. The same writes serve every attempt kind, each admitted only for the attempt's own execution while it is the effective row of the story's latest operation. For a revision attempt, or a retry whose chain (`retried_execution_id`) starts at one, `PlanArcProposal` builds the plan_split revision input from the stored rows whole (`arcProposalAttemptPlan`: the target version's stored proposal, the revision's guidance, the initial guidance and every earlier revision record with its target version and status), and the revision store, `StoreArcProposal`, keeps every carried key, gives each new child the next key no child in the operation's history has used, stores each child's `derived_from`, refuses an unresolvable key or derivation as `arc_proposal.validation`, and writes the result on the attempt's own row as the operation's new review target, never the target version's row; a revision's failure writer is the same `RecordArcProposalFailure` / `FailArcProposal`, which leaves the attempt `failed` with its guidance and the target unchanged. The help recorded on a failed attempt, by `RecordArcProposalFailure` and by the request routes' recorded dispatch failures, has one builder, `ArcProposalFailureHelp`: a revision chain's retry, revision cancel, target read and bound target discard, or an initial chain's whole-operation cancel, retry and read, each with its CLI command and followed by the Arc proposal workspace, never a route or a concrete version: every Arc help line takes its command from one builder, `reqs.ArcProposalCommand` (`hashd show <story>`, the decisions and source edit with `--arc-version <version>`, cancel and retry, each naming the story's project with `--project <project>`), which `TestArcProposalHelpNamesRealCommands` holds to the CLI's commands and flags. `CancelArcProposal` marks the current row cancelled, returns the story to the row's `origin_status` and then removes `content_owner` in one write, except for a revision chain over a stored target, whose cancel is the `cancel_arc_revision` row below; with no live operation it refuses with `ErrNoArcProposal`, a `proposal_ready` row is refused with `ArcProposalReadySource` (a stored proposal ends only by a bound decision), an `editing` row with `ArcProposalReadySource` and `ArcProposalEditingReason`, and an `applying` row with `ArcProposalApplyingSource` (its application may already have reached REQS). A reserve against a story already in `arc_proposal` is refused before the eligibility rule runs. A refused fence is `ErrStoryOwnership` (execution) or `ErrStoryChanged` (source revision) and writes nothing. `ArcProposalSourceRevision` hashes `SplitSourceHash`'s column fields and only the operator-authored data keys `arcProposalSourceKeys` lists, so ownership and run bookkeeping never change it; `SplitSourceHash` is unchanged. None of these writes touches the story's type, title, problem, criteria, non-goals, `depends_on`, `target_repo`, size estimate, REQS or clarifications, except that `AskArcProposal` creates its attempt's round and an exit ending an attempt in `needs_input` cancels that attempt's pending questions. An initial chain parked in `needs_input` reaches `cancel_arc_proposal` through this server availability rule (`arcProposalExitAvailability` reading the extended `arcProposalHeld`), not a new FSM row: `CancelArcProposal` ends it as it ends a failed one and, in the same write, flips the round's still-pending clarifications (`arc_execution_id` = the asking attempt) to `cancelled` through `CancelPendingArcClarificationsByExecution`, column and data `status` together, answered ones keeping their answers; it returns the flipped rows and the route publishes their `clarification_changed` after the `story_changed` publisher. Entry is `POST /stories/{id}/arc-proposal` and `POST /stories/{id}/arc-proposal/cancel` (`server/internal/api/story_arc_proposal.go`): the request refuses on `arcProposalRequestRefusal` (`arcProposalEligibilityRefusal`, then the edge's guards through `storyTransitionRefusal`, the rule its `request_arc_proposal` row reads) and on an open or unanswerable `arcproposal` workflow probe before `ReserveArcProposal`, then dispatches; a definite start failure, or an AlreadyStarted run whose memo names another execution, is recorded through `FailArcProposal`. The dispatch runs detached from the request once the reservation is written, and after the start the request re-reads the operation and, when its execution was cancelled meanwhile, cancels that execution's run. The cancel route without a binding runs `CancelArcProposal`, which returns the cancelled execution, then cancels its run. Both cancels go through `cancelArcProposalRun`: only the open run whose memo names that execution, by its exact run ID, so a later request's run under the reused workflow ID is never stopped; every `arc_proposal` story carries the decision rows `discard_arc_proposal` and `approve_arc_proposal`, the `cancel_arc_revision` row and, in every phase but `proposal_ready` and while not `Revising`, a `cancel_arc_proposal` row, withheld at `applying` with `ArcProposalApplyingReason` and at `editing` with `ArcProposalEditingReason` (`arcProposalExitAvailability`). The CLI's `hashd story arc cancel <story>` (`server/internal/cli/story_ops.go`) posts this route with no binding, and the server decides between this cancel and the revision cancel. The Web workspace's cancel control (`POST /ui/stories/{project}/{id}/arc-proposal/cancel`, `web/internal/web/handlers_arc_proposal.go`) posts the unbound cancel route. |
 | Arc proposal revision cancel (`cancel_arc_revision`) | `reqs.CancelArcProposal`'s `Revising` branch, in the same `reqs.WithStory` write as the whole-operation cancel, reached only by `POST /stories/{id}/arc-proposal/cancel` with neither binding parameter. The branch is chosen by `reqs.ArcRevisionCancelRefusal`, the one rule the story read's `Cancel revision` row (`arcProposalExitAvailability`) also reads: admitted while the effective row of the story's latest operation is a revision attempt, or a retry whose chain starts at one (`arcProposalChainRoot`), in `queued`, `planning`, `failed` or `needs_input`, over a stored review target. `needs_input` is reached through this server availability rule, not a new FSM row, and for an attempt there the same write also cancels the round's pending questions (`CancelPendingArcClarificationsByExecution`, answered ones kept), which the route publishes as `clarification_changed` after `story_changed`. It takes the `cancel_arc_revision` self-edge through `fsm.TransitionStory` before the phase CAS, marks only that attempt `cancelled` (its failure Diagnostic kept), removes `content_owner` through `MutateStoryContent` and records `story_changed` in the transaction, publishing after commit. The target row is not written: `ResolveArcProposalAttempts` makes it effective again at `proposal_ready`, stale when the source changed, and `ArcRevisionStatus` reads the attempt's revision record `cancelled`. No Autonomous policy runs and no awaiting-decision marker is recorded. A `Revising` operation the rule does not admit is refused with `ArcRevisionCancelSource`, writing nothing. A revised operation with no chain left to cancel -- the cancel lost to the chain's completion, another cancel, or a later edit, approval or discard of the target -- is refused with `reqs.ArcRevisionStale` (`story.arc_proposal.stale`, bound to the target, naming its version and fate and `GET /stories/{id}`) whatever the story's status, and so is a revise or retry whose attempt was cancelled during its dispatch (`arcProposalCancelledDuringStart`). The route then asks `cancelArcProposalRun` to stop the cancelled execution's run, and the write stands whatever that returns; the attempt's late output is refused by `arcProposalFence`. `hashd story arc cancel <story>` is the CLI's Cancel revision: the same unbound post, which takes this branch while a revision chain's attempt is current. The Web workspace's Cancel revision control, offered only while this row is available and separate from its whole-operation cancel, posts the same unbound `POST /ui/stories/{project}/{id}/arc-proposal/cancel` (`web/internal/web/handlers_arc_proposal.go`'s `CancelArcProposal`), its confirmation naming the read's `attempt_target_version` as the version that becomes the review target again. |
 | Arc proposal discard (`discard_arc_proposal`) | `reqs.DiscardArcProposal` in one `reqs.WithStory` write, reached only by `POST /stories/{id}/arc-proposal/cancel` with both `arc_proposal_version` and `arc_source_revision` (one without the other is a 400 before any read; with neither the route is the unbound cancel). `reqs.ResolveArcProposalBinding` loads the operation by (project, story, `proposal_version`) -- the execution is the version's own, never the caller's -- and admits it only under `arcProposalFence` at `proposal_ready` (the story with no `content_owner`) with the named revision equal to the row's `source_revision` -- not the story's `ArcProposalSourceRevision` now, which only the approval also requires, so a proposal whose source was edited since planning still has its discard exit -- and, when the binding names an attempt (`ArcProposalBinding`'s attempt execution; no route sends one yet), that attempt equal to the operation's current attempt. It also admits the operation's target behind a stranded revision chain (`reqs.ArcRevisionStranded`: the effective row a revision attempt, or a retry whose chain starts at one, the attempts `reqs.ArcRevisionCancelRefusal` admits, in `failed` or `needs_input`) when `arcProposalFence` admits that attempt at `failed` or `needs_input`, holding the story as `content_owner`, under the same planned-against source comparison; `needs_input` is reached through this server availability rule, not a new FSM row. A queued or planning revision is still refused, and approve and revise are refused while any attempt is failed or in `needs_input`. A version that already recorded its discard for that revision is a replay that writes nothing; anything else is a `story.arc_proposal.stale` Diagnostic naming the version's fate (no such version, cancelled, discarded, approved, applying, replaced by vN, the current phase), the current attempt when it is another, and the story's status once it has left `arc_proposal`, with `hashd show <story>` and the refused action's CLI command as help (`reqs.ArcProposalCommand`); the round answer's stale refusal keeps its own help. The admitted write records the decision through `DecideArcProposalCAS` (`proposal_ready` -> `discarded`, `decided_by` = the requesting user, `decided_at`), takes `discard_arc_proposal` to `origin_status` through `fsm.TransitionStory` (a ready proposal holds no `content_owner`, so there is none to remove), and records `story_changed` (published after commit). Behind a stranded revision chain the same single write first marks that attempt `cancelled` through `setArcProposalPhase`, a `failure_diagnostic` kept, so `ArcRevisionStatus` reads its revision record `cancelled`, cancels the pending questions of an attempt in `needs_input` (`CancelPendingArcClarificationsByExecution`, answered ones kept), and after the transition removes its `content_owner` through `releaseArcProposalOwner`; it records one `story_changed` and runs no Autonomous policy, and the route publishes the cancelled questions' `clarification_changed` after it. It keeps the story's source fields as they are at the discard, never restoring the proposal's planned-against source, touches no type, ID, child, dependency, REQS or other clarification and cancels no workflow. The `discard_arc_proposal` availability row reads the same resolver on the proposal the read serves; with no stored proposal (queued, planning, failed, needs_input) it is withheld with `reqs.ArcProposalUndecidable`, the sentence the bound discard's refusal carries, except behind a stranded revision chain, where it reads the resolver on the target's binding (its version and planned-against `source_revision`) and an offered row's note names `arc_proposal_version` and `arc_source_revision`, beside the `Cancel revision` row and, for a failed chain, `Retry`; `retry_arc_proposal` stays withheld at `needs_input`, since `ResolveArcProposalRetry` requires `failed`. The CLI's `hashd story arc discard <story> --arc-version <version>` (`server/internal/cli/story_ops.go`) posts the cancel route with the named version and the `source_revision` of one story read. It refuses a missing or non-positive version before any request and a read serving no `arc_proposal` before the post, and never compares the version with the read's `proposal_version`, so a version no longer at review gets the route's stale refusal. The Web workspace's discard control (`POST /ui/stories/{project}/{id}/arc-proposal/discard`) posts the cancel route with both `arc_proposal_version` and `arc_source_revision` as rendered from the read its confirmation showed, and sends nothing when either is missing or unparseable. Behind a failed revision chain the same control is the failed-revision Discard, separate from Cancel revision: it posts `POST /ui/stories/{project}/{id}/arc-proposal/discard` with the target's binding, the read's `proposal_version` and `source_revision`, its confirmation naming that version beside the row's served note. |
 | Arc proposal revision (`revise_arc_proposal`) | `reqs.ReviseArcProposal` runs in one `reqs.WithStory` write under `reqs.ResolveArcProposalBinding` with `ArcProposalRevise`: admitted only under `arcProposalFence` at `proposal_ready` with no `content_owner`, the named revision equal to the target's planned-against `source_revision`, with no comparison against the story's current `ArcProposalSourceRevision`, so a stale target can be refreshed; a revise records no decision, so there is no replay. It refuses a request with no execution or with guidance that is empty after trimming. It inserts a queued `revision` attempt of the target's operation whose `target_proposal_version` is the named version, whose `source_revision` is the story's `ArcProposalSourceRevision` at the write, whose `revision_guidance` is whole, and which keeps the target's initial `guidance` and `origin_status`; the target row is not written. It sets `content_owner` to the attempt's execution through `MutateStoryContent`, takes the `revise_arc_proposal` self-edge through `fsm.TransitionStory` and records `story_changed`, published after commit. A refusal is the `story.arc_proposal.stale` Diagnostic and writes nothing. Entry is `POST /stories/{id}/arc-proposal` with both `arc_proposal_version` and `arc_source_revision` and a `guidance` body (`server/internal/api/story_arc_proposal.go`): one binding parameter without the other is a 400 naming the missing one, and the binding with guidance empty after trimming is a 400 (`story.arc_proposal.revise`), both before anything is read; without either parameter the route is the request (`requestArcProposal`), never a revise. `reviseArcProposal` refuses on `arcProposalReviseRefusal` (the resolver with `ArcProposalRevise`, its stale refusal the 409) and on `arcProposalAttemptPreflight` before the write, then dispatches the attempt through `dispatchArcProposalAttempt`, which publishes the write's `story_changed` once the start is answered and settles a failed or refused start on the attempt. The response names the target version and whether the attempt is a revision or, for a stale target (`reqs.ArcProposalStale`), a refresh. The `revise_arc_proposal` availability row, labelled "Refresh proposal" while the review target is stale (`arcProposalTargetStale`) and "Revise proposal" otherwise, is decided by the same rule, `arcProposalReviseRefusal` (the resolver with `ArcProposalRevise` in `arcProposalExitAvailability`'s binding loop), on the binding the story read serves: offered only while that stored target is the effective row at `proposal_ready`, its note naming the binding and that guidance is required; withheld with `reqs.ArcProposalUndecidable` while an attempt that stored nothing is current, and with the stale Diagnostic's Explanation otherwise. A row the binding admits is still withheld, with `openArcProposalRefusal`'s title, while the story's Arc proposal workflow (`arcproposal:{project}:{number}`, or a legacy `arcproposal:{project}:{story}` run started before the move to the number) is open or the probe cannot answer; the run's close observer (`observeArcProposalClose`) brings it back with one live `story_changed` frame and no `events` row. The CLI's `hashd story arc revise <story> --arc-version <version> -f <guidance>` (`server/internal/cli/story_ops.go`) posts this route with the named version, the read's `source_revision` and the guidance whole (inline text, or a client-side file's content), under discard's version and read rules; blank guidance is refused before any request. The Web workspace's Revise / Refresh control, offered only on this row and labelled as served (`POST /ui/stories/{project}/{id}/arc-proposal`, `web/internal/web/handlers_arc_proposal.go`), posts this route with the `guidance` as typed and exactly the `arc_proposal_version` and `arc_source_revision` rendered from the read its field was opened on, and sends nothing when either is missing or unparseable. |
 | Arc proposal retry (`retry_arc_proposal`) | `reqs.RetryArcProposal` runs in one `reqs.WithStory` write under `reqs.ResolveArcProposalRetry`, the one rule the story read's `Retry` row (`arcProposalExitAvailability`) also reads: admitted only while the story is `arc_proposal`, the named attempt is the latest operation's current attempt and its effective row, `failed`, and still holds the story (`arcProposalFence` at `failed`); anything else is the `story.arc_proposal.stale` refusal of the attempt-only binding (`arcProposalStale` with `ArcProposalBinding{AttemptExecutionID}`, no version), naming the current attempt and its phase and writing nothing. It refuses a request with no execution or no named attempt before the transaction. It reads `db.ArcProposalSourceRevision` at the write, takes the `retry_arc_proposal` self-edge through `fsm.TransitionStory`, inserts a queued `retry` attempt whose `retried_execution_id` is the failed attempt and whose `operation_id`, `origin_status`, `guidance`, `target_proposal_version` and `revision_guidance` are copied from it (no target for an initial chain), with that `source_revision` and the requesting user, sets `content_owner` to the new execution through `MutateStoryContent`, taking over from the failed attempt, and records `story_changed`, published after commit. The failed row is not written: its phase, failure Diagnostic and transcript stay. Planning resolves the chain through `arcProposalAttemptPlan` / `arcProposalChainRoot` unchanged. Entry is `POST /stories/{id}/arc-proposal/retry` with `arc_attempt` (`server/internal/api/story_arc_proposal.go`): a missing or empty `arc_attempt` is a 400 (`story.arc_proposal.retry`) before anything is read; `retryArcProposal` admits through `arcProposalAttemptAdmission` (the resolver, then `arcProposalAttemptPreflight`, with the fresh-read re-check when the open-workflow refusal may be the winner's), persists the attempt under a new `arcproposal-` execution and dispatches it through `dispatchArcProposalAttempt`. The `Retry` row is offered only when the resolver admits the current attempt and `openArcProposalRefusal` passes, its note naming `arc_attempt`; it is withheld with the resolver's stale Explanation, and with the probe's title while the workflow is open or cannot be probed. The CLI's `hashd story arc retry <story>` (`server/internal/cli/story_ops.go`) posts this route with the `arc_attempt` its one story read serves (`attempt_execution_id`), refusing before the post when the read serves no operation or no attempt. The Web workspace's Retry control (`POST /ui/stories/{project}/{id}/arc-proposal/retry`, `web/internal/web/handlers_arc_proposal.go`), offered only while this row is available, posts this route with exactly the `arc_attempt` rendered from the read its confirmation showed (that read's `attempt_execution_id`), and sends nothing when it is missing or empty. |
 | Arc question round answer and resume (`resume_arc_proposal`) | `reqs.AnswerArcRound` runs in one `reqs.WithStory` write. It admits the round only while its asking attempt is the current attempt, in `needs_input`, and still holds the story (`arcProposalFence` at `needs_input`); otherwise it writes nothing and refuses with a `story.arc_proposal.stale` Diagnostic naming the resume attempt when one already names the asking attempt in `resumed_execution_id`, else the stale refusal of the attempt-only binding (`arcProposalStale` with `ArcProposalBinding{AttemptExecutionID}`). Each answer is saved verbatim through the `status='pending'` CAS (`UpdatePendingClarificationAnswer`) by `reqs.MergeArcClarificationAnswer`, which records when and by whom and never resolves an option selection; a question no longer pending refuses the whole write. Answers that leave the round partly pending resume nothing. Answers that complete it are refused, saving nothing, unless the caller ran the attempt pre-write checks (`reqs.ErrArcRoundCompletes`); with them the same write takes the `resume_arc_proposal` self-edge through `fsm.TransitionStory`, inserts a queued `resume` attempt whose `resumed_execution_id` is the asking attempt and whose `operation_id`, `origin_status`, `guidance`, `target_proposal_version` and `revision_guidance` are copied from it, planned against `db.ArcProposalSourceRevision` and requested by the answering user, sets `content_owner` to the new execution through `MutateStoryContent`, and records `story_changed`; the asking row is not written. The phase and the answered questions' `clarification_changed` are published after commit. `arcProposalChainRoot` follows a resume's `resumed_execution_id` as it follows a retry's `retried_execution_id`, so a resume plans, cancels, discards and fails (`ArcProposalFailureHelp`) as its chain, and a failed resume is retried through `retry_arc_proposal`. The admission rule is `reqs.ResolveArcRound`, which the write re-runs, the routes check before it and the `Answer questions` row reads. Entry is the two existing answer routes, no new one, through one handler, `(*Server).answerArcRound` (`server/internal/api/story_arc_round.go`): `POST /clarifications/{id}/answer` routes a row with `arc_execution_id` there before its superseded and pending checks, its restart-hold admission and `saveClarificationAnswer`, so an Arc row never reaches `resumeStoryAfterFinalAnswer` and a late answer to a cancelled question gets the stale refusal; `POST /stories/{id}/answer` routes there (`routeStoryAnswerToArc`), after its owner guard and blank check and before its own restart-hold admission, draft guard and `pendingBreakdownProposalClarifications`, when the story's latest operation has a pending round, the text answering every pending question of that round and no other clarification; when that latest round has nothing pending and the story no ordinary pending question, it refuses through `reqs.ResolveArcRound` on that round -- the 409 naming the resume, or the stale refusal naming the cancel, discard or later attempt that won -- under a restart hold as well; any other story takes the ordinary bundle answer. The handler guards the owner first; answers that complete the round as read before the write are admitted through `arcProposalAttemptAdmission` with `reqs.ResolveArcRound` as its refusal (restart hold, `openArcProposalRefusal`, config), so a refusal saves nothing, and answers another answer completes meanwhile (`reqs.ErrArcRoundCompletes`) are sent again with those checks run. The write runs with `requestingUserID` and a new `arcproposal-` execution, refusals mapped through `arcProposalAttemptErr`; an elected resume is dispatched through `dispatchArcProposalAttempt`, whose definite start failure moves the resume to `failed` with its Diagnostic and `ArcProposalFailureHelp` (`settleArcProposalStart`), and the response says the answers are saved, never to answer again, keeping the dispatch's own recovery (`arcRoundResumeFailed`): the settled failure's help names the resume's retry, while an unconfirmed start or a resume cancelled during its start keeps its own next steps. An incomplete answer publishes after commit and answers naming each unanswered question by ID and text. `arcProposalExitAvailability`'s `resume_arc_proposal` row, labelled `Answer questions`, is offered only when `reqs.ResolveArcRound` admits the current attempt, at `needs_input`, its note naming the two answer routes; it is withheld with the rule's stale Explanation otherwise. The TUI workspace's `a` form (`ArcProposalWorkspaceScreen`) and the Web workspace's Answer questions control (`POST /ui/stories/{project}/{id}/arc-proposal/answer`, `web/internal/web/handlers_arc_proposal.go`) send `POST /clarifications/{id}/answer` once per unanswered question, in round order, each with its own answer as typed. |
-| Arc review-time source edit (direct) | `POST /stories/{id}/update-criteria` and `POST /stories/{id}/update-fields` through `(*Server).mutateStoryContent` (`server/internal/api/mutations_plan.go`) -> `reqs.MutateStoryContent`, the same writer as any direct field edit. Inside the edit's write, a story in `arc_proposal`, or an edit that sends a binding, is admitted by `arcSourceEditAdmission` (`server/internal/api/story_arc_proposal.go`): first the one held-story rule, `arcProposalRefusal` decided with the story's latest operation, which admits a source edit only at `proposal_ready` with no `content_owner` and an origin `StoryContentLocked` leaves editable (every lifecycle verb stays withheld in every phase; `queued`, `planning`, `failed`, `editing` and `applying` refuse naming the phase and `GET /stories/{id}`); then the binding, `arc_proposal_version` and `arc_source_revision` in the body (both required while held; one without the other is a 400 before any read), through `reqs.AdmitArcProposalSourceEdit`, which reuses `ResolveArcProposalBinding`'s version lookup and `story.arc_proposal.stale` refusal and admits only the story's current operation at `proposal_ready` planned against the named revision under `arcProposalFence`. Only an admitted edit skips the `StoryContentLocked` refusal. The write never touches the `arc_proposals` row or its stored proposal; its `story_changed` (recorded in the transaction, published after commit) says when the edit made vN stale. Edit and approval both run under `reqs.WithStory`, so an approval after the edit fails the resolver's source check and an edit after an approval, discard or cancel is refused naming that state. The `update_criteria` availability row reads the same rule and names the binding in its note. |
+| Arc review-time source edit (direct) | `POST /stories/{id}/update-criteria` and `POST /stories/{id}/update-fields` through `(*Server).MutateStoryContent` (`server/internal/api/mutations_plan.go`) -> `reqs.MutateStoryContent`, the same writer as any direct field edit. Inside the edit's write, a story in `arc_proposal`, or an edit that sends a binding, is admitted by `arcSourceEditAdmission` (`server/internal/api/story_arc_proposal.go`): first the one held-story rule, `arcProposalRefusal` decided with the story's latest operation, which admits a source edit only at `proposal_ready` with no `content_owner` and an origin `StoryContentLocked` leaves editable (every lifecycle verb stays withheld in every phase; `queued`, `planning`, `failed`, `editing` and `applying` refuse naming the phase and `GET /stories/{id}`); then the binding, `arc_proposal_version` and `arc_source_revision` in the body (both required while held; one without the other is a 400 before any read), through `reqs.AdmitArcProposalSourceEdit`, which reuses `ResolveArcProposalBinding`'s version lookup and `story.arc_proposal.stale` refusal and admits only the story's current operation at `proposal_ready` planned against the named revision under `arcProposalFence`. Only an admitted edit skips the `StoryContentLocked` refusal. The write never touches the `arc_proposals` row or its stored proposal; its `story_changed` (recorded in the transaction, published after commit) says when the edit made vN stale. Edit and approval both run under `reqs.WithStory`, so an approval after the edit fails the resolver's source check and an edit after an approval, discard or cancel is refused naming that state. The `update_criteria` availability row reads the same rule and names the binding in its note. |
 | Arc review-time source edit (agent) | The existing story edit route, workflow and PM section, with the story held in `arc_proposal` at phase `editing` (never the story `editing` status). `POST /stories/{id}/edit` (`server/internal/api/mutations_edit.go`): `StoryEditBody` carries the direct edit's binding (`ArcSourceEditBinding`, both halves required for a held story, one without the other a 400 before any read); a held story is admitted by `arcProposalStartEditRefusal` (`server/internal/api/story_arc_proposal.go`: `arcProposalRefusal` for a source edit, then the origin status's own `start_edit` edge and guards through `storyTransitionRefusal`), entered by `reqs.EnterArcProposalSourceEdit` under the binding, and dispatched through `temporal.DispatchEdit` with `EditInput.ArcSourceEditEnteredAt` naming the editing generation; a failed dispatch ends the phase through `EndArcProposalSourceEdit` with the dispatch's Diagnostic. The `start_edit` row (`arcProposalStartEditAvailability`, "Edit source requirements") reads the same rule; the Web UI offers it as that row's control, and the CLI form is `hashd story edit <ID> --arc-version <version> -f <feedback>` (`newStoryEditCmd`, `server/internal/cli/story_ops.go`), which sends the named version with the `arc_proposal.source_revision` of one story read. In `server/internal/pm`, `RunEditBegin` acquires through `AcquireArcProposalSourceEdit` (stage `arc_proposal`, the prompt snapshot shown with the origin status) and a blocked begin ends the phase; `finishStory` writes the content as an ordinary edit does and, instead of an FSM transition, ends the phase with `EndArcProposalSourceEdit` in the same transaction; `failStoryAs` (failure, refusal, `RunResultLost`) ends it at `proposal_ready` with the whole Diagnostic in `edit_diagnostic`, its recovery step the Arc review's (`ArcSourceEditRecoveryHint`), never `hashd story edit`; a late result fails the owner and phase fence and writes nothing; the workflow takes no size offer. Housekeeping (`recoverArcProposalSourceEdits`, `server/internal/api/housekeeping.go`) ends an acquired edit past `editingTimeout` (from `editing_started`), recorded as timed out, and an unacquired entry once its start window (`arcDecisionStartSettled` on the entry's `phase_changed_at`) has passed and `temporal.EditWorkflowID` is confirmed not open, recorded as never started. The operation writes are `server/internal/reqs/arc_proposal.go`'s, each inside `reqs.WithStory` recording `story_changed` for publication after commit: `EnterArcProposalSourceEdit` admits the binding through `AdmitArcProposalSourceEdit` and moves `proposal_ready` -> `editing` through `BeginArcProposalSourceEditCAS`, conditioned on the admitted ready generation's `phase_changed_at`, clearing `edit_diagnostic`, writing no owner; `AcquireArcProposalSourceEdit` sets `content_owner` and `editing_started` only while the operation is `editing` in that generation and unowned (`arcProposalSourceEditFence`); `EndArcProposalSourceEdit`, named by that owner or, before any acquire, by the generation alone, moves `editing` -> `proposal_ready` through `EndArcProposalSourceEditCAS` with a failure whole in `edit_diagnostic` and removes `content_owner`, `editing_started` and `content_applying`; while the row it reads carries `content_applying` it holds that REQS lock across the write and refuses (`fsm.GuardFailed`) while the lock is held or unverifiable, so no caller decides the marker from an earlier read. A late or foreign owner, another generation or another phase is `ErrStoryOwnership` and writes nothing; `ResolveArcProposalBinding` admits no decision and `CancelArcProposal` refuses at `editing`. |
 | Arc proposal approval (`proposal_ready` -> `applying`) | `reqs.BeginArcProposalApply` in one `reqs.WithStory` write, reached by the Arc decision service `(*Server).approveArcProposal` (`server/internal/api/story_arc_decision.go`): `POST /stories/{id}/approve` with both `arc_proposal_version` and `arc_source_revision` and no `force`, `continuation` or `expected_updated_at` (a partial binding or such a combination is a 400 before any read; with neither the route is the story's own approval, which refuses a held story). `reqs.ResolveArcProposalBinding` decides it as it decides the discard, admitting `proposal_ready` and `applying`, and also requires the story's `ArcProposalSourceRevision` now to equal the row's `source_revision`: at `proposal_ready`, only while the approval's probe before the write found no `arcdecision` run of the story open (an open one refuses 409 and an unanswered probe 503, writing nothing) and only in the ready generation read before that probe (`BeginArcProposalApplyCAS` is conditioned on its `phase_changed_at`; a generation written since refuses 409), `BeginArcProposalApplyCAS` moves the operation to `applying` recording the decider (`decided_by`, or `decided_by_policy` for the Autonomous policy) and clearing an earlier attempt's `decision_diagnostic`, and the same write sets `content_owner` to the operation's execution through `MutateStoryContent`, refusing a story that has any owner, with `story_changed` published once the `arcdecision` start is answered; at `applying` nothing is written, and an open run of another execution or an earlier attempt refuses the retry with 409; an `approved` operation replays its `child_story_ids`. A definite start failure of a fresh approval (refused, never attempted, or held by another execution's run) writes through `reqs.ReturnArcProposalStartToReady`, which returns the operation to `proposal_ready`, releasing `content_owner` in the same write, only while its start window (`arcDecisionStartSettled`) is open as that transaction reads it and otherwise records the failure at `applying`; an approval at `applying` inside that window dispatches nothing, so no competing application can run while the operation may still return to ready. Any other start failure -- a retry's, one held by the execution's run of an earlier applying attempt, or one whose run may be the execution's own -- through `reqs.RecordArcProposalApplyFailure`. The run's input and memo carry the applying attempt (`ApplyingSince`, the applying write's `phase_changed_at`); an AlreadyStarted run stands as this approval's start only when its memo names this execution and this attempt. `reqs.CancelArcProposal` refuses an `applying` operation. At `proposal_ready` the `approve_arc_proposal` row's note states each proposed child's mode-derived consequence from the shared plan-ready rule (`arcChildPlanReady`), and a mode that cannot be read withholds the row and refuses the approval with 409, writing nothing. The CLI's `hashd story arc approve <story> --arc-version <version>` (`server/internal/cli/story_ops.go`) posts `POST /stories/{id}/approve` with only `project`, the named version and the read's `source_revision`, under the discard command's version and read rules. The Web workspace's approve control at `proposal_ready` and its retry control at `applying` both post `POST /ui/stories/{project}/{id}/arc-proposal/approve` (`web/internal/web/handlers_arc_proposal.go`), which sends this route with exactly the `arc_proposal_version` and `arc_source_revision` rendered from the read its confirmation showed, and nothing when either is missing or unparseable. |
 | Arc proposal Autonomous approval | The `arcproposal` workflow's leg after a stored proposal (`autoApproveArcProposal`, `server/internal/temporal/workflows/arc_proposal.go`) calls `ActivityHost.ApproveArcProposalAutonomously`, wired to `(*Server).ApproveArcProposalAutonomously`, which reads the mode through `config.LoadProjectConfig` + `EffectiveAutonomy` and, in `autonomous` mode, approves the stored version and source revision through `approveArcProposal` with the decider `decided_by_policy`, writing exactly what the approve route's Arc branch writes; any other mode writes nothing. An unreadable config, a refusal by the decision service, and the leg's exhausted retries, write through `reqs.RecordArcProposalReadyDiagnostic` (`RecordArcProposalReadyDiagnosticCAS`, stays `proposal_ready`) inside `reqs.WithStory` under `arcProposalFence` at `proposal_ready` (the story with no `content_owner`; the execution names the row as provenance), the Diagnostic whole in `decision_diagnostic` and `story_changed` published after commit; a fence refusal writes nothing. It never discards and touches no clarification. |
-| Arc proposal application (`approve_arc_proposal`) | `(*Server).applyArcProposal` (`server/internal/api/story_arc_decision.go`), `applyPlanSplitProposalTx` under `arcDecisionSplitBinding`: its database half in one transaction, then its REQS half. Admission is `reqs.AdmitArcProposalApplication` inside the transaction: `arcProposalFence` at `applying` for the operation's execution and `ArcProposalSourceRevision` equal to the row's `source_revision`, with no `StoryContentLocked` refusal. The binding's `prepareSource` converts the source through `retypeToArc` (expected-type CAS, same ID) before the children's type, Arc link and plan-ready rule are read; story numbers are allocated only here, for exactly the proposal's children; `depends_on` resolves from child keys to the allocated IDs, refusing a dependency on the source or an unknown key. The transaction checks the scope with `reqs.CheckSplitScope` (stale refuses the write); the REQS half, after the commit, is `reqs.ReconcileSplitScope` with provenance `hashd-arc-decision: <project> <story> v<version> <execution>`, recorded through `commitrecord`; intent capture is `intentcapture.RecordApplication` for the source and every child against the row's `intent_capture_id`. The finish, on the transaction's queries, is `reqs.ApproveArcProposal` (`approve_arc_proposal` to `accepted` through `fsm.TransitionStory`, `content_owner` removed through `MutateStoryContent`, `ApproveArcProposalCAS` applying -> approved with `decided_at` and `child_story_ids`, the decider left as the applying write recorded) plus `RecordStoryChanged` for every child, all published after commit. An `approved` row, approved by this attempt or a competing one, answers with its recorded mapping and writes nothing but a REQS half not yet finished (`finishArcDecisionScope` over `reqs.SplitScopeFinished`: the scope commit its write recorded in the upstream's history and no intent of its write open). A repeated approval of an `approved` row whose REQS half is written after the decision (`reqs_scope_after_decision`, a REQS scope in the proposal) runs no git: it dispatches the `arcdecision:{project}:{number}` run, whose apply leg makes that check and finishes the write, or names the run already open for the execution and dispatches nothing. The scope commit is recorded as the decision's (`arcDecisionActor`: the deciding user, or the system for a policy decision). A breakdown proposal accepted through `hashd answer` finishes an unwritten REQS half the same way when answered again (`finishAcceptedSplitScope`). Failures return `splitApplyReach`: `splitStoppedBeforeReqs` or `splitReachedReqs`. |
+| Arc proposal application (`approve_arc_proposal`) | `(*Server).applyArcProposal` (`server/internal/api/story_arc_decision.go`), `applyPlanSplitProposalTx` under `arcDecisionSplitBinding`: its database half in one transaction, then its REQS half. Admission is `reqs.AdmitArcProposalApplication` inside the transaction: `arcProposalFence` at `applying` for the operation's execution and `ArcProposalSourceRevision` equal to the row's `source_revision`, with no `StoryContentLocked` refusal. The binding's `prepareSource` converts the source through `retypeToArc` (expected-type CAS, same ID) before the children's type, Arc link and plan-ready rule are read; story numbers are allocated only here, for exactly the proposal's children; `depends_on` resolves from child keys to the allocated IDs, refusing a dependency on the source or an unknown key. The transaction checks the scope with `reqs.CheckSplitScope` (stale refuses the write); the REQS half, after the commit, is `reqs.ReconcileSplitScope` with provenance `hashd-arc-decision: <project> <story> v<version> <execution>`, recorded through `commitrecord`; intent capture is `intentcapture.RecordApplication` for the source and every child against the row's `intent_capture_id`. The finish, on the transaction's queries, is `reqs.ApproveArcProposal` (`approve_arc_proposal` to `approved` through `fsm.TransitionStory`, `content_owner` removed through `MutateStoryContent`, `ApproveArcProposalCAS` applying -> approved with `decided_at` and `child_story_ids`, the decider left as the applying write recorded) plus `RecordStoryChanged` for every child, all published after commit. An `approved` row, approved by this attempt or a competing one, answers with its recorded mapping and writes nothing but a REQS half not yet finished (`FinishArcDecisionScope` over `reqs.SplitScopeFinished`: the scope commit its write recorded in the upstream's history and no intent of its write open). A repeated approval of an `approved` row whose REQS half is written after the decision (`reqs_scope_after_decision`, a REQS scope in the proposal) runs no git: it dispatches the `arcdecision:{project}:{number}` run, whose apply leg makes that check and finishes the write, or names the run already open for the execution and dispatches nothing. The scope commit is recorded as the decision's (`arcDecisionActor`: the deciding user, or the system for a policy decision). A breakdown proposal accepted through `hashd answer` finishes an unwritten REQS half the same way when answered again (`FinishAcceptedSplitScope`). Failures return `splitApplyReach`: `splitStoppedBeforeReqs` or `splitReachedReqs`. |
 | Arc decision apply run (`arcdecision:{project}:{number}`; the legacy `arcdecision:{project}:{story}` for a run started before the move to the number) | `ArcDecisionWorkflow` (`server/internal/temporal/workflows/arc_decision.go`). The apply leg calls `ActivityHost.ApplyArcDecision`, wired to `(*Server).ApplyArcDecision`, which runs `applyArcProposal` and returns a 4xx refusal as outcome data with whether REQS may hold its scope commit; every other failure is retried by the leg's RetryPolicy. The record leg writes through `reqs.ReturnArcProposalToReady` (a first-attempt refusal before REQS, with no scope commit recorded for the decision's REQS write, keyed by its provenance, once its open intents are resolved (`arcDecisionEarlierReach`, `reqs.SplitScopePublished`): `ReturnArcProposalToReadyCAS` applying -> `proposal_ready`, decider cleared, `content_owner` removed in the same write) or `reqs.RecordArcProposalApplyFailure` (a later or post-REQS refusal, or exhausted retries: `RecordArcProposalApplyFailureCAS`, stays `applying`), each inside `reqs.WithStory` under `arcProposalFence` at `applying` for the input's version, both CASes conditioned on the input's applying attempt (`phase_changed_at = ApplyingSince`) so a late record of an earlier attempt writes nothing, the Diagnostic whole in `decision_diagnostic`, and `story_changed` published after commit; a fence refusal writes nothing. After a committed apply the release leg calls `ActivityHost.ReleaseArcChildren`, wired to `(*Server).ReleaseArcDecisionChildren` (the `recoverStrandedDependents` pass, which there waits for the pass's backgrounded planning dispatches and names a refused one failed), then `reqs.RecordArcChildRelease`, which rewrites only the approved row's `child_story_ids` per-child release record through `RecordArcChildReleaseCAS` on the mapping it read and emits `story_changed`; it creates, moves or removes no story. |
 | Arc type change | `retypeToArc`, run only by an Arc proposal's approval (`arcDecisionSplitBinding`'s source preparation, inside the split apply's transaction): `UpdateStoryType` conditions on the type read and the story's `size_estimate` is deleted in the same write. Adding a child (`/plan/quick` with `arc_id`) reserves the Arc and re-checks `arcChildRefusal` (an Arc, neither abandoned nor complete) in the write that inserts the child. Web: the story read's `request_arc_proposal` row alone offers an Arc -- offered, the Plan as Arc item links to the Arc proposal workspace's request form; withheld or absent, the item is not shown. |
-| Size offer (take) | Read side: `storySizeOffer` on the single-story read decides `size_offer` from the stored `size_estimate` and the action's own refusal -- `arcProposalEligibilityRefusal` for an Arc, `splitRefusal` for a split -- so the offer and the route agree. `GET /dashboard`'s story-row `arc_recommended` reads the same Arc rule (`arcOfferAdmitted`), so it is true exactly when the detail read serves kind `arc`. The dashboard reads every story's workstream count once per request (`CountWorkstreamsPerStory`) and hands it to that same rule in place of the per-story read; a failed read refuses every row the way an unreadable per-story count does. Every arc-type row also carries `arc_progress` {`children`, `implemented`}, by the single-story read's Children rule (`ListStoriesByArc`: `arc_number` is the Arc's number, status not abandoned), implemented children counted though the dashboard lists only active stories; a non-Arc row carries none and a childless Arc zeros. The counts come from one query per request (`CountArcChildrenByArc`, `dashboardArcProgress`, none when no row is an Arc), read inside the same `reportSnapshot` as the rows, so the two describe the same moment. When a listed row's `arc_number` links an Arc the response does not list on its own -- owned by someone else under `owner=mine`, or implemented or abandoned -- that Arc's row is appended after the listed rows, built by the same row path (owner, Arc facts, `archive_unfinished`, `arc_progress`) and marked `parent_only`; a row listed on its own merits is never marked. The parent rows come from one read per request by number (`ListStoriesByProjectNumbers`, `dashboardArcParents`, newest first, none when every linked Arc is listed) after the owner filter, not owner-filtered and in the same snapshot; an Arc link naming no story in the project adds no row, and a failed read is logged and adds none rather than failing the dashboard. Every unfinished non-Arc row whose `arc_number` is an Arc row's in the response (listed or `parent_only`) also carries `dependencies` {`waits_on`, `waiting`, `tucked`, `unblocks`, `cycle`}; Arc rows, stories in no Arc and implemented or abandoned children carry no key. `dashboardArcDependencies` decides them in the same snapshot as the rows from at most two batched reads, none when no row is such a child: `ListStoryDependencyRowsByArcNumbers` (every story of those Arcs, in any status, so an implemented or unlisted child still counts as in the Arc by its stored `arc_number`), then one `ListStoriesByProjectNumbers` (`storyref.Targets`) over the numbered prerequisites the first did not return. Each `waits_on` entry follows `fsm.ParseDependsOn` order and marks `in_arc`, carrying the prerequisite's status (or `blank` / `unknown`) only outside the Arc; `waiting` is `!fsm.ClassifyStoryPrerequisites(...).Satisfied()` over the entries that are not abandoned (true on a cycle); `tucked` is some in-Arc prerequisite and no cycle; `unblocks` names the Arc's non-abandoned children (the `ListStoriesByArc` rule, so it agrees with `arc_progress`) whose `depends_on` lists the story, listed or not; and `cycle` names the members of an in-Arc dependency cycle (a strongly connected component, or a self-dependency), oldest first. An abandoned story is treated as gone (operator ruling, 2026-10-20): it is in no Arc, adds no edge, unblocks nothing, and as a prerequisite is named with status `abandoned` but does not hold a story waiting. An unreadable `depends_on` among those Arcs' stories fails the request through the endpoint's ordinary error path. After the row loop, `dashboardOrderArcChildren` puts each Arc's listed children in dependency order (`arcChildOrder`), refilling only the slots those children already hold, so rows outside Arcs, Arc rows and `parent_only` rows keep their indices; it runs after the loop because `arc_recommended` and the `parent_only` test index read positions. Placement uses only listed rows and reads `tucked` and the `in_arc` entries from the served `dependencies`: an untucked child, a cycle member, a finished child and a tucked child with no listed in-Arc prerequisite are roots in read order; every other child follows its anchor, the listed in-Arc prerequisite that comes last in the final order, and children of one anchor follow it in read order (the order is a forest's pre-order). The Arc attention labels read only served facts: "Arc proposed" is `arc_recommended`, and "Arc draft" is the row's (or the story read's) `arc_proposal_phase` at `proposal_ready`, on the TUI and Web alike. Every arc-type row is marked "Arc" whatever its status, unless an attention label already leads it ("Arc draft" on the TUI; any server label on the Web), and shows its `arc_progress` as "n of m implemented" ("no children yet" for none). A `parent_only` row is an Arc shown only to head listed children -- under `owner=mine` this is how an Arc the operator does not own appears above their own child -- and is not itself a match: it takes no shortcut key, is not counted, and alone does not end the empty state. The TUI dashboard (`story_display_order`, `packages/hashd-tui/src/hashd_tui/watch/dashboard.py`) groups each Arc's listed children nested under it, the group placed where its earliest member reads; a child whose Arc is not among the rows stays top level. Space on an Arc row heading children, or on one of them, collapses or expands that group (▾ expanded, ▸ collapsed); the choice is held for the life of the dashboard screen, across refreshes and the mine toggle, and every Arc starts expanded. The Web dashboard places rows into its sections as before, then groups them under their Arc per section (`groupByArc`, `web/internal/service/http_service_dashboard.go`): a child stays in its own section, drawn only indented under its Arc; the Arc heads it there with its own row when that row is in the section, else as a parent; and a `parent_only` row is drawn only as a parent, never as a row of its own nor counted as one of the section's stories. The tree comes from the one (owner-filtered) read. Each Web Arc group has its own collapse toggle (`dashboardArcGroup`, `web/internal/web/section_dashboard_list.templ`) hiding only that Arc's children in that section; the choice is remembered per browser by project, section and Arc (`hdDashboardArcOpen`, `static/dashboard-layout.js`, localStorage), survives the live refresh's morph, and defaults to expanded. Write side: the operator's press is the offered route itself, `POST /stories/{id}/split` with no indices (the agent leg: `splitRefusal`, then the workstream's human-edit admission, then `dispatchPlanSplitFlow`) or, for an Arc, the Arc proposal request (`POST /stories/{id}/arc-proposal`, `hashd story arc`); no separate endpoint. The autonomous take (`TakeSizeOffer`) decides from `sizeOfferDecision` and takes a split through `requestSplit` with `AcceptProposal`, and an Arc through `requestArcProposal` with `loadStory` (it acts for the project): a `request_arc_proposal` request under the request route's own admission (`arcProposalRequestRefusal`, `arcProposalAttemptPreflight`, `ReserveArcProposal`), never a retype. A refusal before the reservation is written is a skip. After it, the take is taken whatever `dispatchArcProposalAttempt` returns -- a failed start (recorded on the operation), an unconfirmed one (the attempt stays queued and nothing is recorded on it) or a cancel during the start -- and is never retried: `workflows.SizeTake` carries the request's Diagnostic whole, and `RecordSizeOfferOutcome` writes its explanation and cause, help and data on the `size_offer` operation_result. `splitRefusal` is the split route's refusal before either leg: content locked, holds (`executionHoldRefusal`), `checkArcBreakdown`, a pending `breakdown_proposal`, and an open plan-split workflow (`runningSplitRefusal`, a Temporal probe bounded by `temporalProbeTimeout`; an unanswerable probe refuses the agent leg with a 503 but not the manual leg, which is database-only; a split requested earlier carries the story's source hash at request, so if still queued it refuses to plan against content written since (`plan_split.source_changed`), and if already planning its proposal is refused at insert, and at apply if one was inserted earlier; the hash covers the whole story data, so a bookkeeping write during a long queue wait can refuse a split that did not need it, visibly and conservatively). Planner writes replace the estimate in their own write, and applied amendments, the split apply and an Arc proposal's approval remove it in theirs; a direct operator edit (`mutateStoryContent`, behind update-criteria and update-fields) leaves it unchanged. Web: the same `request_arc_proposal` row governs the Arc press, never the split's -- offered, it links to the Arc proposal workspace's request form; withheld, no press is shown and the row's reason is; absent, no press is shown. |
+| Size offer (take) | Read side: `storySizeOffer` on the single-story read decides `size_offer` from the stored `size_estimate` and the action's own refusal -- `arcProposalEligibilityRefusal` for an Arc, `splitRefusal` for a split -- so the offer and the route agree. `GET /dashboard`'s story-row `arc_recommended` reads the same Arc rule (`arcOfferAdmitted`), so it is true exactly when the detail read serves kind `arc`. The dashboard reads every story's workstream count once per request (`CountWorkstreamsPerStory`) and hands it to that same rule in place of the per-story read; a failed read refuses every row the way an unreadable per-story count does. Every arc-type row also carries `arc_progress` {`children`, `implemented`}, by the single-story read's Children rule (`ListStoriesByArc`: `arc_number` is the Arc's number, status not abandoned), implemented children counted though the dashboard lists only active stories; a non-Arc row carries none and a childless Arc zeros. The counts come from one query per request (`CountArcChildrenByArc`, `dashboardArcProgress`, none when no row is an Arc), read inside the same `reportSnapshot` as the rows, so the two describe the same moment. When a listed row's `arc_number` links an Arc the response does not list on its own -- owned by someone else under `owner=mine`, or implemented or abandoned -- that Arc's row is appended after the listed rows, built by the same row path (owner, Arc facts, `archive_unfinished`, `arc_progress`) and marked `parent_only`; a row listed on its own merits is never marked. The parent rows come from one read per request by number (`ListStoriesByProjectNumbers`, `dashboardArcParents`, newest first, none when every linked Arc is listed) after the owner filter, not owner-filtered and in the same snapshot; an Arc link naming no story in the project adds no row, and a failed read is logged and adds none rather than failing the dashboard. Every unfinished non-Arc row whose `arc_number` is an Arc row's in the response (listed or `parent_only`) also carries `dependencies` {`waits_on`, `waiting`, `tucked`, `unblocks`, `cycle`}; Arc rows, stories in no Arc and implemented or abandoned children carry no key. `dashboardArcDependencies` decides them in the same snapshot as the rows from at most two batched reads, none when no row is such a child: `ListStoryDependencyRowsByArcNumbers` (every story of those Arcs, in any status, so an implemented or unlisted child still counts as in the Arc by its stored `arc_number`), then one `ListStoriesByProjectNumbers` (`storyref.Targets`) over the numbered prerequisites the first did not return. Each `waits_on` entry follows `fsm.ParseDependsOn` order and marks `in_arc`, carrying the prerequisite's status (or `blank` / `unknown`) only outside the Arc; `waiting` is `!fsm.ClassifyStoryPrerequisites(...).Satisfied()` over the entries that are not abandoned (true on a cycle); `tucked` is some in-Arc prerequisite and no cycle; `unblocks` names the Arc's non-abandoned children (the `ListStoriesByArc` rule, so it agrees with `arc_progress`) whose `depends_on` lists the story, listed or not; and `cycle` names the members of an in-Arc dependency cycle (a strongly connected component, or a self-dependency), oldest first. An abandoned story is treated as gone (operator ruling, 2026-10-20): it is in no Arc, adds no edge, unblocks nothing, and as a prerequisite is named with status `abandoned` but does not hold a story waiting. An unreadable `depends_on` among those Arcs' stories fails the request through the endpoint's ordinary error path. After the row loop, `dashboardOrderArcChildren` puts each Arc's listed children in dependency order (`arcChildOrder`), refilling only the slots those children already hold, so rows outside Arcs, Arc rows and `parent_only` rows keep their indices; it runs after the loop because `arc_recommended` and the `parent_only` test index read positions. Placement uses only listed rows and reads `tucked` and the `in_arc` entries from the served `dependencies`: an untucked child, a cycle member, a finished child and a tucked child with no listed in-Arc prerequisite are roots in read order; every other child follows its anchor, the listed in-Arc prerequisite that comes last in the final order, and children of one anchor follow it in read order (the order is a forest's pre-order). The Arc attention labels read only served facts: "Arc proposed" is `arc_recommended`, and "Arc draft" is the row's (or the story read's) `arc_proposal_phase` at `proposal_ready`, on the TUI and Web alike. Every arc-type row is marked "Arc" whatever its status, unless an attention label already leads it ("Arc draft" on the TUI; any server label on the Web), and shows its `arc_progress` as "n of m implemented" ("no children yet" for none). A `parent_only` row is an Arc shown only to head listed children -- under `owner=mine` this is how an Arc the operator does not own appears above their own child -- and is not itself a match: it takes no shortcut key, is not counted, and alone does not end the empty state. The TUI dashboard (`story_display_order`, `packages/hashd-tui/src/hashd_tui/watch/dashboard.py`) groups each Arc's listed children nested under it, the group placed where its earliest member reads; a child whose Arc is not among the rows stays top level. Space on an Arc row heading children, or on one of them, collapses or expands that group (▾ expanded, ▸ collapsed); the choice is held for the life of the dashboard screen, across refreshes and the mine toggle, and every Arc starts expanded. The Web dashboard places rows into its sections as before, then groups them under their Arc per section (`groupByArc`, `web/internal/service/http_service_dashboard.go`): a child stays in its own section, drawn only indented under its Arc; the Arc heads it there with its own row when that row is in the section, else as a parent; and a `parent_only` row is drawn only as a parent, never as a row of its own nor counted as one of the section's stories. The tree comes from the one (owner-filtered) read. Each Web Arc group has its own collapse toggle (`dashboardArcGroup`, `web/internal/web/section_dashboard_list.templ`) hiding only that Arc's children in that section; the choice is remembered per browser by project, section and Arc (`hdDashboardArcOpen`, `static/dashboard-layout.js`, localStorage), survives the live refresh's morph, and defaults to expanded. Write side: the operator's press is the offered route itself, `POST /stories/{id}/split` with no indices (the agent leg: `splitRefusal`, then the workstream's human-edit admission, then `dispatchPlanSplitFlow`) or, for an Arc, the Arc proposal request (`POST /stories/{id}/arc-proposal`, `hashd story arc`); no separate endpoint. The autonomous take (`TakeSizeOffer`) decides from `sizeOfferDecision` and takes a split through `requestSplit` with `AcceptProposal`, and an Arc through `requestArcProposal` with `loadStory` (it acts for the project): a `request_arc_proposal` request under the request route's own admission (`arcProposalRequestRefusal`, `arcProposalAttemptPreflight`, `ReserveArcProposal`), never a retype. A refusal before the reservation is written is a skip. After it, the take is taken whatever `dispatchArcProposalAttempt` returns -- a failed start (recorded on the operation), an unconfirmed one (the attempt stays queued and nothing is recorded on it) or a cancel during the start -- and is never retried: `workflows.SizeTake` carries the request's Diagnostic whole, and `RecordSizeOfferOutcome` writes its explanation and cause, help and data on the `size_offer` operation_result. `splitRefusal` is the split route's refusal before either leg: content locked, holds (`executionHoldRefusal`), `checkArcBreakdown`, a pending `breakdown_proposal`, and an open plan-split workflow (`runningSplitRefusal`, a Temporal probe bounded by `temporalProbeTimeout`; an unanswerable probe refuses the agent leg with a 503 but not the manual leg, which is database-only; a split requested earlier carries the story's source hash at request, so if still queued it refuses to plan against content written since (`plan_split.source_changed`), and if already planning its proposal is refused at insert, and at apply if one was inserted earlier; the hash covers the whole story data, so a bookkeeping write during a long queue wait can refuse a split that did not need it, visibly and conservatively). Planner writes replace the estimate in their own write, and applied amendments, the split apply and an Arc proposal's approval remove it in theirs; a direct operator edit (`MutateStoryContent`, behind update-criteria and update-fields) leaves it unchanged. Web: the same `request_arc_proposal` row governs the Arc press, never the split's -- offered, it links to the Arc proposal workspace's request form; withheld, no press is shown and the row's reason is; absent, no press is shown. |
 | Dependency edit | `POST /stories/{id}/dependencies`: `decideDependencyEdit` decides on one read (preview) and again on the write's own read inside `reqs.WithStory` (apply), so a preview is advisory. The whole resulting list is validated (`storydeps.ValidateKeepingClosed`: any story may keep an abandoned prerequisite it already lists; a newly added one is refused); the column, the data mirror, the `park_for_prerequisites` transition (draft and draft_failed) or the handoff's own `unblock` transition to `queued` (a pending story whose list is now satisfied, an emptied list included; its planning-slot acquisition moves it to `drafting`), and `story_changed` land in one write. A release refuses before writing when `PlanningDispatchReady` declines; the park evaluates the edge's guards in the write (`storyTransitionRefusal`); planning is dispatched inline after commit, and a failed dispatch is recorded and reported by storydeps' typed classification with the story's re-read state: already running is `released`, a proven refusal `release_failed` (draft_failed), anything else `release_unconfirmed` (still queued). The `edit_dependencies` availability row evaluates the same state rule (`dependenciesStateRefusal`). |
-| Arc completion (`complete_arc`, accepted -> implemented) | `POST /stories/{id}/complete-arc` through the generic story transition, whose guards (`arc_is_complete`: every non-abandoned child's requirement met, `implemented` or `closed_by_person` (`fsm.StoryRequirementMet`); `arc_prerequisites_finished`: no prerequisite holds the Arc back, the rule `story_prerequisites_approvable` applies to an Arc's approval) are evaluated inside its write after the writer reservation (`reqs.TransitionStoryContentChecked`), so a child inserted concurrently is seen, and a prerequisite list changed concurrently fails the write's snapshot check; the post-commit handoff releases stories waiting on the Arc as for any story reaching `implemented`. Server-initiated: `completeArcsAfter` (`server/internal/api/story_arc_completion.go`) runs after a story's committed move to `implemented`, `closed_by_person` or `abandoned` and evaluates its own Arc and every Arc whose `depends_on` lists it; `completeArcIfDone` runs `complete_arc` through the same generic transition write (`applyStoryTransition`) for an `accepted` Arc with no `content_owner`, acting as the server (no `guardOwner`). A `draft` Arc with no `content_owner` is first accepted by `acceptDraftArc` only when the rule already passes: `acceptStoryWrite` (`server/internal/api/mutations_ownership.go`, the guarded transition and record that `acceptStory` wraps with its `guardOwner` check and `updateStoryOwner` owner assignment) moves it draft -> accepted through `accept`, judging `arc_is_complete` and `arc_prerequisites_finished` (`arcCompletionRuleFailures`) and the edge's `story_prerequisites_approvable` inside the write, with no ownership check and no owner change, and records its own `story_changed` (status `accepted`) in the same transaction; `complete_arc` then runs as a second write on the re-read Arc, recording its own `story_changed`. A draft Arc whose rule fails is left draft with nothing recorded; a completion that fails after the accept committed leaves the Arc accepted for the next evaluation. Call sites: the generic transition's post-commit effects (`storyTransitionCommitted`, so the operator's complete-arc cascades to dependent Arcs), the close route's abandon or `closed_by_person` close, and the cancel route's queued abandon and `cancelPlannerCall` when the restored status is `abandoned`, and the merge archive's `finalizeStory` through the `CompleteArcsAfter` binding (`api.Server.CompleteArcsAfter`, which reads the story detached), run in the background on a detached context so its time is never the archive activity's, and the housekeeping sweep's stranded-dependent recovery leg (`reconcilePlanningForHousekeeping`, after `recoverStrandedDependents`) through `completeFinishedArcs`, which reads the project's stories once and evaluates every `draft` or `accepted` Arc, the catch-up for an Arc whose rule already passes with no trigger left; a recorded fault adds to the sweep's error count, including one recorded on a dependent Arc a completion evaluated in turn (`storyTransitionEffects.arcFaults`), and a refusal or lost race does not. A guard refusal by its rule or a lost race (`reqs.ErrStoryChanged`, already implemented) records nothing; any other fault -- a write fault, a guard read fault (`fsm.GuardResult.Err`, never serialized), or a post-commit fault the completion's effects report (`storyTransitionEffects.fault`: the `story_changed` record; `storyTransitionEffects.handoffFault`: a dependency handoff fault that left its children pending -- a failed step or a non-deferred `storydeps.DispatchSurfaceUnavailableError`; a step that failed after its child left pending (`storydeps.StepError.Released`, the unrecorded dispatch failure) is a `fault`, while a `storydeps.DispatchDeferredError` restart hold records nothing) -- is logged and recorded as a failed `arc_completion` operation_result on the Arc, on a context detached from the request and bounded by `dispatchCancelBudget`. Every completion records a succeeded `arc_completion` row in `storyTransitionCommitted`, which retires a standing failure. A failure that is the handoff's alone carries `dependency_release_of` (`arcDependencyReleaseKey`) and the story read retires it (`operationResultRetireSignals.DependentsReleased`) once `storydeps.PendingDependents` of the Arc is empty, since the stranded-dependent recovery writes nothing on the Arc. A check that fails before it knows an Arc to record on (the story unreadable, or the project scan failing for a story with no Arc of its own) records on that story with `arc_check_of` (`arcCheckOfKey`), and the story read retires it (`operationResultRetireSignals.ArcsSettled`) once no Arc the story finishes is still `accepted`, or still `draft` with the rule passing, since the completion that answers it records its success on the Arc. The close route defers the evaluation right after its abandon or closure commits, so a failed event record does not skip it; the cancel route (queued abandon, and `cancelPlannerCall` returning the abandoned story) runs it in a deferred step after releasing its execution admission, on the request context, because the handoff's `PlanningDispatchReady` -> `HoldInForce` takes the hold gate's read lock that the admission holds. |
-| Story closure (`close_by_person`, -> closed_by_person) | `POST /stories/{id}/close` with a `ref` (`registerStoryCloseRoute`, `server/internal/api/mutations_story.go`; verification in `server/internal/api/story_close_ref.go`). The ref is verified before anything changes: the forge read (`forge.ResolvePRReference`) or the git reads (`mergeflow.ReadCommit`, `mergeflow.ReadAncestry` on the story's target repository's default branch, no fetch) run before `lockProjectLifecycle`, and a story reference is resolved there and checked again under the lock. `closeStoryByPersonInTx` writes the `types.StoryClosure` record (story data key `closure`) through `reqs.TransitionStoryContent` in the `close_by_person` transition's own write, inside the linked workstream close's transaction (`closeWorkstreamFully`'s `closeTxHook`) when there is one, and records `story_changed` there, its publisher run after commit. Its kind `forge_merge` and `merge` evidence are the PR watch's human-merge path's, which shares the record: the merge archive's `mark_story` record (`stageArchiveEffect`, `server/internal/api/runner_stage_archive_effects.go`), when the workstream's newest `merge_landed` row names a `forge_merge_id`, or an `external_merge_reconciled` link was committed with the external transition before execution stopped ahead of that row (whichever dispatch runs the archive, a janitor re-run or `hashd merge` included), builds it from that `pr_merged_on_forge` record (`landedForgeMergeClosure`, `server/internal/api/prwatch.go`) and `mergeflow.MarkArchiveStoryIn` writes it with the `close_by_person` transition (from `accepted` or `implementing`) in one `reqs.MutateStoryContentStamped` write, recording the `story_changed` that carries `forge_merge_closure`. Every story read serves the record whole as `closure`. A person-backed external merge burns requirements and raises the existing `forge_merge` alert once; interrupted or refused archive recovery reuses that evidence. Hashd's full merge flow, including auto-merge, and manual completion of an unattended merge retain `implemented`. Canonical evidence records hashd's auto-merge decision at the merged head; retiring its completed notice preserves that provenance. Both command observation paths apply the forge bot-labeling contract before classifying evidence. A missing landing alone never attributes the ending to an external merge. Recording, closure and archive require no final-review currency. |
+| Arc completion (`complete_arc`, approved -> implemented) | `POST /stories/{id}/complete-arc` through the generic story transition, whose guards (`arc_is_complete`: every non-abandoned child's requirement met, `implemented` or `closed_by_person` (`fsm.StoryRequirementMet`); `arc_prerequisites_finished`: no prerequisite holds the Arc back, the rule `story_prerequisites_approvable` applies to an Arc's approval) are evaluated inside its write after the writer reservation (`reqs.TransitionStoryContentChecked`), so a child inserted concurrently is seen, and a prerequisite list changed concurrently fails the write's snapshot check; the post-commit handoff releases stories waiting on the Arc as for any story reaching `implemented`. Server-initiated: `completeArcsAfter` (`server/internal/api/story_arc_completion.go`) runs after a story's committed move to `implemented`, `closed_by_person` or `abandoned` and evaluates its own Arc and every Arc whose `depends_on` lists it; `completeArcIfDone` runs `complete_arc` through the same generic transition write (`applyStoryTransition`) for an `approved` Arc with no `content_owner`, acting as the server (no `guardOwner`). A `draft` Arc with no `content_owner` is first accepted by `acceptDraftArc` only when the rule already passes: `acceptStoryWrite` (`server/internal/api/mutations_ownership.go`, the guarded transition and record that `acceptStory` wraps with its `guardOwner` check and `updateStoryOwner` owner assignment) moves it draft -> approved through `accept`, judging `arc_is_complete` and `arc_prerequisites_finished` (`arcCompletionRuleFailures`) and the edge's `story_prerequisites_approvable` inside the write, with no ownership check and no owner change, and records its own `story_changed` (status `approved`) in the same transaction; `complete_arc` then runs as a second write on the re-read Arc, recording its own `story_changed`. A draft Arc whose rule fails is left draft with nothing recorded; a completion that fails after the accept committed leaves the Arc accepted for the next evaluation. Call sites: the generic transition's post-commit effects (`storyTransitionCommitted`, so the operator's complete-arc cascades to dependent Arcs), the close route's abandon or `closed_by_person` close, and the cancel route's queued abandon and `cancelPlannerCall` when the restored status is `abandoned`, and the merge archive's `finalizeStory` through the `CompleteArcsAfter` binding (`api.Server.CompleteArcsAfter`, which reads the story detached), run in the background on a detached context so its time is never the archive activity's, and the housekeeping sweep's stranded-dependent recovery leg (`reconcilePlanningForHousekeeping`, after `recoverStrandedDependents`) through `completeFinishedArcs`, which reads the project's stories once and evaluates every `draft` or `approved` Arc, the catch-up for an Arc whose rule already passes with no trigger left; a recorded fault adds to the sweep's error count, including one recorded on a dependent Arc a completion evaluated in turn (`storyTransitionEffects.arcFaults`), and a refusal or lost race does not. A guard refusal by its rule or a lost race (`reqs.ErrStoryChanged`, already implemented) records nothing; any other fault -- a write fault, a guard read fault (`fsm.GuardResult.Err`, never serialized), or a post-commit fault the completion's effects report (`storyTransitionEffects.fault`: the `story_changed` record; `storyTransitionEffects.handoffFault`: a dependency handoff fault that left its children pending -- a failed step or a non-deferred `storydeps.DispatchSurfaceUnavailableError`; a step that failed after its child left pending (`storydeps.StepError.Released`, the unrecorded dispatch failure) is a `fault`, while a `storydeps.DispatchDeferredError` restart hold records nothing) -- is logged and recorded as a failed `arc_completion` operation_result on the Arc, on a context detached from the request and bounded by `dispatchCancelBudget`. Every completion records a succeeded `arc_completion` row in `storyTransitionCommitted`, which retires a standing failure. A failure that is the handoff's alone carries `dependency_release_of` (`arcDependencyReleaseKey`) and the story read retires it (`operationResultRetireSignals.DependentsReleased`) once `storydeps.PendingDependents` of the Arc is empty, since the stranded-dependent recovery writes nothing on the Arc. A check that fails before it knows an Arc to record on (the story unreadable, or the project scan failing for a story with no Arc of its own) records on that story with `arc_check_of` (`arcCheckOfKey`), and the story read retires it (`operationResultRetireSignals.ArcsSettled`) once no Arc the story finishes is still `approved`, or still `draft` with the rule passing, since the completion that answers it records its success on the Arc. The close route defers the evaluation right after its abandon or closure commits, so a failed event record does not skip it; the cancel route (queued abandon, and `cancelPlannerCall` returning the abandoned story) runs it in a deferred step after releasing its execution admission, on the request context, because the handoff's `PlanningDispatchReady` -> `HoldInForce` takes the hold gate's read lock that the admission holds. |
+| Story closure (`close_by_person`, -> closed_by_person; `abandon` with a reason, -> abandoned) | `POST /stories/{id}/close` with a `ref` (`registerStoryCloseRoute`, `server/internal/api/mutations_story.go`; verification in `server/internal/api/story_close_ref.go`). The ref is verified before anything changes: the forge read (`forge.ResolvePRReference`) or the git reads (`mergeflow.ReadCommit`, `mergeflow.ReadAncestry` on the story's target repository's default branch, no fetch) run before `lockProjectLifecycle`, and a story reference is resolved there and checked again under the lock. `closeStoryByPersonInTx` writes the `types.StoryClosure` record (story data key `closure`) through `reqs.TransitionStoryContent` in the `close_by_person` transition's own write, inside the linked workstream close's transaction (`closeWorkstreamFully`'s `closeTxHook`) when there is one, and records `story_changed` there, its publisher run after commit. Without a `ref`, a close given a `reason` (a no-changes close's included) stores the record as kind `abandoned` -- the requesting user, when and the reason, with no reference and no merge: `abandonStoryInTx` writes it through `reqs.TransitionStoryContent` in the `abandon` transition's own write, on the story `reqs.WithStory` reserved and read, once the Arc abandonment refusal (`arcAbandonmentRefusal`) has passed on it, inside the linked workstream close's transaction when there is one, and records the `story_changed` carrying the reason; a close given no reason makes the plain `abandon` transition and stores none. Its kind `forge_merge` and `merge` evidence are the PR watch's human-merge path's, which shares the record: the merge archive's `mark_story` record (`stageArchiveEffect`, `server/internal/api/runner_stage_archive_effects.go`), when the workstream's newest `merge_landed` row names a `forge_merge_id`, or an `external_merge_reconciled` link was committed with the external transition before execution stopped ahead of that row (whichever dispatch runs the archive, a janitor re-run or `hashd merge` included), builds it from that `pr_merged_on_forge` record (`landedForgeMergeClosure`, `server/internal/api/prwatch.go`) and `mergeflow.MarkArchiveStoryIn` writes it with the `close_by_person` transition (from `approved` or `implementing`) in one `reqs.MutateStoryContentStamped` write, recording the `story_changed` that carries `forge_merge_closure`. Every story read serves the record whole as `closure`. A person-backed external merge burns requirements and raises the existing `forge_merge` alert once; interrupted or refused archive recovery reuses that evidence. Hashd's full merge flow, including auto-merge, and manual completion of an unattended merge retain `implemented`. Canonical evidence records hashd's auto-merge decision at the merged head; retiring its completed notice preserves that provenance. Both command observation paths apply the forge bot-labeling contract before classifying evidence. A missing landing alone never attributes the ending to an external merge. Recording, closure and archive require no final-review currency. |
 | AC amendment | `ApplyAmendment`: current proposal, source hash, stage and `LinkedStoryWorkstream` under one write reservation; existing runner guard stays authoritative. The proposal itself is inserted by `PostAmendmentProposal` under `reqs.WithStory`, which rechecks in the insert's transaction that the `requirements_conflict` source is still pending, the story is still linked to the conflict's workstream, its content is unlocked or implementing, and its criteria still hash to the proposal's base; a resolved source writes nothing; drift writes nothing and returns the fallback marker, so the workflow resumes guidance-only, as `ApplyAmendment` does, and then closes the source superseded with the ruling kept; unlinked or locked closes the source superseded with no resume, where `ApplyAmendment` instead fails closed with `ErrStoryOwnership` and leaves its proposal pending. Unlinked and locked each record a declined `ac_amendment` `operation_result` on the workstream and story; a posted proposal, and a guidance-only resume (drift included) once the run has resumed, record a succeeded one, which retires an earlier decline. The insert holds no story ownership, and the runner guard stays an apply-time deferral. |
-| Operator cancel of a planner call (`cancel`, `abandon`) | `reqs.CancelStoryContent` in one `reqs.WithStory` write, reached by `POST /stories/{id}/cancel` (`cancelPlannerCall`, `server/internal/api/mutations_cancel.go`) only after `closePlannerRun`, through `closeAdmittedRunExecution`, confirmed the run closed, having cancelled the described run only while the story is still in the admitted entry and, once acquired, held by that run and the run holding the story closed Canceled (or none holds it). It refuses, writing nothing, unless the story is still in the stage, the cancelled execution still owns it, no REQS apply of that execution entered its write interval (`content_applying`, or its write record entered) and the story records its pre-entry state, entered at the entry the cancel was admitted for (`ClaimOrigin.EnteredAt`), so evidence read for one entry never restores a later one. A queued cancel closes the planning run through the same admission, bound to the queued handoff it admitted, and its `abandon` binds to that entry; a story planning acquired for that entry meanwhile is cancelled as a drafting one, and one it finished, or a later entry, stands. Otherwise it takes `abandon` (a first draft, entered from `queued`) or `cancel` to the recorded status through `fsm.TransitionStory`, writes the record's data and its title, type and target_repo columns through `SaveStoryContent` in the same `reqs.WithStory` write (deliberately not `MutateStoryContent`, which derives those columns from the data's mirrors and would overwrite them from a legacy row's stale ones), and for an edit returns to `pending` the clarifications that edit's dispatch superseded (`RestoreEditSupersededClarifications`, matching the run ID `UpdatePendingClarificationSupersededByEdit` stamped; the cancel holds, from before its admission through the restore, the project lifecycle lock the edit route holds from reading those rows through stamping them after its dispatch); `story_changed` is recorded in the transaction and published after commit, then each restored clarification's `clarification_changed`. A refusal is reported with the status the story reached. |
+| Operator cancel of a planner call (`cancel`, `abandon`) | `reqs.CancelStoryContent` in one `reqs.WithStory` write, reached by `POST /stories/{id}/cancel` (`cancelPlannerCall`, `server/internal/api/mutations_cancel.go`) only after `closePlannerRun`, through `closeAdmittedRunExecution`, confirmed the run closed, having cancelled the described run only while the story is still in the admitted entry and, once acquired, held by that run and the run holding the story closed Canceled (or none holds it). It refuses, writing nothing, unless the story is still in the stage, the cancelled execution still owns it, no REQS apply of that execution entered its write interval (`content_applying`, or its write record entered) and the story records its pre-entry state, entered at the entry the cancel was admitted for (`ClaimOrigin.EnteredAt`), so evidence read for one entry never restores a later one. A queued cancel closes the planning run through the same admission, bound to the queued handoff it admitted, and its `abandon` binds to that entry; a story planning acquired for that entry meanwhile is cancelled as a drafting one, and one it finished, or a later entry, stands. Otherwise it takes `abandon` (a first draft, entered from `queued`) or `cancel` to the recorded status (`draft`, `draft_failed`, `approved` or `pending` for an `editing` story) through `fsm.TransitionStory`, writes the record's data and its title, type and target_repo columns through `SaveStoryContent` in the same `reqs.WithStory` write (deliberately not `MutateStoryContent`, which derives those columns from the data's mirrors and would overwrite them from a legacy row's stale ones), and for an edit returns to `pending` the clarifications that edit's dispatch superseded (`RestoreEditSupersededClarifications`, matching the run ID `UpdatePendingClarificationSupersededByEdit` stamped; the cancel holds, from before its admission through the restore, the project lifecycle lock the edit route holds from reading those rows through stamping them after its dispatch); `story_changed` is recorded in the transaction and published after commit, then each restored clarification's `clarification_changed`. A refusal is reported with the status the story reached. |
 | Planner REQS apply | `ApplyPlanningAnnotationsDetailed` checks the execution under `reqslock`; `content_applying` links its Git interval to the FSM CAS. `runGit` passes the lock descriptor to children; stage exit uses a nonblocking lock acquisition to prove their writes ended. Success completion (`pm.finishStory`) waits for surviving holders before its transaction, with plain reads and up to `pm.RequirementsLockWait`; a free lock clears only its own owner's marker under the reacquired lock (`reqs.SettleContentApplying`), and a lock still held at the bound keeps ownership and the marker and records the lock-held diagnostic on the story; a lock that cannot be checked stops the wait at once, and the story keeps its ownership and marker and records the lock's acquire error. |
+| Planner sequencing turn | After a non-Arc refine reply parses, is not a refusal and passes the drafting checks -- its drafted `depends_on`'s own `storydeps.PlannedLinks`/`Validate` check included, whose refusal still redrafts -- `pm.RunRefineAttempt` runs one more agent call in the drafting session: `pm.runPlannerAgent` with stage `pm_refine` and the drafting result's `SessionID`, so it runs as `pm_refine_resume` through `agents.RunStageWithOptions` and sends the rendered sequencing prompt (`pm.buildSequencingPrompt`, `prompts/sequence_story.md`) itself via `plannerAgentInvocation.ResumePrompt`; every resume -- first round or feedback -- sends that prompt itself, which asks only for the sequencing answer and carries any feedback rendered into it (never `planner_retry_resume`'s full-story ask), and a session the run cannot carry falls back cold once onto the same prompt (`FullPrompt`). The answer is read by `pm.parseSequencingAnswer` and combined by `pm.combineSequencing`: the story's list plus each answered story it does not already name, each with its reason, checked only by `storydeps.Validate` (`story.depends_on.invalid`). An agent failure classifies through `pm.plannerAgentOutcome` exactly like a drafting one; an unreadable answer or a Validate refusal returns the diagnostics with the session and the carried draft (`AttemptResult.PendingOutput`, with the drafting call's capture as `PendingCaptureID`), so the next attempt skips the drafting turn and revises only the answer against the existing `pm.MaxPlannerAttempts` allowance. On success `output.DeferredDependencies` is the combined list's waiting flag, settled before the deferred-dependency decision and the REQS annotation; `output.Story.DependsOn` stays as drafted and the answer rides the output (`PlannerOutput.SequencingAnswer`) to `pm.finishStory`, whose landing combines the two again through `combineSequencing` under the writer reservation, writes the result, and appends each added prerequisite's id and full one-line reason to the `story_changed` reason it records on every destination -- an empty answer leaves that landing unchanged. A deferred result's landing stores no `reqs_scope` (`pm.landedReqsScope`), while its output keeps the reply's. A landing whose re-validation refuses the combined list (`story.depends_on.invalid`: a prerequisite the answer added gained a dependency on the story since the attempt checked it, say) lands nothing and returns `pm.LandingDependencyRefusal`; the finalize activity reports it as its result, not an error (`LandingResult.DependencyRefusal`, through `landingResult`), and the section body hands the outcome back to `runPlannerLoop` (`plannerCarry`): the next attempt of the same allowance revises only the answer in the result's session, fed the refusal, and a spent allowance ends as validation exhaustion naming it. Every other landing error fails the leg as before, and so does the refusal in a history recorded before the hand-back shipped (`planner-landing-refusal`), whose leg is asked for no such result. Every carried round checks the drafted list again before the turn, so a refusal of an entry the draft itself names redrafts instead. The carried loop keeps the refused loop's attempt logs and write-interval evidence, so a cancel does not win after its REQS write. Both agent calls share the attempt activity's one start-to-close window, two `pm_refine` stage timeouts plus the buffer convention (`doubleShotStartToClose` over `StageTimeoutSeconds["pm_refine"]`, no new setting). |
+| Planner edit sequencing turn | After a non-Arc edit reply parses, is not a refusal and passes `refuseUnplaceableScope` -- and only for a story whose entry record (`reqs.ClaimOriginOf` on the story row, never the pre-transition begin snapshot the prompt showed) names `draft`, `draft_failed`, `approved` or `pending` -- `pm.RunEditAttempt` runs one more agent call in the editing session: `pm.runPlannerAgent` with stage `pm_edit` and the edit result's `SessionID`, so it runs as `pm_edit_resume` sending the rendered sequencing prompt itself via `plannerAgentInvocation.ResumePrompt` (the refine turn's contract; a session the run cannot carry falls back cold once onto the same prompt). Its base list is the story's stored list (`storydeps.PlannedLinks` with a nil planned list); the answer is read by `pm.parseSequencingAnswer` and checked by `pm.combineSequencing`, and an unreadable or refused one carries the edit output into a round that revises only the answer (`AttemptResult.PendingOutput`/`PendingCaptureID`/`PendingAgent`, threaded through `EditAttemptInput.PendingAgent`). The turn runs before `reqs.ApplyPlanningAnnotationsDetailed`, so a failed turn leaves REQS untouched; agent edits at Arc review keep their existing returns and run no turn. A combined list with an unfinished prerequisite sets `output.DeferredDependencies` and returns success before the annotation, as a waiting draft does, so the edit neither claims nor collides with a prerequisite's WIP region. The answer rides the output (`PlannerOutput.SequencingAnswer`, a pointer so no-turn and the answer "none" stay distinct across the activity boundary) to the landing: `pm.finishStory` combines the stored list read under the writer reservation with the answered entries through `combineSequencing`, as the drafting landing does, writes `UpdateStoryDependencies` and the `data["depends_on"]` mirror, lands the story `pending` through the internal `edit_complete` editing-to-pending transition when a prerequisite is unfinished or the attempt deferred its annotation (the dependency handoff releases and replans it), else where it lands today, and appends each added prerequisite's id and full one-line reason to the `story_changed` reason. A landing that refuses the combined list hands the edit back to its planner loop exactly as a refused draft is (`pm.LandingDependencyRefusal`, `plannerCarry`); `pm.RunEditFinalizeSuccess` returns the refusal without saving the feedback, which the edit still carries. Both agent calls share the attempt activity's one start-to-close window, two `pm_edit` stage timeouts plus the buffer convention (`doubleShotStartToClose` over `StageTimeoutSeconds["pm_edit"]`, no new setting). |
 | Planner suggestion release/completion | `TransitionSuggestionWithData` checks the current association, expected story stage and planning-start marker inside its transaction. |
 | Planner deferred work | `pm.finishStory`'s planning leg writes the reply's `deferred` list through `reqs.SaveDeferredSuggestions` in the result's own `MutateStoryContent` transaction, after the same ownership check: planner-origin suggestions waiting for the story, replacing only that story's `available` planner suggestions. Their `suggestion_changed` events are recorded in the transaction and published after commit. |
 | Bookkeeping | Flow-run and completion stamps use `MutateStoryContent`; independently stored answers/events do not replace story content. |
@@ -3661,6 +4754,10 @@ operation, whose source is not yet an Arc, plans an Arc's children. The apply
 check runs inside the write transaction, including when the source became an
 Arc after the proposal was generated. Splitting an ordinary Arc child remains
 available and keeps the resulting stories in the same Arc.
+
+Connector planning input must pass through `attachments.Prepare` under the existing content owner. Never attach a mutable cache path or fabricate identity or a trusted digest by rereading old cache bytes. Extend the existing provider writes and owned capture boundary; do not add per-client attachment policy.
+
+Story content writers MUST use `reqs.WithStory` / `MutateStoryContent` / `TransitionStoryContent` and identify their owning FSM stage or transition. Planner results must validate the acquiring execution as well as the stage. Extend this shared contract and its existing tests; do not add local locks or separate eligibility-check/unconditional-write pairs. Keep the ownership lifetimes in WF.md and the writer inventory in docs/ARCHITECTURE.md synchronized. Never hold a database transaction across an agent call; cancellation and permission to persist are separate. Planner artifact writes must carry `CommitReqsOptions.ContentOwner` through the existing REQS apply boundary; never bypass its write-interval marker or discard the lock descriptor inherited by Git.
 
 ### Story numbers
 
@@ -3714,7 +4811,7 @@ detail, not a sibling of it. An Arc never executes and owns none; each Arc
 child is an ordinary story under the same rule. Lineage an earlier attempt
 left behind after its row was deleted (commits, events, intent captures) is
 attributed history of the single implementation, not a second one. A closed
-workstream kept after close or abandon keeps its `story_id` while
+workstream kept after close or abandon keeps its story link while
 `stories.workstream_id` is cleared: it is the story's single ended
 implementation, and still owns the story. Temporal executions are unaffected;
 workflow IDs and their singletons stay as they are.
@@ -3727,9 +4824,13 @@ Enforcement:
   index below to the same `run.story.lock` 409, naming the workstream that
   already claims the story; a primary-key id collision keeps
   `run.story.orphaned_artifacts`.
-- **Storage.** The unique index `idx_workstreams_project_story` (migration
-  000083) admits one workstream per `(project, story_id)`, terminal rows
-  included; a NULL or blank `story_id` is unlinked.
+- **Storage.** The unique index `idx_workstreams_project_story` admits one
+  workstream per `(project, story_number)`, terminal rows included: the
+  linked story's number within its project, so every alias of a story,
+  before and after a retype, is one owner (migration 000083 keyed it on
+  `story_id`; 000199 moved it to the number). A link with no number is
+  unlinked; text that named no story keeps its own uniqueness
+  (`idx_workstreams_project_story_text`) and owns no story.
 - **Upgrade.** Before golang-migrate marks 000083, the migration run refuses a
   database where two workstreams of a project share a `story_id`: nothing
   changes, the diagnostic (`db.migrate.story_workstreams`) lists every project,
@@ -3741,10 +4842,13 @@ Enforcement:
   empty, a row whose project disagrees with the project directory or with its
   linked row -- are logged one WARN line each (`db.migrate.story_workstream_links`)
   and left in place. 000083's down migration drops only the index and keeps
-  every row.
+  every row. Before 000199 the run likewise refuses a project whose
+  workstream links resolve to one story number through different texts
+  (`STORY-0005` beside `BUG-0005`), listing each number and workstream
+  (`db.migrate.workstream_story_numbers`).
 - **Archive.** The archive finishes a story only through its sole workstream
-  linked both ways, with no row of another project naming the story; any
-  other shape is refused (`merge.archive.story_link`)
+  linked both ways, the reverse link read by the story's number within its
+  project; any other shape is refused (`merge.archive.story_link`)
   before the story's requirements are burned or it is marked implemented.
 
 Direction, in stages:
@@ -3792,12 +4896,9 @@ preserving the index and working files. The checkpoint clears only after this
 succeeds, including recovery from interruption between soft reset and DB clear.
 Failed writes stop progression. Failure/fallback, clarification, `already_done`,
 artifact guards, tests and review then use their ordinary paths. An authorized
-reset/replan clears the checkpoint after its Git reset succeeds, and an approved
-requirements revision clears it with the rest of the retired attempt's records
-(`runflow.DiscardAttemptRecords`, shared by replan and revision approval only).
-The run's own breakdown, retiring a plan left by a revision approved before
-approval retired it, discards the same records through `discardRetiredAttempt`
-but keeps the run's claim and stamp. Partial breakdown never clears the checkpoint. Explicit workstream deletion removes it with its owner.
+reset/replan clears the checkpoint after its Git reset succeeds; a replan
+clears it with the rest of the retired attempt's records
+(`runflow.DiscardAttemptRecords`). Partial breakdown never clears the checkpoint. Explicit workstream deletion removes it with its owner.
 
 Full `hashd reset` and `hashd replan` also retire the merge-gate repair at
 `mergeflow.MergeGateRecoveryKey(ws)`: the story's record, including one owned
@@ -3808,7 +4909,7 @@ one `merge_gate_repair_retired` timeline entry with operation `reset`, atomicall
 with its deletion; the returned publisher runs only after commit. Earlier
 refusals and failures keep the record, and absence on retry produces no entry.
 The next gate resolves current repo commands and a new failure can claim one
-automatic FIX. Pin enforcement still applies while a record exists.
+automatic FIX. Pin enforcement still applies while a command remains unpaid.
 `finishWorkstreamReplan` uses the same retirement transaction immediately
 after its guarded skeleton write or guarded plan clear, with operation
 `replan`. Both CAS refusal paths preserve the complete repair. Every retiring
@@ -3820,23 +4921,209 @@ evidence and spent allowance while detaching the FIX. Replan owns its full
 retirement separately. `reject --reset` and close retain their existing behavior. Answering a breakdown
 refusal with `proceed` also keeps binding-only disposal, including when it reuses
 replan preparation to replace the plan.
-While the row exists, changed, skipped, absent or unparseable configuration
-cannot drop its checks; a later failure adds current evidence without replacing
-the original obligation or renewing the allowance. Pin notices name reset,
-checkpoint reset and replan as retirement boundaries.
+Changed, skipped, absent or unparseable configuration cannot drop unpaid
+checks. A qualifying lane verification or exact revision-bound acceptance pays
+each command independently of the retained row; a later failure renews only its
+command without renewing the allowance. Pin notices explain discharge and name
+reset, checkpoint reset and replan as whole-record retirement boundaries.
 
-`hashd reset --checkpoint` retires the same story recovery record in
+Replan and its partial form are one route and one handler:
+
+| Action | Endpoint | Route class | Command |
+|---|---|---|---|
+| Full replan | `POST /workstreams/{id}/replan` (`feedback`) | `trigger:replan` | `hashd replan [id] [-f ..]` |
+| Partial replan | `POST /workstreams/{id}/replan` (`from_commit`, `feedback`) | `trigger:replan` | `hashd replan <ws> --from-commit <COMMIT-ID>`, TUI `N` dialog and the Web replan dialog |
+
+A standing PLAN_DEFECT gate ([WF: The PLAN_DEFECT gate](../WF.md#the-plan_defect-gate-re-plan-or-retry))
+offers only two actions, on the existing routes:
+
+| Action | Endpoint | Route class | Command |
+|---|---|---|---|
+| Re-plan from the rewind commit | `POST /workstreams/{id}/replan` (`from_commit` = `plan_defect_gate.rewind_commit`, `feedback`) | `trigger:replan` | `hashd replan <ws> --from-commit <rewind commit>` |
+| Replan, at a convergence stop (`replan_convergence.stop` set) | `POST /workstreams/{id}/replan` (`feedback`, `from_commit` the operator chooses) | `trigger:replan` | `hashd replan <ws>` or `hashd replan <ws> --from-commit <COMMIT-ID>` |
+| Judge is wrong – retry with guidance | `POST /workstreams/{id}/reject` (`feedback`) | `trigger:reject` | `hashd reject <ws> -f "<guidance>"` |
+
+`withWorkstreamActionLabels` names the two rows from the served gate
+(`planDefectGate`): the replan row names the rewind commit, says when that is
+a full replan, and under a limitation says the operator chooses the commit,
+with the limitation as its note. Approve, skip, edit_commit, add_commit and
+feedback (`reqs.PlanDefectWithheld`) are withheld in `WorkstreamOperatorActions`
+with `reqs.PlanDefectGateReason`, and their routes refuse them with a 409
+(`verdict_gate.plan_defect`) through `planDefectVerbRefusal`: approve in
+`requireApproveAvailable`, the others before their own work. Skip, edit_commit,
+add_commit and feedback refuse again inside their write transaction, where
+`reqs.ResolveParkedVerdictGate` / `ResolveParkedVerdictGateWithPlan` find the
+parked record. One predicate, `reqs.ParkedPlanDefect`, decides rows and
+refusals. `hashd story add-commit` fires `add_commit` and takes its
+destination from the contract: from `ready_to_merge` and `merge_test_failed` it
+returns the workstream to `active` in the same write as the append; from
+`active`, `implementing`, `awaiting_human_review` and `merge_conflicts` it
+stays, with the row's guards evaluated at the write. Add-commit is not offered
+at `pr_open` or `pr_approved`; work is added to a PR-state workstream with
+`hashd reject`.
+
+The same read serves `replan_convergence` (`replanConvergence`, read with the
+gate in `planDefectGate`) on `GET /workstreams/{id}` and the snapshot: every
+approved replan oldest first, and as `stop` the convergence stop the standing
+record lands as, decided by `runflow.ReplanConvergence.PlanDefectStopCode`,
+the derivation `runflow.HeldVerdictGate` lands it with. It is present exactly
+when the workstream has reached its limit of approved replans or a
+not-converged stop stands. At a convergence stop the replan row is the
+ordinary "Replan" with no rewind note, reject keeps "Judge is wrong – retry
+with guidance", the withheld rows and `planDefectRefusal` carry a reason that
+proposes no re-plan from the rewind commit, and the answer refusal's next
+steps (`verdictGateNextSteps`) are the landed stop's
+(`runflow.PlanDefectNextSteps` under its code).
+
+Both run `replanWorkstreamLocked` -> `prepareWorkstreamReplan` ->
+`FinishWorkstreamReplan`, close before reset, then leave the full replan's
+regeneration to the operator's next `hashd run` ([WF: Plan regeneration](../WF.md#plan-regeneration-reset--replan--reject)).
+The replan verb's own replan (`byVerb`, the route) also returns the story to
+`draft` in the approved-replan record's transaction (`returnStoryToPlanning`,
+admitted first by `storyPlanningAdmission`), and once its locks are released
+hands `-f` to the planner (`replanFeedbackToPlanner` -> `editStory`). While
+the story stands in a state in which no lane may run -- any but
+`implementing` and the three terminal states --
+the lane is held (`laneHoldingStory`, `laneHoldRefusal`, applied by
+`RequireLaneAction` and `withLaneHoldAvailability`), and the accepted story's lane run starts
+it (`startAcceptedLaneStory`), rewriting the plan's story-derived head from the
+accepted story first (`plan.WithStory`). Only an open lane counts: a story whose
+lane was closed is replaced and provisioned as before.
+That run's breakdown also plans a partial replan's lane after its kept
+commits (`runflow.RunBreakdownPreStage` -> `regenerateReplanTail`, stored by
+`runflow.StorePartialReplanPlan`, which takes an empty tail as planning
+nothing). A breakdown on a lane broken down before numbers from the
+`breakdown_ids` runner read (`nextPlannedCommitNumber`, over every planned
+`microcommits` row), refuses a lower-numbered commit
+(`stage.breakdown.numbering_restarted`), includes the minimal-implementation
+section when the worktree differs from its fork point
+(`laneHasUnmergedCode`, through `mergeflow.EffectiveBaseForWorkstream`), and
+stops a full replan's empty answer blocked (`BreakdownOutcome.NoChanges`); in
+autonomous mode the cycle then closes the lane (`closeNoChanges` ->
+`Server.CloseLaneWithNoChanges`, built from the close's `commitWorkstreamClose`,
+`closeStoryInTx`, `finishAbandonment` and `afterStoryClosed`). A
+replan whose input carries the judge's verdict keeps the earlier breakdown
+(`regenerateJudgedReplanTail` on the partial leg, no numbering on the full).
+A full breakdown checks its generated IDs with `plan.RepeatedCommitID` before
+the plan write (`d.Breakdown.Plan`), because `reqs.refuseDuplicateCommitIDs`
+refusing there reaches the workflow as a records-access failure. A repeat
+returns the `BreakdownOutcome` failure built from a Diagnostic
+(`stage.breakdown.duplicate_commit`, `failure.RunRetry` next step) through
+`runflow.DiagnosticFailureData`, the same branch as an agent Diagnostic; the
+cycle records and publishes it through the outcome-evidence failure path
+(`breakdownControl`, `outcomeFailureEvidence`). The rerun is the `run` row of
+`available_actions`, with no failure-specific rule.
+`from_commit` must be selectable (`plan.ReplanSelectable`: a done commit or
+the first not done), checked before the close and again on the re-read row
+after it; there is no preview token, since replan runs only on a stopped lane
+(`no_active_work`). The `replan` edges leave `active`, `implementing`,
+`awaiting_human_review`, `ready_to_merge`, `final_review_with_concerns` and an
+idle `pr_open` or `pr_approved`, all to `active` behind `worktree_exists` and
+`no_active_work`; the story's own `replan` edges go from `implementing` and
+`approved` to `draft` behind `story_has_a_workstream`; at a PR stage the same
+reset publishes to the existing PR branch under its observed lease, and the
+CLI, TUI and Web offer the verb from the server's `replan` row alone.
+A partial replan rewinds through `ResetWorktreeToBase`
+with the boundary, writes `plan.UnmarkFrom` through the same plan CAS instead
+of the story skeleton, and in one transaction records the boundary in
+`workstreams.replan_from_commit` and runs `runflow.DiscardRewoundRecords`
+with the boundary and every later plan id: reviews and commit failures of the
+kept commits stay, those of the discarded commits and every final review go,
+and transcripts are never deleted. Full replan, which clears
+`replan_from_commit` as reset does, and the other `DiscardAttemptRecords`
+callers are unchanged.
+
+On the command side the partial form shows what it asks the server to discard:
+`hashd replan <ws> --from-commit` reads the workstream's snapshot first, lists the kept
+micro-commits (every one before the boundary) and the discarded ones (the
+boundary and every later), and asks at a terminal prompt before sending;
+without a terminal it refuses unless `--yes` is passed, naming the exact `-y`
+command, which keeps an explicit `--server` selection. The retries a server
+refusal of either replan form names (`failure.ReplanRetry`, a full replan's
+backup-cleanup re-run included) get that selection too: the server cannot know
+it, so the client rebuilds each exact retry from its own request and pins each
+whole occurrence, never reading the feedback or boundary inside it as a
+command; a last help line names the server for what stays whole, a raw POST
+or another command. The full form reads the same snapshot through the same
+base. While the snapshot carries `replan_convergence` (a replan limit holds),
+both forms print the convergence warning -- what has not converged, with no
+count, and every approved replan oldest first in `hashd show`'s words
+(`writeApprovedReplans`) -- the partial form above its kept and discarded
+lists, compared with them on the re-read after a terminal confirmation, and
+the full form then confirms by the same convention, re-reading after a
+terminal confirmation to hold the workstream it confirmed: `-y` proceeds,
+a terminal asks (default no), and without either it sends nothing and refuses
+(`replan.confirmation`) naming the exact `-y` command
+(`failure.WorkstreamReplanConfirmed`, or its `--feedback` form with the
+feedback as typed), which keeps an explicit `--server`. Without
+`replan_convergence` the full form sends without asking. The request body
+carries no confirmation, so a raw REST replan runs as before, and a confirmed
+replan past a limit runs and is recorded like any other. The lists, the
+warning, the prompt and the request all address the workstream the snapshot
+returned rather than the reference as typed, so a story whose implementation
+link moves while the confirmation waits cannot redirect the discard. A returned ID in a story form
+(a legacy `176` implementing STORY-0178) is the exception, since every
+`/workstreams/{id}` route reads it as another story's reference: such a
+workstream is addressed by its own story's ID (`storyref.WorkstreamRef`), the
+reference the server's replan retries name it by too, a first-commit retry's
+POST and the read it names included. The re-read after a terminal
+confirmation refuses (`workstream.resolve.identity_changed`), sending nothing,
+once that story reaches another workstream, and the server rewinds only from a
+boundary listed in the plan of the workstream the request reaches.
+
+Another control on the workstream page opens the Web replan dialog on a commit
+of its own by dispatching the window event `ws-replan-from` with the commit's ID
+as its detail (`wsReplanVerb`); a commit the plan does not hold opens the dialog
+on its default rewind point, saying so.
+
+Checkpoint reset uses `recordDiscard` and the existing runner `ResetDiscard`
+evidence path before rewinding. Its `reset_discard` origins are the complete
+reachability difference `checkpoint HEAD..CheckpointBackup.Original`, including
+merged history. The runner reuses `resetWorktreeCalls`; it never accesses the DB.
+The server fences each write and admits only the assigned checkpoint target,
+project, repository, story and workstream. Full resets retain their independent
+fork-point verification. A checkpoint retry uses the backup's original tip and
+reuses the matching workstream-scoped transformation, preserving its origins
+and completion state. Recording failure prevents rewind; completion requires an
+observed rewind, and withdrawal requires HEAD provably unchanged. Failures after
+rewind retain the discard, checkpoint and backup. An unresolved stamp is not
+inferred from a retry already at target. Receipt-backed cleanup does no discard
+writes and never rewinds.
+
+`hashd reject --reset` retires the same story recovery record in
 `retireResetCheckpoint`, after comparing the assigned checkpoint to the current
 one. It reads the current workstream through the transaction queries and calls
-`retireMergeGateRepairIn` with operation `reset --checkpoint`. Repair deletion,
+`retireMergeGateRepairIn` with operation `reject --reset`. Repair deletion,
 its complete `merge_gate_repair_retired` receipt, checkpoint deletion and the
 existing `checkpoint_reset` backup receipt share the stage's fenced `stageWrite`
-transaction. A changed checkpoint writes nothing; failure to write either
-receipt rolls everything back. Both publishers run only after commit. No repair
+transaction. `commitrecord.RetireCheckpointDiscardIntentsIn` uses the same
+transaction to move only completed intents of the pending micro-commit to
+`did_not_survive`, following proven rewrite links from their resolved SHA to
+dropped origins of the confirmed `reset_discard` for the backup's original tip
+and checkpoint target, including a successful rebase followed by failed
+publication. The scoped query walks backwards from that transformation's dropped
+origins over earlier proven links; direct matches remain included, and
+investigative evidence is never followed. Project,
+repository, workstream and branch must match. This completed-intent transition
+preserves SHA, expected/actual trees, candidate evidence, attribution,
+replacement links and historical commit rows; open-intent settlement is unchanged.
+An unstamped required discard explicitly refuses the receipt transaction,
+retaining its original record, completed intents, checkpoint and backup without
+a success receipt or receipt-backed cleanup. A retry already at checkpoint HEAD
+does not confirm the original rewind; a newly observed rewind is required.
+A changed checkpoint writes nothing; failure to write either receipt rolls
+everything back, including intent retirement. An unpublished FIX then restarts
+through fresh implementation, ordinary verification and commit completion,
+without adopting the discarded SHA or reporting its rewrite gap. Earlier
+completed micro-commits, plan completion and review guidance remain; recovery
+authority and rewrite observation are unchanged. At a review park the same `stageWrite`
+transaction also transitions `reset` from `awaiting_human_review` to `active`;
+the route closes only `run:{project}:{ws}` before dispatching the stage, and
+refuses every other open execution. Both publishers run only after commit. No repair
 means only the checkpoint receipt is written. The backup receipt's format stays
 unchanged: `cleanupCompletedCheckpointReset` still selects only `checkpoint_reset`
 events, and a cleanup-only retry neither resets Git again nor retires a subsequent
-repair. Backup cleanup remains after the committed receipt.
+repair or subsequent intents. Backup cleanup remains after the committed receipt.
 
 Unchanged HEAD needs no remote access. Recovery checks advertised refs at every
 distinct configured fetch/push destination, batching missing object IDs into
@@ -3902,13 +5189,18 @@ Runtime paths under the server's configured operations root:
 | `hashd.db` | Shared identity and credentials |
 | `projects/<project>/hashd.db` | Structured project state |
 | `projects/<project>/config.yaml` | Project configuration |
+| `projects/<project>/directives.md` | Project directives |
 | `worktrees/<project>/<workstream>/` | Product worktrees |
 | `runs/<project>/<run>/` | Implementation logs and transcripts |
 | `projects/<project>/runs/` | Planning logs and transcripts |
 
-Project directives live in `<configured_project_root>/directives.md` and are
-supplied by the server to every runner; workstream directives are stored with
-the workstream. Operator clients obtain state through the server.
+Project directives live in `projects/<project>/directives.md` under the
+operations root (never the project's repository) and are supplied by the
+server to every runner; workstream directives are stored with
+the workstream. Upgrading to this release moves a project's repository
+`directives.md` into that file once, when the file does not exist, and the
+repository file is not read afterwards (runtime migration
+`M037_directives_move`). Operator clients obtain state through the server.
 Keep runtime data out of source control; runtime directories are gitignored.
 
 ## Canonical Parsers
@@ -3918,6 +5210,8 @@ Plan parsing and plan markdown mutation are Go-canonical in
 
 Duration parsing is Go-canonical in `server/internal/duration`. Python
 consumers use the REST compatibility shim.
+
+Plan parsing and plan markdown mutation are Go-canonical in `server/internal/plan` (Python's `hashd_client.planparse` calls `POST /plan/parse`, pinned by `tests/fixtures/plan/plan_samples.json`); duration parsing is Go-canonical in `server/internal/duration` (pinned by `tests/fixtures/duration/samples.json`). Never add parsing regexes or mutation logic elsewhere; extend the Go package and its fixture, and expose it over REST if a client needs it.
 
 ## Source Checkpoints
 
@@ -3970,13 +5264,151 @@ administrator. Reads show one's personal runners, team runners and the local
 runner; administrators can inspect all. User removal revokes owned runners in
 the same transaction as other credential revocations.
 
-`hashd runner add <name> --project <project>` explicitly allows that project to
-run and gate here for the owner; `--team` grants that access to the team instead.
-Repeat `--project` for more projects. Omission grants no project access.
-Execute and gating-evidence permissions are separate stored fields; the initial
-operator surface sets both together. No claim in a check-in can grant permission.
+Every remote runner has exactly one effective access level, which says whose
+project's work it takes. Nothing stores the level; it is derived from the
+runner's ownership and its `runner_grants` rows (`runnerAccessOf`):
+
+- **Private**: a personal runner (`hashd runner add <name>`, `--access private`,
+  or `--owner <email>` for an active user; naming another owner requires a
+  server administrator). It runs only its owner's work, from any project, and
+  registration writes no grant rows for it. Any existing grant rows never scope
+  it and never admit another owner's work.
+- **Anyone**: a shared runner (`--access anyone`, administrator only) with no
+  grant rows. It runs any project's work.
+- **These projects**: a shared runner with grant rows (`--project`, repeatable,
+  administrator only). It runs only the work of exactly the distinct projects
+  those rows name.
+
+Registration writes each grant row with both execute and gating evidence, so
+for a shared runner the project set and its execute grants are the same thing.
+The two stay separate stored permissions: a remote runner's result gates the
+work its level admits unless a grant row covering that work withholds gating
+evidence. Fleet sign-in offers as login owners the active users whose work the
+level could run: any user for Anyone, a user who can view at least one of its
+projects for These projects, and only its owner for Private.
+Work for project P with recorded owner O is eligible on a runner when O is set,
+O can view P under the existing project access (`CanViewProject`: open
+visibility, listed users and teams, owner and admin roles), and the level admits
+it: Anyone any P, These projects a P in its set, Private only when O is the
+runner's owner. Being the runner's owner or a server administrator never widens
+the level, and runner access never grants project access. Placement
+(`admitPlacementDestination`) and every runner-side execution check
+(`authorizeRunnerAssignment`) apply the same rule and answer one refusal
+diagnostic (`runnerRefused`), which names the runner, its level and the work's
+project, never the runner's other projects, and who can change the runner's
+access: the private owner, or for a shared runner a server administrator.
+Access changes govern new placements only. An execution check whose
+assignment continues its work's current stored placement (`continuesPlacement`:
+the workstream is placed on this remote runner at the assignment's own
+placement epoch and still belongs to the assignment's owner, and the work was
+not closed since that placement was made, the latest placement change) skips
+the level alone, so queued, running and paused work, and its resumed,
+retried and recovered successors on that placement, finish on the runner after
+its access narrows. Everything else still applies to it: O's access to P, the
+runner credential, an active runner owner, Team for a remote runner, the
+gating-evidence permission and the occurrence fences. A live stage that merges
+the work finishes its own stage calls and result, and the archive after it and
+the recovery of either continue there: merged work is never closed or left.
+Another workstream, closed work reopened on the same placement, an obsolete epoch (a move away, back again included) and epoch-zero
+legacy work continue nothing, and a destination is admitted by the
+level as before.
+Runner reads (`runnerInfo`: `/runners`, registration and join-link replies,
+`/network`, and doctor as one line per runner) serve each remote runner's `access`: the level, the
+private owner, and the These projects set the reader can view, with
+`projects_withheld` set when some are hidden and never their names or count.
+The level is derived before that filtering, so a runner whose projects are
+all hidden still reads as These projects.
+
+Changing a remote runner's access goes through `PATCH /runners/{id}/access`
+(`hashd runner access <runner> [--access anyone|private] [--project P]... [--owner EMAIL]`),
+which takes the same `RunnerAccessSelection` body as registration except that
+an empty selection is refused (422) rather than defaulting to Private. It is
+Team-only (`RemoteRunnerTeamRequired`), refuses the local runner and revoked
+runners (409), and looks up the runner through `ReadRunner(ctx, id, false)` so
+visibility and fuzzy not-found match runner reads. Authorization checks the
+current row: a Private runner may be changed only by its owner (even a server
+administrator who is not the owner is refused, naming the owner's display
+name), and a shared runner requires a server administrator
+(`RequireServerAdministratorFor`, naming server administrators: owner or admin
+role). A Private owner may convert their runner to Anyone or These projects
+without administrator approval; keeping a Private runner Private preserves its
+owner and refuses any attempt to name another owner (no transfer). Converting a
+shared runner to Private takes an active owner, defaulting to the actor.
+Inside one `db.New(s.AuthDB).Write` transaction, the handler re-reads the
+runner and its grants, validates the result, updates `ownership` and
+`owner_user_id` (`UpdateRunnerAccess`), and replaces its grant rows
+(`DeleteRunnerGrants` + `InsertRunnerGrant`): These projects retains any
+already-granted project's `execute` and `gating_evidence` values (carried onto
+a `grantee=team` row when previously Private) and grants new projects
+`execute=1, gating_evidence=1`; Anyone and Private end with no grants. The
+whole change is refused, naming the project(s), whenever a dropped grant has
+`gating_evidence=0` on a project that either the resulting level admits (Anyone
+admits every project; Private admits every project of its owner) or still has
+non-closed work placed on this runner, because dropping it would let work still
+reaching the runner start gating (`AdmitRunnerResult`). Any refusal leaves the
+stored configuration untouched, and unrelated runners are never modified.
+Placed work drains by default: the handler never touches assignments,
+placements or epochs (existing placements finish via `continuesPlacement` in
+`AuthorizeRunnerAssignment`, while new placements follow `runnerExecutes`). In
+the same transaction, `RecordRunnerChange` (`Emitter.RecordRunnerAccessChanged`)
+records `runner_changed` (`change: "access_changed"`, `actor_user_id`,
+`placed_work: "drained"`) on the updated row so recipients follow the resulting
+ownership, published only after commit, and the reply returns the updated
+`RunnerInfo` with `SetRunnerSlots`.
+
+`GET /network` (`networkStatus`, `server/internal/api/network.go`) advertises
+runner management capabilities through `fsm.ActionAvailability`, using its
+optional `choices` field for the selections the caller is authorized to pick.
+The choices and availability predicates live beside the resolver in
+`server/internal/api/runner_access.go` (`runnerRegistrationChoicesFor`,
+`runnerAccessChangeChoicesFor`, `canChangeRunnerAccessFor`,
+`RunnerHasMutableAccess`, `runnerAccessChangeAllowsOtherOwner`) so `GET /network`
+and the mutation handlers share one authorization decision:
+
+| Action | Availability row (`GET /network`) | Choices | Endpoint | Offered when |
+|---|---|---|---|---|
+| Register a remote runner | `add_runner` ("Add a runner") on `available_actions` | `private` (signed-in member); `anyone`, `projects`, `private`, `owner` (server administrator) | `POST /runners` | Team mode, network access enabled with at least one address, signed-in user |
+| Change a runner's access | `change_runner_access` ("Change access") on `runners[].available_actions` | `anyone`, `projects`, `private` (Private owner); `anyone`, `projects`, `private`, `owner` (server administrator on a shared runner) | `PATCH /runners/{id}/access` | Team mode, unrevoked remote runner, authorized access manager (owner for Private, server administrator for shared); withheld for the local runner, revoked runners, and another user's Private runner |
+| Revoke a remote runner | `revoke_runner` ("Revoke") on `runners[].available_actions` | — | `DELETE /runners/{id}` | Unrevoked remote runner; Private owner or any server administrator |
+
+The
+local runner (`ownership = server`) has no level: it keeps its per-owner
+execute grant, installed when its stage is prepared. No claim in a check-in can grant permission.
 The local runner starts without project grants; this registration slice does not
 route legacy local execution through the new registry or assert remote readiness.
+
+`GET /runners` and `GET /runners/{id}` also serve each runner's scheduling
+facts beside its placed count (`setRunnerSlots`,
+`server/internal/api/runners/runner_observations.go`): `capacity`,
+`active_load` and `queue`, read from the store that governs dispatch
+(`runnerslots.Store.List`), so the queue is in the order `ClaimNext` admits it
+and no client recomputes it. Each entry carries its project, workstream id,
+story label, `tier`, `stage_group` (`fsm.RunnerQueueStageGroup.String`),
+`micro_commits_done`, `micro_commits_total` and `waiting_since`. Each listed
+entry's label is read for its own story (`notify.ReadStoryLabels`), from the
+story id the ordering read already carried (`runnerslots.QueueEntry.StoryID`),
+never as one IN list over the queue, which has no bound. The queue is
+served whole, with no truncation or count cap, except that collection reads
+omit hidden projects: an entry of a project the reader cannot view
+(`CanViewProject`) is left out and `queue_withheld` is set, never with the
+project's name or the entries' count, while `active_load` counts every
+project, as admission does, and can exceed `capacity` by each project's merge
+lock holder admitted via `runnerslots.Store.AdmitMergeLockHolder` plus that
+project's landed merges preparing their archive before queueing for the lock
+again, served as it is without clamping; a merge lock holder is never in
+`queue`. A read that fails serves `slots_error` in place of
+all three, never a partial queue, and the runner's other facts still read.
+The read spans every project on the runner, so its failure can name a hidden
+one (`runnerslots.WorkstreamReadError`): every response that carries a slot
+read's failure takes it through `RunnerSlotsError`, which tells a reader who
+cannot view that project only that a workstream of a project it cannot view
+could not be read, and logs the failure whole. The runner reads apply it
+themselves; the workstream reads and verbs get it from
+`runnerSlotWaitingReason` -- the overlay, the run row and Go
+(`slotQueuedReason`), `ResumeReleasePendingRun` and the inflight inventory --
+and a release's outcomes apply it to their dispatch pass and queue read.
+`runner_queue_changed`, which names the runner, is the refresh trigger; an
+entry's place moving because another entry progressed publishes nothing more.
 
 Creation issues a revocable credential once. Record creation and credential
 issuance are separate internal operations, committed atomically with initial
@@ -4006,8 +5438,8 @@ assignment admission, source/evidence transfer and remote result acceptance
 follow together so that the connection command has a working execution path.
 Public administration and private runner calls remain separate API authorities.
 
-The local runner is a child process, `hashd internal runner-local`, which the
-`localrunner` supervisor starts; hashd-server does not start it yet. It reaches
+The local runner is a child process, `hashd internal runner-local`, which
+hashd-server starts through the `localrunner` supervisor. It reaches
 the server only through the runner check-in and event-stream routes, with the
 local credential, as a remote runner does. The credential arrives once on stdin.
 Of the server's environment it inherits only the names every hashd child
@@ -4040,9 +5472,22 @@ one. It runs in its
 own process group and, on Linux, dies with the server (Pdeathsig). Its output
 and its exit are server log lines, and its failure is never the server's. There
 is no restart policy: a child that exits starts again with the server, and each
-exit says so. On shutdown the server asks it to stop and does not wait. It
-takes no work yet and does not connect again; reconnect timing is the
-operator's to choose.
+exit says so. On shutdown the server asks it to stop and does not wait.
+Local and remote runners use the same connection loop and reconnect schedule:
+a dropped stream or transient check-in failure reconnects within the running
+process; credential, release, identity or trust refusal stops it.
+
+Before each check-in the runner settles what its stage journal still holds
+unsettled (`runnerconnect/stage_journal.go`). For each such attempt it reads
+the assignment's state, `GET /runner/assignments/{id}/state`
+(`types.RunnerAssignmentState`: phase, receipts and execution identity), never
+the assignment's input, which can be megabytes. An attempt the server closed
+(`superseded` or `closed_unknown`) with no start receipt on either side and no
+retained exclusion never ran here: it is dropped, with any cleanup record it
+holds, and is not read again. An attempt that did start and whose holder ended
+before recording a cleanup is settled only by a reboot proof
+(`rebooted_and_excluded`); on the same boot it stays reported, because a
+process death alone does not prove its workspace is free.
 
 ### Running a registered runner
 
@@ -4110,21 +5555,32 @@ Placement records one routing fact: `(work kind, work ID) -> (runner ID, epoch)`
 A workstream stays on its runner for its lifetime unless explicitly moved; chat,
 planning and other work without a workstream also need placement. Jobs, requests
 and results carry the epoch. An explicit move increments it, fences old-holder
-acceptance and restarts from the last pushed checkpoint. The server retains
+acceptance and restarts from the last pushed checkpoint. The current
+placement is also the work's authority to continue on its runner when that
+runner's access no longer admits it (**Runner Registry**): only an assignment
+under the current epoch continues, and only a move is admitted by access. The server retains
 accepted SHAs, lineage, verdicts and evidence, not a replica of runner paths,
 PIDs, indexes or live worktree state.
 
 The single-story read (`GET /stories/{id}`) serves `runner_choices` for a
-started, unfinished story when the caller can see a runner besides the one its
-work is on: each visible, unrevoked runner with the move's own refusal of it
-(the destination admission the move applies), and a refusal of the choices as
+started, unfinished story when a runner besides the one its work is on is
+eligible to run it: each unrevoked runner whose access admits the project's
+work for the story's recorded owner (runnerExecutes; remote runners only in
+Team; in Team the local runner only when it holds no grant on the project for
+another owner, nor a restricted one), with the move's own refusal of it when it is not usable now (the
+destination admission the move applies), and a refusal of the choices as
 a whole (the caller is not the story's owner, or the choices could not be
-read). The TUI story detail (`p`) and the Web story head (`runner…`) offer only
+read). The runner the work is on is listed first even when its access would
+refuse a new placement; it then carries that refusal, explaining that the work
+continues on its existing placement, and the choices are served for it even
+when no other runner is eligible. The TUI story detail (`p`) and the Web story head (`runner…`) offer only
 a runner the server admits, send the one move (`PATCH /workstreams/{id}`
 `placement`) decided on the served placement, show a `placement.confirm_discard`
 refusal whole and confirm it by sending the same move with `confirm_discard`,
 and then re-read the story. Whether the story is at a stage boundary is decided
-only by the move, which refuses `placement.stage_open` whole.
+only by the move, which refuses `placement.stage_open` whole. A stage is open
+on the old runner while that runner's listing holds an attempt of the
+workstream; settlement is history and never refuses a move. A story whose workstream is `rebasing`, its rebase running or stopped, is refused `placement.rebase_unpublished` whole instead, judged on the workstream row under the move's write lock together with the open-stage check: until the rebase lands, the rebased branch exists only in the checkout on its current runner, so the person publishes or cancels the rebase first. A confirmed move to the runner the story is already on is refused the same way, and this refusal takes precedence over `placement.stage_open`. A story not at `rebasing` whose base-moved rebase resolution is kept on its current placement is refused `placement.confirm_discard` on an unconfirmed move to another runner, judged under the same write lock right after the `rebasing` check: the resolution exists only in that runner's checkout, so "Rebase again" (`hashd rebase <story> -y`) keeps it while a confirmed move to another runner discards the kept resolution, retires its landing record in the same write transaction, never as a publication, and records a `story_rebase` `discarded` (`operation_discarded`) notice in that transaction (published after commit) that replaces the base-moved stop and names the full resolved commit and the runner it was on, so a later `hashd rebase` starts fresh from the destination's checkout. An unconfirmed move to the runner the story is already on stays a no-op; a confirmed move to that same runner is refused `placement.rebase_same_runner` under the same write lock and changes nothing (no placement event, no rebuild, landing record untouched), because moving to the runner the story is already on rebuilds nothing and cannot discard the resolution there.
 
 The runner owns its clone and worktrees and pushes each real micro-commit with
 an explicit expected-SHA `--force-with-lease`. This will be on by default, with
@@ -4141,6 +5597,29 @@ a checkpoint abandons that attempt; server recovery uses existing retry rules.
 The source-checkpoint facilities described above are existing implementation,
 not the future runner recovery contract. A Git lease protects a ref from an
 unexpected overwrite; it is not an epoch fence or proof of FSM acceptance.
+
+### Interrupted resolve undo
+
+The existing resolve workflow restores interrupted work only with its exact
+execution claim and original runner placement. After taking the workspace lock,
+the runner checks the live sequencer's canonical hashd capture steps, detached
+HEAD, branch and original commit before aborting. The transition back to
+`merge_conflicts` and token-bound claim release commit together; an unconfirmed
+restore keeps the claim. An abandoned response can repeat confirmed finalization.
+
+An ended-run backstop requires an affirmative exact-run Temporal closure.
+Supervised and gatekeeper AI Resolve performs undo then the ordinary resolve;
+autonomous housekeeping performs undo only. Both require the original runner
+connected and compatible. `UndoOnly` is Temporal input only: stage payloads are
+explicitly projected into the unchanged runner input. Authorization binds the
+existing opaque assignment identity to its claim; transfer and finalization
+bindings stay in the server's existing command-cursor preparation column.
+
+Resolve starts carry a claim fingerprint in Temporal's `resolve_execution_claim`
+memo only. After a lost start reply, preparation or a later recovery check can
+fill the missing run ID only from an exact memo match and an unchanged claim,
+branch and placement. Missing or mismatched evidence leaves ownership held.
+The memo never enters runner payloads or client interfaces.
 
 ### Execution ownership
 
@@ -4164,9 +5643,9 @@ The server retains a narrow forge **REST** credential for PR operations and
 remote SHA confirmation, with no Git, `gh` or `az` CLI execution. Team requires
 a forge. No-forge projects are Solo on one box; their plain server Git remote is
 an explicit storage/transport exception, not a working checkout or agent host.
-The first runner delivery uses each person's own runner and subscription, not
-shared multi-owner runners. Agent login/profile materialization belongs on the
-runner; grants and work-owner authority remain server decisions.
+Which work a runner takes is its access level (see **Runner Registry**): Private,
+Anyone or These projects. Agent login/profile materialization belongs on the
+runner; access levels and work-owner authority remain server decisions.
 
 ### The same read API, forwarded
 
@@ -4177,18 +5656,21 @@ method, path, query and body; there is no translated second API. Uncommitted
 views require the owning runner. Pushed committed views may use any authorized
 online runner of that project.
 
-That implementation is `server/internal/workreads`: the five operations
-(`/diff`, `/diff/changes`, `/diff/blob`, `/files`, `/files/content`), their wire
-types and their git, installed with `workreads.Register(api, resolver)`. The
-package holds no database handle; a test pins that it imports no store or
-server package. Every fact beyond the checkout (the workstream's row, its
-recorded commits and selected micro-commit, its target branch, its human-edit
-hold) comes through the resolver's `Workspace`. Today the server registers it
-over a resolver that reads the project database (`api/workspace_reads.go`).
+The server and runner register the diff and file handlers through
+`workreads.Register(api, resolver)`. A diff names each side by a full Git blob
+ID (`sha`, 40 or 64 hex characters) or a worktree-relative `path` for
+uncommitted content. Both blob reads take exactly one selector and the project.
+`GET /workstreams/{id}/diff/blob` returns inline text up to 10 MiB per side.
+`GET /workstreams/{id}/diff/blob/raw` streams the complete file version as an
+`application/octet-stream` attachment, including binary files.
 
-Forwarding is built, and nothing routes a read through it yet.
-`forwardToRunner` (`api/runner_forward.go`) sends a request to the runner the
-workstream is placed on, as a `request` frame on that runner's event stream:
+The `workreads` package gets facts beyond the checkout from the resolver's
+`Workspace`. The server resolver reads the project database
+(`api/workspace_reads.go`). For a placed workstream, `forwardPlacedReads`
+(`api/runner_forward_reads.go`) supplies those facts and forwards the read to
+the owning runner. The request frame on the runner's event stream carries
+the following information:
+
 - the frame carries ID, placement epoch, method, path, query, headers, host,
   TLS flag and body;
 - the headers are the caller's minus its credentials (`Authorization`,
@@ -4206,8 +5688,10 @@ long a runner may take to upload it.
 
 A cancelled caller sends a `cancel` frame. A runner that is not connected is
 refused at once with `runner.offline`, and nothing holds a copy. A stream that
-ends with requests pending fails them with `runner.disconnected`. The runner
-reconnects on the shared schedule, and stops on a refused credential or a
+ends with requests pending fails them with `runner.disconnected`. Its end
+fences no assignment: the runner's offered and started attempts keep their
+phase until a stop or cancel, the stage's own deadline, a later generation, a
+move or a close fences them. The runner reconnects on the shared schedule, and stops on a refused credential or a
 release mismatch.
 
 **No eligible online runner means “not available”, with the reason.** The server
@@ -4322,7 +5806,7 @@ here: `api/runner_agent_records.go:74`, `api/runner_artifacts.go:119` and
 | Agent record delivery | runner to server | `PUT /runner/assignments/{id}/agent-records/{batch_id}` (`types.RunnerAssignmentPath` + `types.RunnerAgentRecordsSegment` + `{batch_id}`), registered at `api/runner_artifacts.go:48`, handled by `handleRunnerAgentRecordPut` (`api/runner_agent_records.go:49`) | unset check `api/runner_agent_records.go:74-78`; `http.MaxBytesReader` `:80-86` | one agent invocation's transcript and attempt facts | read whole into server memory per request | 413 "the agent record exceeds the transfer bound of N bytes", help "Nothing was kept; the delivery is refused, never truncated." | 503 "refuse agent records until the runner transfer bound is set" |
 | Agent assignment offer | server to runner | `runnerassign.Store.Offer` (`runnerassign/store.go:131`) calls `checkAgentOffer` at `:147`, before any transaction; `Store.AgentInputBound` (`runnerassign/store.go:94-99`) is wired to `runnerTransferBound.Load` at `api/server.go:550-552` | `runnerassign/store.go:577-610`: unset `:588-590`, encoded size `:591-593` | the JSON-encoded `RunnerStageInput`, including the server-rendered prompt (`types/wire_runner_agent.go:24-27`) | stored whole in a system-DB assignment row | `Offer` returns the error "the agent assignment is N bytes, over the runner transfer bound of M bytes"; nothing is stored | `Offer` returns `runnerassign.ErrAgentInputUnbounded` (`runnerassign/store.go:107-108`), a Go error to the offering caller, not an HTTP status; nothing is stored |
 | Agent evidence input slots (#2597, 29566c51a) | server to runner | placed by `agentarm.Executor.placeEvidence` before the offer, then fetched by the runner with `GET /runner/assignments/{id}/artifacts/{slot}` (`api/runner_artifacts.go:46`, `handleRunnerArtifactGet` at `:362`) | `Executor.EvidenceBound` `agentarm/agentarm.go:53-55`; unset `:190-193`; per file `:252-254`; slot `MaxBytes: max(info.Size(), 1)` `:255`; offer re-check `runnerassign/store.go:595-597` | each evidence file the stage grants its agent to read | one value bounds both directions, so evidence a runner is given fits under the bound its records and result are held to | an adapter error: the launch is refused, never truncated; at offer, "agent evidence S is N bytes, over the runner transfer bound of M bytes" | an adapter error, "evidence files are refused until the runner transfer bound is set"; at offer, `ErrAgentInputUnbounded` |
-| Agent result body | runner to server | `POST /runner/assignments/{id}/result` (`api/runner_artifacts.go:53-104`), middleware `limitRunnerResultBody` (`api/runner_artifacts.go:106-154`), which uses the bound only when `ownAgentAssignment` holds (`:118`) | unset `:118-124`; read with `io.ReadAll(io.LimitReader(..., limit+1))` `:135`; over `:147-151` | the agent stage result | read whole into memory before huma decodes it | 413 "refuse a runner result larger than its assignment accepts", detail "The request body is over N bytes, the most this assignment's result may be. Nothing was recorded." with `limit_bytes` data | 503 "refuse the agent result until the runner transfer bound is set", detail "Nothing is accepted unbounded; the bound is an operator value. Nothing was recorded." |
+| Agent result body | runner to server | `POST /runner/assignments/{id}/result` (`api/runner_artifacts.go:53-104`), middleware `limitRunnerResultBody` (`api/runner_artifacts.go:106-154`), which uses the bound only when `ownAgentAssignment` holds (`:118`) | unset `:118-124`; read with `io.ReadAll(io.LimitReader(..., limit+1))` `:135`; over `:147-151` | the agent stage result | read whole into memory before huma decodes it | 413 "The runner request exceeds its delivery limit", detail "The request body is over N bytes, the most this request may be. Nothing was recorded." with `limit_bytes` data | 503 "refuse the agent result until the runner transfer bound is set", detail "Nothing is accepted unbounded; the bound is an operator value. Nothing was recorded." |
 
 **One value, both directions.** `api/server.go:550-551`: "One transfer bound
 both ways: the agent assignment the server offers and the agent records the
@@ -4363,6 +5847,29 @@ the request text in these places:
 - `agentarm.Executor` is constructed only in tests, so production code sets
   `EvidenceBound` nowhere yet.
 
+### Price overrides
+
+`pricing.overrides` is a system-only setting holding exact per-model contracted
+token rates (USD per token) applied before the built-in price catalogue. Project
+overrides are refused. Reads and writes are restricted to server administrators
+(in solo mode the single user is an administrator): non-administrators get 403
+on direct reads (`/config/get`, `/config/show` for `pricing` or
+`pricing.overrides`) and see the key omitted from bulk config reads.
+
+Each entry is an object with required strings `provider`, `model`, `name`,
+`currency` (`"USD"`), and `effective_from` (`YYYY-MM-DD`, provenance label
+only), optional string `region`, and at least one finite non-negative numeric
+rate (`input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`).
+Exact `(provider, region, model)` tuples must be unique, and unknown fields are
+refused with `config.price_override_invalid`.
+
+Because a remote team administrator cannot edit the server host's `config.yaml`,
+`pricing.overrides` is the one list key `PUT /config`
+(`hashd config set pricing.overrides '<JSON array>'`) accepts: it validates the
+JSON array as a whole and replaces any stored list, leaving the file untouched
+on refusal. Passing `[]` clears the list; `POST /config/reset`
+(`hashd config reset pricing.overrides`) removes the key.
+
 ## Project Commands And Build Side Effects
 
 The project-side `commandcursor` store records a runner command's immutable
@@ -4399,6 +5906,39 @@ then, instead of reading as pending until the stage's deadline. A stage whose
 own execution was cancelled or whose occurrence was closed, or whose run claim
 moved to another run, still reads as a superseded claim. This foundation does not yet route
 project commands through runner assignments.
+
+A runner request -- a stage batch, an artifact upload, an agent lifecycle
+notice, or a finished stage's result -- is sent again exactly when the server's Diagnostic answering it
+carries a transient catalogue code (`failure.ClassTransient`), today
+`runner.request_not_applied` (`failure.RunnerRequestNotApplied`). The server
+stamps that code only where it refused the whole request before applying any
+of it: the body read timing out before batch dispatch or atomic artifact
+publication, the result handler's unreadable artifacts or result report and
+its acceptance transaction failing to begin, the runner
+credential and owner lookups, and an invocation-end notice whose stopped-event
+write never began. No HTTP status or source string takes part: an
+answer with no server Diagnostic (a transport failure, a lost response, a
+malformed reply) or with any other code or none is not replayed. The client
+repeats the same bytes on the existing reconnect schedule, within the caller's
+context, counts every attempt toward the stage's usage, and defers the stage
+fault latch until recovery ends. A dispatched operation failure is not
+replayed, whatever its code: a batch can commit a prefix before failing. This
+is whole request retry, not resumable upload; all body limits and deadlines
+are unchanged.
+
+A finished stage's artifacts are synced through the existing artifact store
+under its private journal directory. The whole-stage journal's `finished_result`
+then records the control envelope and canonical digest before the first upload.
+Large returns retain the original `result_report`; delivery never reconstructs
+its uploaded bytes from decoded data. After cleanup joins, delivery uploads the
+saved artifacts and submits the saved envelope through the existing routes.
+The dispatcher retries on the existing reconnect schedule and recovers pending
+entries on reconnect or runner restart without executing stage code. Delivery
+does not inherit the execution deadline, and runs separately from heartbeats.
+An identical accepted result recovers its receipt, including after a lost reply
+or server restart. Only a verified durable acceptance releases local upload
+copies. Existing execution fences remain authoritative; fenced results keep
+their evidence and refusal. A non-fencing refusal remains pending and visible.
 
 Whole-stage execution settlement uses the existing `runnerjournal` atomic-file
 store and `StageJournal` check-in, including heartbeat check-ins. Its separate
@@ -4471,18 +6011,65 @@ sites (test stage, commit stage) and never stages a policy path; an edited
 an operator's approval stages it. The dirty checks after implementation and
 at the merge-gate heal leave `ignore` paths out.
 
-A project command's `exec.credentials` bindings are resolved right before it
-launches by `commandcred.Resolve`, against the work owner's credential source
-the worker activity binds on its context (`api.Server.ProjectCommandCredential`
-for the activity's workstream, or for its story in planning, which has no
-workstream). Besides the commands above, `browser.app_cmd`, which
-`browser.StartApp` starts outside `RunProjectCommand` for review and planning
-browser checks, is a credentialed project command: it streams its output to
-the app log through `commandexec.Request.ScrubbedOutput`, which replaces each
-credential value with `[REDACTED]` before the log receives it, including a
-value split across writes or across stdout and stderr. A binding that cannot
-be had refuses the start, and the browser check is skipped with a warning
-carrying the refusal Diagnostic.
+Setup artifacts use the setup hook's own before/after untracked listing in both
+provisioning and cold workspace preparation. Newly untracked literal paths are
+reported through `setup_untracked` and retained in that worktree's Git metadata
+(`hashd-setup-untracked`), so a sibling or rebuilt checkout cannot inherit old
+ownership. Repair admission, dirty checks and staging exclude these paths only
+while untracked; tracked work and preexisting paths remain protected. Ownership
+is by path, regardless of a later replacement's contents or symlink target.
+Missing receipts exempt nothing: old workspaces and interrupted observations
+need re-provisioning. No repository ignore file is edited. Repair admission also
+honours the repo's existing `build_side_effects.ignore`; Restore and Clean do not
+grant repair ownership. Preservation and rollback inventories remain unfiltered.
+Regeneration commits use the same exclusion. The merge-gate heal retains its full
+original stash and restores only setup artifacts from that stash for its build
+probes; failure reapplies the whole original stash, and success leaves setup
+artifacts untracked.
+
+Every agent stage, every project command above, every workspace hook and
+`browser.app_cmd` launch with the project environment: one table,
+`project_env`, one row per entry (repo, name, type, value, as_file, version),
+read for a launch by one function, `projectenv.Store.Resolve` -- the scope's
+entries (the project's, with the target repo's over them by name), resolved
+for the work owner, so a replaced secret, a changed entry or a reassigned
+owner's credential is a later launch's. The `/projects/{name}/env` routes
+are the table's only writers. The host that runs the work binds the source
+on the context its launches run under (`commandcred.WithProjectEnv`), and a
+launch asks it through `commandcred.ResolveProjectEnv`: a runner's stages
+bind the server's answer for their assignment (`runnerconnect.ProjectEnv`,
+the `env` request of the runner credentials route), asked once per stage and
+held for that stage, and the server's own activities its resolver
+(`workflows.ActivityHost.ProjectEnv`, `api.Server.ResolveProjectEnv`) -- the
+planning activity for its story, which has no workstream. A worker started
+without the resolver binds a source that refuses, so a launch never runs
+without its entries. An agent launch whose context carries no source -- one
+the server makes itself -- asks its run host (`agents.RunHost.ProjectEnv`,
+`api.Server.AgentProjectEnv`). `childenv` composes the answer as the one
+project environment layer of every kind of child: value,
+secret and credential entries as their values, host entries read from the
+launching host's own environment, and each as-file entry's variable holding
+the path of a read-only file `commandexec` writes for that one launch under
+the context's secret-file root (`commandcred.SecretFileRoot`: the ops
+directory's `exec-secrets/`, swept at server start, or a runner's record
+root), opens to the stage fence and removes once the launch ends. Every
+secret and credential value is replaced by `[REDACTED]` in a project
+command's and a hook's output and in evidence read outside its streams
+(`commandexec`'s scrub writer and `Request.Redact`), including a value split
+across writes or across stdout and stderr; an agent's output is not
+scrubbed. `browser.app_cmd`, which `browser.StartApp` starts outside
+`RunProjectCommand` for review and planning browser checks, streams its
+output to the app log through `commandexec.Request.ScrubbedOutput` the same
+way. An environment that cannot be had -- an owner hashd cannot determine, a
+credential the owner lacks, a secret that does not open, files that cannot
+be written -- refuses the launch before anything starts, with a
+`commandcred.CredentialRefusal` whose Diagnostic reaches the work's durable
+failure record; a refused browser start skips the browser check with a
+warning carrying it. The environment's digest keys the launch's verdict (see
+the test verdict cache) and is carried with a failed run (`exec_env_sha256`)
+into its re-run, the committed-breakage probe, the merge-gate base comparison
+and resolve recovery, which each run only under the same digest. The runtime
+migration M036 converted the settings this replaced (`server/internal/upgrade`).
 
 ## Logging And Transcripts
 
@@ -4499,6 +6086,27 @@ Story and run transcript entries use the `transcripts` table, separate from
 `events`. Entries written through `transcriptstore` retain bounded inline content
 and a full-content blob; milestone rows may contain only inline content.
 The server exposes transcript and event reads over REST.
+
+`GET /stories/{id}/transcripts` returns the existing whole array when none of
+`cursor`, `direction` or `limit` is present. Naming any of them selects a page;
+an initial request without a cursor returns the newest page (40 entries by
+default, at most 100). Web Transcript and TUI `[L]` use pages, retaining at most
+200 entries and fetching the existing `GET /transcripts/{id}` detail on open.
+CLI whole-history, lineage and chat reads retain the whole-array response.
+The page projects each entry type according to its list presentation: large
+agent bodies and test captures open through the detail link, while human
+decisions, stop errors and other approved whole types retain their content.
+List rows retain phase, recorded outcome facts, retirement facts, bounded
+failure reasons and stored size; unknown types remain whole.
+
+Pages use the shared read-only pool and one snapshot. Indexed key reads select
+the entries before loading their evidence. Older/newer cursors retain the
+stored `(created_at, id)` order; a separate insertion-ID cursor catches late
+timestamps without a time overlap. Every entry carries its own cursor so an
+evicted edge can be fetched again. Updates are read every two seconds while
+the view is visible. Deletes, corrections and run-log retirement invalidate
+held cursors and return the newest page with `reset=true`; clients discard the
+old window and announce that history changed.
 
 When a story closes (implemented or abandoned), the run directories under
 `ops_dir/runs/<project>/<run_id>` of its workstreams are deleted, by the close
@@ -4575,15 +6183,16 @@ fact is added to the facts, and a gate's `transcript_path` becomes the fact
 (a gate citing one only in its reason carries the fact in its reason).
 The stored record keeps its path. Transcript rows (the run-transcript, story
 transcript and `GET /transcripts/{id}` reads, and a lineage saved prompt) are
-database records and evidence, served unchanged with `logs_retired` beside
+database records and evidence, served whole by the unpaged and detail reads with `logs_retired` beside
 them: the retirement fact of the run whose duplicate blob was deleted, and of
 every retired run a log cited in their content or data belongs to. `hashd log
 --transcript` and `--full`, `hashd lineage` (beside a saved prompt), the web and
 TUI story transcripts and their complete-entry views render it beside the
 entry. A retirement changes `logs_retired` without changing any row, so the
 transcript change-detection read (`GET /stories/{id}/transcripts/count`) also
-reports the project's retirement count (`logs_retired`), and the web and TUI
-re-read the rows when either value moves. `@timeline` hands an agent
+reports the project's retirement count (`logs_retired`). Web and TUI paging
+cursors carry that count and reset on a change; the server resolves retirement
+facts against the full selected evidence before projecting list rows. `@timeline` hands an agent
 the content as stored with that fact after it. Clients render the server's text: the TUI log
 panel shows a run-log refusal's Diagnostic in place of "No runs found" or a
 reconnect loop.
@@ -4597,9 +6206,76 @@ in [docs/design/reporting/README.md](design/reporting/README.md).
 The epoch timestamp Arc for `agent_calls.created_at` and a story's
 `implemented_at` is in
 [implementation.md](design/reporting/implementation.md#epoch-cutover-indexes-and-retirements):
-nanosecond values written by the production writers beside the text during the
-overlap, with a temporary guard, and the indexed reader cutover (built), then
-the text retirement (planned).
+nanosecond values written by the production writers, the indexed reader
+cutover, and the text retirement (all built): both times are now stored only
+as `agent_calls.created_at_ns` and `stories.implemented_at_ns`.
+
+### Lifecycle records
+
+Lifecycle instants use nullable INTEGER epoch nanoseconds. A NULL endpoint
+means no recorded instant, not zero or the time a reader asked. Story start is
+the first owned planning-slot acquisition (`stories.started_at_ns`); terminal
+story transitions stamp `ended_at_ns`. Draft failure does not finish a story.
+The start survives retries, and a nonterminal transition clears the current
+end. Creation and implementation-success time retain their separate meanings.
+
+`microcommits` records each planned or FIX item independently of the Markdown
+plan. The plan remains the authored specification. Its accepted write and the
+item's membership/completion records share one database transaction through
+`RecordWorkstreamPlanCAS`. An ordinary edit retains identity; an explicit
+replan retires its replaced tail and reuses no retired row even when an authored
+COMMIT label repeats. The kept prefix retains its identity and recorded times.
+Plan-carrying FSM transitions check external guards before their existing
+write transaction; recording lifecycle facts must not move those checks under
+the database write lock. A refused write leaves neither a changed plan nor
+partial lifecycle records.
+
+`stage_executions` keeps occupancy endpoints and runner process endpoints as
+separate columns on the occurrence. Agent accounting remains in `agent_calls`,
+with nullable `stage_execution_id` attribution rather than duplicated totals.
+Parent and child stage intervals overlap and must not be summed as disjoint
+work. Content-owner acquisitions and exits record planning/editing occurrences
+in their existing owned transactions. An old execution whose start is unknown
+can still record its accepted end without inventing an earlier instant.
+
+The upgrade's versioned backfill creates current plan membership with unknown
+times and copies directly recorded terminal story facts. No historical
+duration is inferred from update timestamps or a later cycle. It runs once
+before schema-version stamping, on both system and project databases; its
+populated-copy rehearsal is outside the ordinary test suite. These record
+writes do not switch existing report readers or alter the legacy run row's
+cycle semantics.
+
+### Activity report facts
+
+Activity and workstream stage reports read event headers plus
+`event_activity_facts`, one child row for each `stage_changed`,
+`command_consumed` and `run_closed_externally` event. The row stores stage state,
+wrapper classification, occurrence role, observed cursor and the engine's
+recorded close time. Event payloads remain full evidence for detail reads;
+report queries neither fetch nor parse them. The existing interval classifier
+still decides which stages count and how their boundaries pair.
+
+`db.Queries.RecordEvent` and `RecordRunClosingEvent` atomically store the event
+and its facts, using the same decoder for typed and generic event writers.
+Emitters retain ownership of publication after commit. An observed cursor is
+an immutable evidence snapshot, not an authority link: a `stage_record` can
+name a cursor without a trusted stage link, and deleting the trusted cursor
+must not change the historical report. The event owns its facts by cascading
+foreign key.
+
+The forward schema migration creates the table and covering indexes. Its
+versioned Go finish step backfills all eligible historical events with the
+same write decoder before stamping `user_version`; a failure rolls back the
+backfill and a restart resumes it. Blank databases get the current authored
+schema directly. This runs on both project and system databases during upgrade,
+not on report reads. The release's populated-copy rehearsal is external to the
+regular test suite.
+
+The project query seeks on project, event type and its lower time bound. The
+workstream covering index retains its `(workstream_id, id)` prefix so existing
+stage-stop queries keep their indexed ID ordering. The separate
+project/type/workstream index remains for readers which constrain that key.
 
 ### Recorded line counts
 
@@ -4630,6 +6306,12 @@ read formats, not new runner writers. Missing Diagnostics on migrated failure
 families are explicit `hashd.untyped_failure` bugs; malformed versioned details
 are `hashd.diagnostic_encoding` bugs. Neither silently degrades to a generic
 stage failure. Other activity families migrate incrementally.
+
+Reuse `Diagnostic` for common content, including standing records (`fsm.CurrentError`). Preserve the distinct recorded `detail` and `explanation`; captured `output_tail`, advice in `help`, and supporting `facts` are typed fields. Extend this construction path instead of inventing a parallel error type or teaching a client to search `data`.
+
+Standing records and event diagnostics share the family adapters in `server/internal/api/current_errors.go` / `current_error_diagnostic.go`; clients render typed content and use `available_actions` for controls (recorded help is advice, not permission).
+
+Provider context-rejection forms belong in the shared classifier for every agent, not a single agent branch. Agent-created implement commits return to the ordinary artifact/test/review/commit path; never teach downstream stages to bypass guards for a clean, committed worktree.
 
 ### Planner Temporal failures
 
@@ -4681,6 +6363,34 @@ historical arguments keep the flat path. Archive recognition uses its existing
 class metadata, so preserving the source title does not change retry eligibility
 or retirement. Recovery adds the catalogue's fixed `merge` command template.
 No schema migration or native TUI/Web action dispatch is involved.
+
+Archive updates SPEC on the branch the work landed on (the merge's base branch) and REQS on the REQS repository's default branch: the repo's `default_branch` in `project_repos`, or the project's `default_branch` when the project has a single repository or the repo sets none. The server resolves the REQS branch once (`archiveRequirementsTarget`) and sends the runner the branch together with where it came from. When origin lacks the branch the archive asks for, the archive fails deterministically with a typed Diagnostic that names the repository, the branch, its source (the repo's `default_branch`, the project's `default_branch`, or the work's target branch) and the setting to change, with the `hashd` command that changes it.
+
+`mergeflow.runArchiveWorkstream` finishes the archive locally before it
+delivers documentation. Under the `merge-archive-prepare-first` /
+`run-archive-prepare-first` pins, `ArchivePhasePrepare` generates and
+checkpoints SPEC (`SpecPrepared`, without committing it) outside the merge and
+artifact locks before chute admission when every documentation destination has
+completed M032; the locked pass then runs `ArchivePhaseWhole`, which reuses the
+checkpointed SPEC preparation when valid (or generates SPEC itself when none is
+prepared), burns REQS, commits each registered destination, and runs
+`archiveRepo.prepare` on it (replaying cleanly onto a moved destination, local
+or remote), where a conflicting prepared commit is discarded and regenerated
+inside the lock (once per destination, stopping with
+`documentationConflictedTwice` on a second conflict). `completeLocally` then
+records the burn,
+finalizes the story, removes the implementation worktree, clears the
+current-workstream state and retains the streams. Each step is checkpointed
+in the archive state (`archive_workspace.go`), with `Complete` last; once any
+is, a replay skips preparation and regeneration and resumes them. Delivery
+(`archiveRepo.publish`) follows, on the first run as on a completed archive's
+deferred publication. A completed archive owes every destination that is
+neither published nor delivered locally, so its replay delivers only that.
+The target observation and documentation verdict follow each outcome
+(`archive_verdict.go`). A delivery failure returns its Diagnostic and keeps
+the prepared worktrees, commit records and refs. The `completed` archive
+event is recorded only after delivery, so an outstanding publication stays
+an archive-failure stop (WF.md, **Unfinished archive**).
 
 ### Resolve and Arc failure transport
 
@@ -4846,6 +6556,9 @@ uses a fixed command template validated against Cobra. The child's separate
 planning-dispatch failure record uses the boundary described below.
 
 ### Planning-dispatch failure records
+
+A `draft_failed` story retains its own standing error and retry, edit and close
+actions. It does not gate new planning requests for other stories in the project.
 
 The dependency handoff records the originating Diagnostic on the child as a
 story-scoped planning operation_result. Its title, code, cause, evidence, related
@@ -5016,7 +6729,7 @@ repeated by the state-derived half; matching is on the command text alone, so
 the description the record recorded is the one that stands, because it knows
 why this entity needs the command. Recorded entries are never reworded,
 reordered within their record, or dropped for length — a deadline raise
-command, a usage-limit reset time and an agent re-authentication step are what
+command, an account usage limit and an agent re-authentication step are what
 the operator types. This is what puts recorded help on the view an operator
 lands on: `--details` expands whole records, it is not where the command is
 found. Composition adds advice, never a verb — availability stays with the FSM
@@ -5099,26 +6812,30 @@ The server withholds Go and Go anyway with the reason and refuses either run
 command before dispatch; neither means re-run final review. Clients render these
 server decisions and labels.
 
-Internal FSM transitions such as `resume_impl` do not independently advertise
-Run, and `address_concerns` does not independently advertise Reject.
+Internal FSM transitions such as `await_review` from `ready_to_merge` do not
+independently advertise operator actions; `start_impl` does not independently
+advertise Run, and `address_concerns` does not independently advertise Reject.
 
 | Operator control | Server row | Dispatch |
 |---|---|---|
-| Go (`G`) | `run` | `POST /workstreams/{id}/run` |
-| Go anyway (`!`) | `run_anyway` | same route with `run_anyway` |
+| Go (`G`) | `run`; at a merge-ready or PR state with no pipeline-forward action, refused (`dispatch.run.no_pipeline_forward`) unless dispatched with `--run-anyway` or carrying a clarification answer (`clarificationAnswerResumesBoundFix`) | `POST /workstreams/{id}/run` |
+| Go anyway (`!`) | `run_anyway`: provisioning baseline failures or unparsed baseline; all-baseline `merge_test_failed` (other merge-gate failures retain an unavailable refusal row); requires Go prerequisites and a pipeline-forward action | same route with `run_anyway` |
 | Answer (`a`) | `answer` | `POST /workstreams/{id}/answer` |
-| Add guidance (`E`) | `feedback` | `POST /workstreams/{id}/feedback` |
+| Feedback (`E`) | `feedback` | `POST /workstreams/{id}/feedback` |
 | Edit microcommit (`e`) | `edit_commit` | existing microcommit edit route |
 | Skip microcommit (`S`) | `skip` | `POST /workstreams/{id}/skip` |
-| Record oscillation resolution (`Y`) | `resolve_oscillation` | `POST /workstreams/{id}/resolve-oscillation` |
-| Resolve conflicts (`i`) | `start_resolve` / `rebase_resolve` | respective merge/rebase resolution route |
+| AI Resolve (Web), ai-resolve (TUI) (`i`) | `start_resolve` / `rebase_resolve` | respective merge/rebase resolution route |
 | Close (`X`) | `close` | abandon the linked story through its close route |
 | Rework (standing PR closed decision) | `reject` | existing reject route: append a FIX with guidance, then continue on the existing branch |
 | Close the story (standing PR closed decision) | `close_by_person` | existing story close route with a reference and reason |
 | Abandon (standing PR closed decision) | `close` | existing story close route |
+| Replan / Reset (standing PR closed decision) | `replan` / `reset` | existing replan and reset routes: retire the decision and remove the closed PR from the lane, then restart the plan |
 
 While the current PR watch's closed-PR condition stands, Rework, Close the story,
-and Abandon are the only available decisions, subject to their ordinary admission guards.
+Abandon, Replan and Reset are the only available decisions, subject to their ordinary
+admission guards. Replan and Reset ask nothing of the forge there: the close is
+already recorded, so each retires the decision and clears the lane's PR link before
+it touches the code or the plan, and the PR step opens a new PR from the same branch.
 Close the story requires a reference (`--ref`) and a reason and records `closed_by_person`.
 Rework requires guidance and uses the existing transactional FIX append and
 continuation dispatcher; it preserves the branch and carries the complete
@@ -5189,15 +6906,19 @@ never swallowed, always through a log path (CLAUDE.md, **Architecture: Logging
 & Transcripts**).
 
 **A fetch that lost the tracking ref's lock is run again.** Every worktree of a
-runner's managed clone shares `refs/remotes/origin/*`, so two stories fetching
-their base at once (a rebase, an AI resolve, a merge gate, a stage's
-preparation) collide on it and the loser fails with git's `cannot lock ref
-'refs/remotes/...': is at X but expected Y`. `mergeflow.RunRemoteGitOn`, which
-every network git call goes through, runs a fetch or pull that failed with
-exactly that again under `retryWithBackoff`; the retry finds the ref where the
-other fetch left it. A fetch is idempotent, and the race fails a pull in its
-fetch, before anything is merged or rebased. A fetch reading stdin is not
-retried.
+runner's managed clone shares `refs/remotes/origin/*`, so a story fetching its
+base collides with any other writer of that ref: another story's fetch (a
+rebase, an AI resolve, a merge gate, a stage's preparation), or provisioning's
+forward-only move of `refs/remotes/origin/<base>` to the base it settled on
+(`runnerworkspace.AdvanceBaseTrackingRef`). The losing fetch fails with git's
+`cannot lock ref 'refs/remotes/...': is at X but expected Y`.
+`mergeflow.RunRemoteGitOn`, which every network git call goes through, runs a
+fetch or pull that failed with exactly that again under `retryWithBackoff`; the
+retry finds the ref where the other writer left it. A fetch is idempotent, and
+the race fails a pull in its fetch, before anything is merged or rebased. A
+fetch reading stdin is not retried. Provisioning's move is not retried either:
+it writes only while the ref holds the value it checked, so when it loses, the
+other writer's value stands and the miss is logged.
 
 ### Standing-record command lists
 
@@ -5215,13 +6936,13 @@ recorded `GoAnywayRefusals` entry and preserves its evidence, including a failed
 fresh-worktree comparison without setup hooks or installed dependencies; it
 does not re-evaluate eligibility. The CLI, TUI and Web use their shared Diagnostic
 rendering. Its recorded help offers `hashd show --details`, `hashd run` after
-correcting the causes, `hashd workstream add-commit` for repair, and `hashd close`.
+correcting the causes, `hashd story add-commit` for repair, and `hashd close`.
 Run and add-commit require no pending recovery question; help grants no action
 permission. The `run_anyway` row and revision-specific acceptance rule are
 unchanged, as are concrete regression repair, environment stops and evidenced
 judge-requested reruns.
 
-A surface that renders standing records offers one command list: the records' recorded `help` first, in record order, then the state-derived next steps (`hashd show` composes them in `server/internal/cli/show.go`). `hashd show` prints its records in three sections, numbered in one run across them: Errors, then Awaiting Human -- the rows the server served at the ordinary alert tier, such as a pending clarification or a review blocker -- then Notices; its record order is that order. Match on the command text alone, so a command in both keeps the record's description at the record's position. A recorded entry written `` <what it does>: `<command>` `` names its backticked command, and a recorded `--arc-version <version>` matches the derived command carrying the served version: the entry prints once, at the record's position, as that concrete command with the record's description (help never names a concrete version; only `hashd show`, which prints the proposal, does). Never reword an entry, reorder it within its record, or drop it for length -- the deadline raise commands, usage-limit reset guidance and agent re-authentication steps are what the operator types. Composition adds advice, never a verb; availability stays with the FSM `available_actions` guards. While the server reports work in flight on the record's entity, `hashd show`, Telegram `/show`, and the TUI and web story views do not offer its recorded help (the record still renders, names its whole-record read, and `--details` still expands it): a record is the last attempt's outcome, so its command is the operation already running. The TUI and web workstream views do not apply this to every record, and a PR-mode merge at `pr_open`/`pr_approved` is not reported as in flight -- docs/ARCHITECTURE.md states the boundary.
+A surface that renders standing records offers one command list: the records' recorded `help` first, in record order, then the state-derived next steps (`hashd show` composes them in `server/internal/cli/show.go`). `hashd show` prints its records in three sections, numbered in one run across them: Errors, then Awaiting Human -- the rows the server served at the ordinary alert tier, such as a pending clarification or a review blocker -- then Notices; its record order is that order. Match on the command text alone, so a command in both keeps the record's description at the record's position. A recorded entry written `` <what it does>: `<command>` `` names its backticked command, and a recorded `--arc-version <version>` matches the derived command carrying the served version: the entry prints once, at the record's position, as that concrete command with the record's description (help never names a concrete version; only `hashd show`, which prints the proposal, does). Never reword an entry, reorder it within its record, or drop it for length -- the deadline raise commands, usage-limit reset guidance and agent re-authentication steps are what the operator types. Composition adds advice, never a verb; availability stays with the FSM `available_actions` guards. While the server reports work in flight on the record's entity, `hashd show`, Telegram `/show`, and the TUI and web story views do not offer its recorded help (the record still renders, names its whole-record read, and `--details` still expands it): a record is the last attempt's outcome, so its command is the operation already running. A workstream's snapshot serves the answer as `steps_withheld`, which a pause sets too: while a pause holds the workstream the server refuses the records' commands, so `hashd show` and the web workstream view withhold them, and the snapshot's stop offers the pause's `hashd workstream unpause` instead (`withPauseStep`), as the story read's stop does when the workstream's rows lead it. The TUI and web workstream views do not apply this to every record, and a PR-mode merge at `pr_open`/`pr_approved` is not reported as in flight -- docs/ARCHITECTURE.md states the boundary.
 
 A compact record row says what it is not showing. A record that recorded no `help`, or whose `help` is withheld while its work is in flight, puts no command on that list (only the former says "No recorded next steps"), and a row prints the recorded reason while the record may also carry an explanation, facts, a cause and a captured output tail. In either case the row names the existing read of the record whole -- `hashd show` with `--details`, against the record's own entity -- never invented recovery advice and never a path on the server's filesystem a remote operator cannot open. Every surface qualifies it by the project -- `hashd show <id> --project <name> --details` -- because the operator running it may not be in a shell that resolves the same project. `hashd show` numbers its own rows, so its footer names `--details=N` at the record's own number; every other surface selects and withholds rows of its own, cannot compute that N, and emits bare `--details` (which expands every record). One statement, identical under Errors, Awaiting Human and Notices: it introduces no size or count cap, and it does not move a notice into the error count.
 
@@ -5274,11 +6995,14 @@ the latest entry, preserving the reader's position on refresh, and access to
 complete entry content. Surface read failures separately from an empty history;
 retain already displayed entries with a stale notice during failed refreshes.
 
-Both use the server's story transcript list/count and single-entry endpoints.
-`limit` selects the newest matching rows **in chronological order**, in SQL;
-zero remains an unbounded read. The web's initial window and Load older control
-are presentation choices, not a history retention limit. The TUI retains its
-full-history navigation. Both poll the count before reloading unchanged rows.
+Both use the server's story transcript and single-entry endpoints. On
+`GET /stories/{id}/transcripts`, any `limit`, `direction` or `cursor` parameter
+selects a page object; omitting all three retains the whole-history array.
+The initial page contains the newest matching rows in stored chronological
+order. Both viewers keep at most 200 rows, fetch older/newer pages at the edges,
+and poll the updates cursor for new entries rather than polling the count.
+The window bounds rendering, not history retention; evicted rows remain
+available through their page cursors.
 `GET /transcripts/{id}` resolves `blob_path` on the server, including paths into
 run directories, and returns complete content with the original metadata. A
 missing/unreadable blob is an explicit error, never a successful preview posing
@@ -5314,8 +7038,11 @@ paths preserve ordinary server access/dispatch guards and confirmation.
 
 `api/chat.go` computes `literal_prefix_bytes` while inserting a user turn,
 storing its readable prefix and authored text once in `content`.
-`resolveChatContent` preserves the prefix on both send and cold replay;
-native resume consumes that same composed result. Legacy rows default to zero.
+`resolveChatContent` preserves the prefix on send. Cold replay and the historical
+question quoted beside a stopped reply keep the complete authored text;
+`replayChatContent` checks only the suffix for unavailable references and adds
+the source Diagnostic as a notice in that turn, never a rebuild refusal. New
+messages still refuse unresolved references. Legacy rows default to zero.
 The other production content writer is the assistant-result insert and leaves
 zero. There are no production content-update paths; a future rewrite must
 preserve or recompute the boundary, never leave it pointing into changed text.
@@ -5383,7 +7110,7 @@ purpose, each with its reason.
 
 | Action | Surface | Endpoint | Availability |
 |---|---|---|---|
-| choose a base for a new workstream | `hashd run STORY --base BRANCH` | `POST /stories/{id}/run` (`base_branch`) | `start_impl`; accepted stories only |
+| choose a base for a new workstream | `hashd run STORY --base BRANCH` | `POST /stories/{id}/run` (`base_branch`) | `start_impl`; approved stories only |
 
 Workstream and snapshot reads carry the fixed `base_branch`. Provisioning owns Git
 validation and remote existence checks; the synchronous run endpoint does
@@ -5448,6 +7175,76 @@ artifacts must survive that host.
 | `workstreams.directives` | `hashd.db` | Workstream-specific directives (markdown) |
 | `logs/` | `workstreams/<id>/` | Agent stdout/stderr logs |
 | `hashd.db` | `projects/<project>/` | All workstream metadata, stories, events, runs, reviews, etc. |
+
+### Relational lifecycle facts
+
+`stories.started_at_ns` is the first planning-slot acquisition. Its nullable
+`ended_at_ns` records the current terminal disposition; reopening clears the
+end and retains the first start. The acquisition/status CAS owns these writes.
+Story detail and list responses expose these columns as nullable `started_at`
+and `ended_at`, as do the full story records in dump and lineage reads. They
+use the existing UTC story timestamp format; missing clocks stay null without
+falling back to record creation or JSON. A null end does not establish liveness.
+Story detail and list reads also expose `terminal` from `fsm.IsTerminalStoryStatus`,
+so clients distinguish unfinished stories from terminal stories with unrecorded ends
+without maintaining their own state set.
+
+`microcommits` records each planned or FIX item as a relational identity: the
+workstream, authored label and revision. The plan writer synchronizes membership
+and completion in its existing transaction. Ordinary edits retain identity;
+explicit replan replacement retires the discarded tail and gives reused labels
+new revisions. Accepted selection records first start, and completion/skip
+records end. A selection removed or completed before consumption is retained
+as evidence-only; it starts no microcommit. Retired records survive workstream cleanup.
+
+`stage_executions` records occupancy at existing owned boundaries. Story stages
+use their content owner; local runner stamps use their claim; assigned whole
+stages use their unique command cursor. Reservation starts whole-stage occupancy,
+consumption or final cursor closure ends it, and accepted inner substage writes
+carry that whole stage's row as `parent_id`. Local workflow occupancy and an
+assigned stage can overlap, as can a parent and child: never sum overlapping
+spans. Repeated delivery keeps the original occurrence. Stamps and their records
+commit together; keyed runner-stamp database faults reach the existing stage
+failure reporting instead of silently losing the record or starting unrecorded
+work. The `runner-substage-write-failure` workflow version preserves recorded
+histories' ignored-error continuation. Activity retry policies are unchanged.
+
+Actual runner execution uses separate `process_started_at_ns` and
+`process_ended_at_ns` columns, from the accepted result. A joined late result
+may supply process evidence after occupancy closed; it cannot reopen occupancy.
+`agent_calls.stage_execution_id` links calls to the exact server-bound assigned
+stage or story content owner. Inner-agent attribution does not guess a substage
+by name or time, and agent totals are not duplicated on stage rows.
+
+All new timestamps are nullable INTEGER epoch nanoseconds. NULL means unknown,
+not zero or upgrade time; outcome distinguishes ended work with an unknown time
+from an unfinished record. The forward migration fills current plan membership
+with unknown times, current story ends from directly recorded facts, and whole
+stage boundaries from exact cursor-linked reservation/consumption evidence. It
+does not attach old labels to current plan revisions or infer process times from
+occupancy. Migration 225 materializes supported historical substage intervals
+once, with source event IDs, only for workstreams without native substage rows.
+Native rows take precedence for the entire workstream: old event/native clocks
+were captured separately and cannot prove a safe cutover. Historical coverage
+is best effort; a native-era story's chart may begin after the story itself.
+Unclosed historical spans are not backfilled into the live open-stage slot.
+Original events remain intact. Missing story attribution or endpoints remain NULL. `ended_by_ns`
+is a recorded upper bound for an unknown end, never an exact ending timestamp;
+`ended_by_event_id` identifies the event proving that bound. Whole-stage bounds
+attach only to the exact cursor-backed reservation, without replacing known ends.
+
+`GET /reports/story-stages?project=...&story=...` resolves the story reference
+once and reads narrow `stage_executions` columns by `(project, story_number)`.
+Its response names the canonical story in `story`. It replaces the workstream
+stages route in lockstep with clients. `GET /reports/active-stories` reads the same
+occupancy kinds with indexed window-overlap queries, groups by recorded story
+number, and unions overlapping spans per story before counting activity. Neither
+read pairs events or maps historical records through current workstreams.
+Planning/editing occurrences are not added to the existing execution chart.
+The runtime count remains authoritative for `now`; an unknown end is not proof
+of a running story. A stopped span with `over_by: null` retains its start but no
+invented duration. Unknown starts contribute coverage without a positioned bar.
+The mixed-cycle `runs` record remains a separate follow-up.
 
 ---
 
@@ -5526,6 +7323,170 @@ artifact-lock holders. That flock separately fences physical REQS/Git writes,
 including surviving Git children through an inherited descriptor; preserve that
 fence.
 
+New-rule `local` and `pr_approved` merge attempts enqueue once per admission in
+`mergequeue:{project}`, deduplicated by workflow ID, run ID and admission number
+(`MergeChuteRequest.Admission`), in the order that workflow accepts their enqueue
+signals, per project; an execution re-admitted after a hold enqueues again under
+its next admission, which is not a duplicate. Their event-driven
+entry wait has no elapsed limit and retains the `acquire_lock` stamp. Runner
+admission is awaited at the grant. A busy singleton start reports the occupant
+and keeps its queue position until re-granted, without a stop or redispatch.
+The `merge-chute-fifo` version marker is selected at attempt entry, before
+activities, and carried through continuations. It retains the bounded
+`merge_lock_wait` race and `merge_busy` handling for attempts started before the
+upgrade. A new-rule `MergeWorkflow` archive (`runMergeArchiveLocked`, from the
+already-merged and resumed recoveries, `runExternalPRMerge`, `runPRApproved`
+and `runArchive`) enters the same queue under the execution's next admission
+(`withMergeChuteAdmissions`): `AcquireMergeLock` routes the `archive` kind to
+`acquireMergeChute` when `MergeInput.ArchiveChuteFIFO` is set, first giving
+the runner slot back (`releaseRunnerSlotBeforeRequeue`) and asking for it at
+the grant (`askSlotAtNextGrant`), since work waiting in line for the lock must
+leave its runner's capacity to other work. The `merge-archive-chute-fifo` marker, asked at attempt entry only when FIFO is
+chosen and carried through continuations as `ArchiveChuteFIFO`, keeps earlier
+attempts' archives on the bounded singleton race (`acquireSingletonChild`)
+with their recorded deadlines and `merge_busy` stop. Beside it, and only when
+`ArchiveChuteFIFO` is chosen, `MergeWorkflow`'s first task sets
+`MergeInput.ArchivePrepareFirst` from the `merge-archive-prepare-first` version
+marker (carried across continuations); `WorkstreamRunWorkflow` pins
+`WorkstreamRunInput.ArchivePrepareFirst` with `pinRunChange`
+(`run-archive-prepare-first`) and sets it on `archiveIn` with
+`ArchiveChuteFIFO` for its inline external-merge archive (`runAllCompleteLeg`,
+`runner_outer.go`). Under `ArchivePrepareFirst`, a pushing direct merge settles its checkpointed
+code publication (`PublishLocalMerge`) inside `merge_local` before releasing
+`mergelock:{project}` (stopping immediately as an unfinished archive via
+`archiveSectionError` if publication fails, without running `prepare`), so no
+intervening direct merge can overtake an unpublished landing. Then
+`runMergeArchiveLocked`
+stamps `finalize`, writes the already-merged landed row (`recordMergeLanded`)
+once before the first preparation (never inside the lock body), and runs the
+`merge_archive` whole-stage activity with `Phase: ArchivePhasePrepare` outside
+`mergelock:{project}` and outside the `reqs-lock:{project}` and
+`spec-lock:{project}` artifact locks before enqueueing in
+`mergequeue:{project}` (holding the runner slot during preparation and
+returning it at enqueue as today). Inside `ArchivePhasePrepare`, if any documentation destination has not
+completed M032 (checked from M032's ledger via `m032.DocumentationComplete`),
+preparation skips without writing SPEC so its locked pass runs M032 and the
+whole pass as on the base branch. Otherwise, after documentation worktree setup,
+the runner releases the shared clone locks (`Held.ReleaseRepository`) on both
+the primary repository and any acquired requirements/document-store repository
+before launching `pm_docs` -- `ReleaseRepository` keeps the workspace lock
+descriptors in `pm_docs`'s inherited process scope and drops only the shared
+repository descriptors -- so concurrent locked merges or archives sharing either
+clone never stall behind the agent. A preparation error takes the same exits as
+a lock error (`archiveSectionError`, then `cancelArrivedAfterLanding` /
+`cancelledAfterLanding`). Once granted admission, `MergeLockWorkflow`'s
+`archive` case acquires `reqs-lock:{project}` and `spec-lock:{project}` and
+runs the whole pass (`ArchivePhaseWhole`): it reuses the checkpointed SPEC
+preparation when valid (or generates SPEC itself when none is prepared), burns
+REQS, commits each destination, mechanically replays onto a moved destination
+when it applies cleanly, and on a destination conflict discards and regenerates
+inside the lock (at most once per destination, stopping deterministically with
+`documentationConflictedTwice` on a second conflict), then completes locally
+and delivers (recording `completed` only after delivery). A pause at
+`acquireMergeChute` leaves the queue with no position, preserves the
+checkpointed preparation (`SpecPrepared`), and re-enqueues at the tail once
+released. Executions without `ArchivePrepareFirst` run only the whole archive
+pass (`ArchivePhaseWhole`) inside the locks; both rules contend on the same
+`mergelock:{project}` singleton so old and new lock holders never overlap. The run workflow's inline
+external-merge archive (`runAllCompleteLeg`, `runner_outer.go`) takes the same
+route without `MergeWorkflow`'s entry, so it supplies that entry's setup
+itself: the run's runner admission (`withRunnerAdmission` at the run's own
+boundary) for the slot handoff, its own admission count
+(`withMergeChuteAdmissions`), the `MergeChuteFIFOMemo` memo, and
+`ArchiveChuteFIFO` (plus `ArchivePrepareFirst` when pinned) on the archive's
+input. The run pins `ArchiveChuteFIFO` at its
+start (`pinRunChange`, `run-archive-chute-fifo`) and carries it through
+continue-as-new as `WorkstreamRunInput.ArchiveChuteFIFO`; a run started before
+it keeps the bounded race. A bounded archive's deadline is
+`historicalArchiveWait.bound`: the value the execution's recorded timer
+snapshot (`temporal/timers.go`) carries for its route, and for an execution
+that recorded no snapshot the value it shipped with
+(`retiredArchiveWaitDefaults`). The archive-only and forge-merge settings are
+retired from `defaults.yaml`, so nothing current reads them. Before preparation
+and before a queued archive enters the chute, `runMergeArchiveLocked` stamps
+its `finalize` substage: a merged workstream with no merging stamp and no
+archive failure reads `done`, so without it preparation and the wait would read
+finished. The stamp makes
+`fsm.ArchiveUnfinished` hold, so the owner's liveness decides the status,
+until the archive's completion retires it or the owner's exit clears it
+(`MergeClearSubstage`, or the run's guarded `MergeClearRunSubstage`). Exclusion with
+all these callers remains solely the `mergelock:{project}` singleton ID.
+Housekeeping exempts live FIFO waits, identified by the owning execution's
+memo, from elapsed-age reaping; legacy waits retain their age bound. The
+`acquire_lock` failsafe asks the merge workflow (`mergeFIFOWaitAlive`). A
+queued archive waits on a `merged` workstream, which that failsafe does not
+sweep, so the engine janitor's terminal grace is the age bound it would meet:
+its OPEN pass leaves a merge or run execution of a merged workstream open
+while that execution carries the memo or cannot be read, and cancels one
+without it as before. The archive's section keeps its own body bound, and
+`SettleUnfinishedArchive` keeps its live-owner exclusion
+(`fsm.ArchiveActivity`: the merge workflow, else the run workflow). The durable
+queue resumes after restart and does not independently gate shutdown; its
+counted merges still have to reach their stopping points.
+A plain or forced cancel through `POST /flow-runs/{id}/cancel` while queued
+withdraws on a disconnected context, including when the grant races the cancel,
+and starts no section. Once the child starts, its body timeout and existing
+release recording and cancellation contracts apply.
+A queued attempt also leaves the queue for a hold without closing
+(`acquireMergeChute`). `AskWorkstreamToCheckHolds` signals the exact open
+`merge:{project}:{ws}` run as it signals the run workflow. The attempt reads
+that signal, and its grant, as a prompt to look. `HoldBoundaryInspect`
+(`api.Server.InspectHoldBoundary`) reads `coveringHolds` without asking for a
+runner slot or writing an acknowledgement. A grant whose runner admission is
+pending looks through that admission's own `CheckHoldBoundary` instead,
+carrying `MergeLockHolder` so runner capacity is waived and the lock holder is
+admitted at once. The two routes handle a non-capacity hold at the grant
+differently: a PR merge or an archive sends `Withdrawable`, so under any hold
+`CheckHoldBoundary` clears the run's acknowledgement, acknowledges nothing and
+answers `Withdraw`; the attempt then withdraws and leaves the chute,
+acknowledging through `CheckHoldBoundary` at `MergeChuteQueuedBoundary` (which
+keeps the acknowledgement, the paused slot release and the confirming reads). A
+direct local merge, and a PR merge started before `merge-chute-hold-v1`, checks
+through `awaitHoldBoundary` with `MergeLockHolder` (not `Withdrawable`): under
+a hold it acknowledges at its boundary (preserving `merge_lock_holder` on the
+acknowledgement) and keeps its grant, and when the hold ends it is awakened
+directly and admitted at once, whatever its runner's load.
+Before it acknowledges, a PR attempt returns the workstream to its admission
+origin (`MergeTransition` by `MergeAbortTarget`) and clears its merging
+substage (`MergeClearSubstage`); an archive does neither, whatever admission
+origin it carries, and holds in its merged state. Every attempt that leaves the queue gives its
+runner slot back before it acknowledges (`releaseRunnerSlotBeforeRequeue`,
+retried until it lands), since a pause released before the boundary reads it
+takes nothing back there; released through
+`releaseWorkstreamAcks`, it re-admits it (`MergeReadmit`: `start_merge` with
+merge liveness answering none, the open merge being this execution) and
+enqueues at the tail (an archive skips the re-admission). The `pr_approved`
+and `archive` lock kinds leave the queue; a local attempt waits for its grant. `MergeChuteRequest.Admission` counts its admissions, so a late grant to a
+withdrawn one is not taken. The unpause dispatches nothing, and
+`execution_holds` carries no merge identity. The `merge-chute-hold-v1` marker,
+selected as the attempt enters the chute, keeps earlier queued attempts on the
+grant-or-cancel wait.
+A `pr_approved` section also yields to a pause (`mergeflow.yieldToPause`).
+`RunMergeApprovedLocked` reads `MergeCalls.WorkstreamPaused` before each
+preparation, after it before verification, after verification before any
+in-hold documentation rewrite and before the push,
+after the push before the forge reads and the mergeability wait, after each
+status read and each thread read, failed or not, before its stops, at each boundary of that wait, and immediately before the forge merge request, never after it starts. When a preparation's rebase inside the hold drops a conflicting `merge_doc_update` tip (`PreValidateResult.droppedDocs`, unexported and off the `RunnerPostRebaseFailure` wire), once that preparation's existing verification passes the hold records `merge_gate_changes` review provenance across the dropped tip and rewrites the documentation on the rebased code through `MergeCalls.LaneDocs` (bound by `merge_approved_stage_body.go` via `port.laneDocsSource`, calling `mergeflow.WriteLaneDocs`), recording `merge_gate_changes` across the replacement commit as well, before publishing and asking the forge to merge; a nil `LaneDocs` writes nothing. The rewrite keeps the merge lock without re-entering the queue, adds no extra test or proof beyond what the hold's rebase already required, and displays only the existing `pre_merge_tests` substage and the `pm_docs` agent invocation (`AgentStageAttempts["merge_approved"]` includes `pm_docs`, `assignedFixupOperation` allows `OperationMergeDocUpdate` for `merge_approved`, and in `spec_mode repo` `merge_gate` and `pre_merge_tests` each add positive `stages.pm_docs.timeout` to their existing limit across `config.TimersFromRaw`, housekeeping, and deadline descriptions), never a waiting-for-approval state. The runner binds the reader to the
+`workstream_pause` stage context, which `humanEditContext` authorizes for the
+assigned `merge_approved` stage for that purpose only. A pause found takes
+`mergeflow.MergeAbortTarget(origin)` through `TransitionWithEvent`; unlike
+`transitionPRMergeReturned` it does not reconcile the approval. The section
+returns `ApprovedMergeResult.Paused`, projected as the stage outcome `paused`
+and recorded on the attempt as `blocked`. A failed read or transition is the
+section's error. The lock child returns normally and closes. `runPRApproved`
+reads `Paused` only after `AcquireMergeLock`'s await has observed that close
+and recorded the release. It then clears the merging substage
+(`clearHeldMergeSubstage`), which logs a failed clear and keeps the yield;
+`MergeReadmit` clears it again before re-admitting. It gives its runner slot
+back as a queued attempt does (`releaseRunnerSlotBeforeRequeue`), so a merge
+that rejoins the chute holds no slot, and acknowledges through
+`awaitHoldBoundary` at `MergeChuteQueuedBoundary` (site
+`merge-chute-yielded:N`), asking for its slot again at its next grant.
+It runs no `MergeFinishAdmission` and records no stop. Released, it calls
+`AcquireMergeLock` again; `withMergeChuteAdmissions` carries the execution's
+admission count across passes, so the queue, which may still record the
+earlier admission as the closed lock run's owner, takes the new enqueue.
+
 `mergelock:{project}` is acquired with `WaitForCancellation`. On a plain cancel
 of the merge, the lock is released only when the `local` or `pr_approved` locked
 activity ends -- with the cancelled outcome, a failure, success or its
@@ -5541,6 +7502,21 @@ by that execution, and the child stops waiting and closes.
 Prefer FSM transitions over workflow singletons for per-workstream
 serialization: FSM is synchronous, per-workstream and works across modalities.
 Singletons are for cross-workstream or cross-project exclusivity.
+
+Runner admission is the cross-project exclusion that is not a singleton: a
+runner's slots are shared by every project placed on it, so they live on the
+system database (`server/internal/runnerslots`), and every write to them -- an
+admission at a run's boundary, a dispatch pass's `ClaimNext`, a release, and a
+system config write that can change a capacity (`ChangeCapacity`) -- runs in
+one `BEGIN IMMEDIATE` transaction there. Two admissions cannot take one free
+slot, and none decides on a capacity already replaced. The transaction reads
+only project databases, through the store's workstream reader; what decides
+eligibility from the hold store is read before it (`slotEligibility`). The
+boundary check that asks takes no admission lock, as for every hold. A
+release that may race a later execution of the workstream -- an exit, a
+dispatch pass or housekeeping that found a run closed -- names the
+execution it is for, and the transaction compares it with the one that
+asked last, so it never frees a slot that execution took over.
 
 ## Workstream execution admission
 
@@ -5653,13 +7629,15 @@ see. They report nothing while they run.
 
 ### Dispatched operations and their visibility
 
-Thirty-five `Dispatch*` starters exist, across thirteen files -- `temporal/dispatch.go`,
+Forty-one `Dispatch*` starters exist, across sixteen files -- `temporal/dispatch.go`,
 `dispatch_adjudicate.go`, `dispatch_acamend.go`, `dispatch_recovery_answer.go`,
 `dispatch_human_commit.go`, `dispatch_human_edit.go`, `dispatch_forge_sign_in.go`,
 `dispatch_reset_worktree.go`, `dispatch_story_notes.go`, `dispatch_connector_events.go`,
-`dispatch_tracker_link.go`, `dispatch_automation.go` and `temporal.go`. Enumerate them
-with `grep -rn "^func Dispatch" server/internal/temporal/`; an inventory taken from
-`dispatch.go` alone misses eighteen, including both adjudicator paths.
+`dispatch_stored_reference_check.go`, `dispatch_tracker_link.go`,
+`dispatch_criterion_return.go`, `dispatch_automation.go`,
+`dispatch_connector_watch_scan.go` and `temporal.go`. Enumerate them with
+`grep -rn "^func Dispatch" server/internal/temporal/`; an inventory taken from
+`dispatch.go` alone misses twenty-two, including both adjudicator paths.
 
 A dispatched operation is fire-and-forget on the wire but must never be
 fire-and-forget to the operator (CLAUDE.md, **Dispatched Operations Must Be
@@ -5678,14 +7656,14 @@ fail reads. See [operator action boundaries](../WF.md#workstream-state-model).
 
 | Operation | Entity | Reports in-flight |
 |---|---|---|
-| `DispatchWorkstreamRun` | workstream | yes -- `runner_run_id` |
-| `DispatchMerge` | workstream | yes -- transitional state; a merge that dies there is closed with its lock and returned to its admitted-from state by the housekeeping sweep or `hashd merge --abort` (`POST /workstreams/{id}/merge {abort:true}`); until then `GET /inflight` lists it under `human_stopped` rather than `items`, so a restart or stop does not wait on it (WF.md, **Restart in-flight inventory**) |
-| `DispatchResolve` | workstream | yes -- transitional state |
+| `DispatchWorkstreamRun` | workstream | yes -- `runner_run_id`, landed by the run's begin before its first boundary, so a run waiting there for a slot on its runner reads `waiting` with the runner's load (`runnerCapacityHold`) and `capacity_wait` naming the runner, and its entry, in admission order, is in that runner's `queue` (`GET /runners/{id}`); Go on it answers that it is queued and dispatches nothing; a run that finds its PR merged on the forge archives inline, under its `finalize` stamp, so its `merged` workstream reads `running` while the run is open (`fsm.ArchiveActivity`): when its start pinned `run-archive-prepare-first` (`ArchivePrepareFirst`) beside `run-archive-chute-fifo` (`ArchiveChuteFIFO`), it prepares SPEC outside the merge and artifact locks before joining `mergequeue:{project}` without an elapsed limit, and runs the whole archive pass (`ArchivePhaseWhole`) inside the locks (reusing the checkpointed preparation when valid, replaying cleanly onto a moved destination, and regenerating inside the lock on a destination conflict, at most once per destination, stopping deterministically with `documentationConflictedTwice` on a second conflict); unpinned runs run only the whole archive pass inside the locks |
+| `DispatchMerge` | workstream | yes -- transitional state; new-rule local/pr_approved attempts report `acquire_lock` while waiting indefinitely in per-project server accept FIFO order; queued cancellation withdraws, and the per-attempt upgrade marker keeps legacy attempts on their bounded wait; a new-rule archive stamps `finalize` on its `merged` workstream (reading `running` while its owner, `fsm.ArchiveActivity`, is open), prepares SPEC outside `mergelock:{project}` and the REQS/SPEC artifact locks before admission when pinned by `merge-archive-prepare-first` (`ArchivePrepareFirst`, selected only with `ArchiveChuteFIFO`), waits in `mergequeue:{project}` with no elapsed limit, and runs the whole archive pass (`ArchivePhaseWhole`) inside the locks (reusing the checkpointed preparation when valid, replaying cleanly onto a moved destination, and regenerating inside the lock on a destination conflict, at most once per destination, stopping deterministically with `documentationConflictedTwice` on a second conflict so `hashd merge <ws>` can re-run the archive; unpinned executions run only the whole archive pass inside the locks); the workstream reads `running` at `runner_stage` `pr_merge` while the locked PR merge waits out uncomputed mergeability, the wait narrated on `stage_changed`, and a wait that times out leaves a standing blocked `operation_result` notice; a merge that dies there is closed with its lock and returned to its admitted-from state by the housekeeping sweep or `hashd merge --abort` (`POST /workstreams/{id}/merge {abort:true}`); until then `GET /inflight` lists it under `human_stopped` rather than `items`, so a restart or stop does not wait on it (WF.md, **Restart in-flight inventory**) |
+| `DispatchResolve` | workstream | yes -- transitional state; a resolve whose push the stale-base guard refused only because the base moved records an `ai_resolve` `continuing` notice naming the kept revision and the attempt, and continues, up to 10 times in a row: a runner-origin resolve returns to `implementing` and starts the ordinary run through `ResumeWorkstreamRun` with exact successor confirmation; any other returns to `pr_open` or `ready_to_merge` and starts a story rebase (`DispatchStoryRebase`) through the `hashd rebase <story> -y` admission. The 11th refusal records the stop, naming the kept revision and `hashd run` or `hashd rebase <story> -y`, as the standing failure and starts nothing; a continuation not confirmed started replaces the notice with a standing failure naming `hashd show` and that command. A completed resolve's ordinary run continuation (`ResumeRun`, or a scheduled FIX) that is not confirmed started -- a cancel after the resolve completed, a hold's refusal under a history from before the continuation boundary (`ContinuationHeldDiagnostic`; a current execution holds at `resolve-continuation-<n>` and dispatches after its release), or any other dispatch failure, which leaves the start unconfirmed -- is recorded by `RecordResolveContinuationStop` as a `resolve_continuation` standing failure carrying the dispatch's Diagnostic, never a run outcome with no run; it retires on the workstream's next `run_started` (`workflows.ResolveContinuationRunKey`) |
 | `DispatchAddCommit` | workstream | yes -- transitional state |
 | `DispatchPRCreate` | workstream | **no** |
 | `DispatchPRPush` | workstream | **no** |
-| `DispatchStoryRebase` | workstream | yes -- `runtime_status` probe of `rebase:{project}:{ws}` beside the publish probe, under its precedence; every availability row is withheld and admission refuses every verb on the workstream while it runs (`refuseWhileWorktreeOperationRuns`); its phases ride `stage_changed`; a failure is a durable `story_rebase` operation result |
-| `DispatchPRWatch` | workstream | yes -- a standing observer rather than work in flight: each poll records `last_poll_at` and `next_poll_at` in the PR's `pr_watch` row, a poll that fails records its Diagnostic and failure count there, and its standing condition is a `pr_watch` operation result. Started by PR create, PR push, a merge dispatch and the housekeeping backstop. A watch stopped by `pr.watch.max_age` leaves a `watch stopped: PR idle N days` notice, and the backstop does not restart it; the same verbs start a fresh one, so no verb is re-offered. Its one dispatch is the archive (`DispatchMerge` with `forge_merge_id`) of a PR a person merged on the forge, once per `pr_merged_on_forge` record. Watch and merge-owned observations share one atomic lookup/create per workstream and `PRWatchKey` (`recordForgeMergeIn`); existing facts and identity win unchanged across concurrent observations and database reopen. The watch yields while merging; the owned runner-stage write keeps its command generation and assignment fences, and publishes after commit |
+| `DispatchStoryRebase` | workstream | yes -- `runtime_status` probe of `rebase:{project}:{ws}` beside the publish probe, under its precedence; every availability row is withheld and admission refuses every verb on the workstream while it runs (`refuseWhileWorktreeOperationRuns`); its phases ride `stage_changed`; waiting at its first boundary for a slot on its runner, it reads `waiting` with the runner's load (`runnerCapacityHold`) and `capacity_wait` naming the runner, and its entry is in that runner's `queue`; a failure is a durable `story_rebase` operation result. Started by `hashd rebase <story> -y`, and by hashd itself, through the same admission (`Server.StartStoryRebase`), as the continuation of an AI resolve whose push the base moved under; that rebase (`AutoResolveConflict`) takes each conflict to the conflict agent at once instead of waiting for `rebase_resolve` |
+| `DispatchPRWatch` | workstream | yes -- a standing observer rather than work in flight: each poll records `last_poll_at` and `next_poll_at` in the PR's `pr_watch` row, a poll that fails records its Diagnostic and failure count there, and its standing condition is a `pr_watch` operation result. Started by PR create, PR push, a merge dispatch and the housekeeping backstop. A watch stopped by `pr.watch.max_age` leaves a `watch stopped: PR idle N days` notice, and the backstop does not restart an ordinary idle stop; the same verbs start a fresh one, so no verb is re-offered. A renewable credential interruption persists on `pr_watch.credential_recovery_json` through that stop. The backstop checks the current owner and binding through `ssocred.ProjectedState`, the same credential key and current PR, lifecycle and watch enablement. Explicit reassignment and replacement credentials use the current owner's normal forge resolver; another owner or an unbound account cannot release the wait, and an unusable binding permits no fallback. Recovery uses `DispatchPRWatch` and `PRWatchPollNowSignal`, with normal holds and a fresh generation and snapshot after an idle stop. It retains recovery through dispatch/signal failures and a closing singleton execution until a successful poll establishes observation; PR verbs supersede it and lifecycle retirement clears it. Account-alert delivery is independent, and no merge or publication verb is re-offered. Its one dispatch is the archive (`DispatchMerge` with `forge_merge_id`) of a PR a person merged on the forge, once per `pr_merged_on_forge` record. Watch and merge-owned observations share one atomic lookup/create per workstream and `PRWatchKey` (`recordForgeMergeIn`); existing facts and identity win unchanged across concurrent observations and database reopen. The watch yields while merging; the owned runner-stage write keeps its command generation and assignment fences, and publishes after commit |
 | `DispatchEdit` | story | yes -- workflow sets `editing`; an agent edit at Arc review instead reads `arc_proposal` at phase `editing` from the route's entry, published once the start is answered, with `arc_proposal_runtime` `running` while the edit run may be open under either form of its ID and `interrupted` once Temporal confirms it closed. Starts `edit:{project}:{number}`; refused while a legacy `edit:{project}:{story}` run is open |
 | `DispatchPlanning` | story | yes -- workflow-side. Starts `plan:{project}:{number}`, recorded in `stories.data.flow_run_id`; refused while a legacy `plan:{project}:{story}` run is open |
 | `DispatchPlanSplit` | story | **no** -- starts `plansplit:{project}:{number}`, refused while a legacy `plansplit:{project}:{story}` run is open, and the story's split is withheld while either form is open (`runningSplitRefusal`); queues for the project's planning slot (the `pm` section, kind `plan_split`); a split the autonomous size take requested (`AcceptProposal`) also accepts its breakdown when it lands |
@@ -5700,13 +7678,62 @@ fail reads. See [operator action boundaries](../WF.md#workstream-state-model).
 | `DispatchDetect` | project | **no** |
 | `DispatchPMDescribe` | project | partial |
 | `DispatchPMDescribeProject` | project | **no** |
+| `DispatchDirectivesEdit` | project | in-flight reported by the `directives_edit_started`/`directives_edit_completed` pair (`POST /directives/{level}/ai-edit`); the singleton is per level -- `directivesedit:{project}:{level}`, `directivesedit:{project}:workstream:{ws}` -- and the proposal persists nothing until the operator confirms the save |
 | `DispatchHumanCommit` | workstream | partial -- the commit action reads "already running" from a `humancommit:` probe; the workstream reads reserved |
 | `DispatchStoryNotes` | story | **no** -- the story's stage does not move; each delivery writes a `story_note` timeline row when it starts and when it lands, and unconfirmed notes an `operation_result` failure |
 | `DispatchConnectorEvents` | story | **no** -- the story's stage does not move; one `connectorevent:{project}:{number}:{kind}:{occurrence}` run per committed milestone delivers it once to each attached connector that subscribed to its type (`publishConnectorEvents`, after the milestone's notes), and every delivery that did not succeed is recorded as an `operation_result` failure on the story (`RecordConnectorEventFailures`) |
+| `DispatchStoredReferenceCheck` | workstream | **no**, deliberately -- the check is advisory and the run it belongs to already reads `running`, so it sets no `runtime_status` and withholds no verb. One `refcheck:{project}:{run_id}` run per run, started beside `RunnerBeginRun` without holding it up, and reading nothing for a run whose check is already recorded (below); its finished result is the lane's `stored_references_reported` notice, and a check that fails, is cancelled or cannot be started records every reference it would have checked as could not be checked, with the reason |
 | `DispatchTrackerLink` | story | yes -- a run with no ref first finds the tracker story tagged for the story, else creates it (`FindOrCreateTrackerStory`, the owner's account, no fallback); the story's `link_tracker_story` row and its `connector_links.trackers` link and create state are withheld while `tracker-link:{project}:{number}` is open (`runningTrackerLinkRefusal`, runningSplitRefusal's bounded probe, run last and only when link would otherwise be offered); the outcome is a `tracker_link` operation_result on the story, a failure standing as a current error, and either one emits `story_changed` |
+| `DispatchCriterionReturn` | story | yes -- a draft's `descope-ac` marks the story with the preparation (`criterion_return: {preparing: ...}`, its execution ID) before it starts `criterionreturn:{project}:{number}`, which queues in the `pm` section kind `criterion_return`; the story read serves the mark as `criterion_return_preparing`, `update_criteria` is withheld, every criteria change refused and every forward move (approval included, through `storyContentQuestionsRefusal`) refused while it stands, and a repeated descope of the same criterion answers with the open workflow instead of starting a second agent. A start that fails leaves the mark; once no run is open past the start window (`arcDecisionStartWindow`) the detail read serves `runtime: interrupted`, the `update_criteria` row is offered with a note, and descoping the same criterion or another starts afresh with a new execution (`startCriterionReturn`), reading REQS as it stands so prose an interrupted attempt already returned is not returned twice (`criterionReturnInterrupted`). The run's memo names its execution (`temporal.CriterionReturnExecutionMemo`): a start that collides with an open run answers as started only when that run is the same preparation, is refused with the mark's start window released only when the run is confirmed to be another preparation's (`criterionReturnCollided`), and a run that cannot be read answers 503 with the mark unchanged. The planner's agent call reports its own `stage_changed` (`pm_edit`). The outcome is a `criterion_return` operation_result on the story naming its execution, recorded once, in the same write as a failed preparation's mark removal -- a failure standing as a current error -- and with `story_changed`; the finishing write (`Server.PrepareCriterionReturn`) writes any returned prose directly to REQS through `reqs.ReconcileSplitScope`, descopes the criterion, records `ReturnRecorded` or `ReturnNoText` and removes the mark, and a leg whose result was lost after that write is recorded as its success. `hashd story descope-ac` waits for the outcome, reading the story on each matching `operation_result` frame and on its poll interval, and reports a failure from the story's event history, the `criterion_return` operation_result naming the execution its dispatch returned (`flow_execution_id`); the leg rechecks `canChange` as the requester before the planner runs. |
+| `DispatchConnectorWatchScan` | tracker watch | yes -- `scan_running` on `GET /connectors/{name}/watch`, read from the open `connectorwatchscan:{project}:{connector}:{owner id, 0 for unowned}` workflow under the bounded Temporal probe; a probe that cannot answer fails that read with its Diagnostic rather than reporting no scan. Started by each housekeeping sweep for every watch that is on (`EnsureConnectorWatchScans`); a scan already running holds the ID, so the sweep's start is refused and not counted as an error. What the scan created is the watch's `last_scan`. A failed or refused scan reports a durable `operation_result` that alerts the watch's owner; the next scan that ends without failure clears it |
 | `DispatchForgeSignIn` | credential key | yes -- the attempt's phase served by `GET /forge-sign-ins/{host}` (`tenant_lookup`, `trying_held_account`, `awaiting_browser`, `awaiting_device_code`); every failure is recorded on the key with its Diagnostic. Its ID, `forgesignin:{owner id, 0 for unowned}:{credential key}`, starts with `TERMINATE_EXISTING`, since a new login replaces the key's attempt |
 | `DispatchForgeSignInRedeem` | credential key | yes -- the attempt reads `redeeming` from the staged completion until it is `bound` or `failed`. Its ID, `forgesigninredeem:{owner id, 0 for unowned}:{credential key}:{attempt id}`, is the attempt's own, so a completion staged while the start run that published `awaiting_browser` is still closing does not collide with it; a second redemption of the attempt is refused, running or closed |
 | `DispatchAutomation` | workstream | yes -- `runtime_status` probe of `automation:{project}:{workstream}:{action}` (`automationAliveForWorkstream`) reads `running` while the run is open, at every stage including `merged` and `closed` (`fsm.LiveAutomationRuntimeStatus`, applied to the reported status only), and each phase (resolving the owner's credential, reading the PR, reading its checks, re-running each check) rides `stage_changed` with state `progress` (`eventbus.StageProgress`), which no interrupted runner's identity anchors on; the standing errors the automation acts on stay, because an automation never retires them. `requeue_build` runs as a read-only plan (retried) and a single-shot re-run budgeted for exactly the checks the plan found, which reads the PR and its checks again and re-runs a planned check only while it still stands failed under the planned run identity and every `when_ready` gate still holds; at the condition's head only, with the credential of the user the run was dispatched to act as and only while that user owns the workstream (`automation.owner_changed` otherwise). Every outcome, an action activity that ended in an error included (`automation.no_outcome`), is an `automation_run` record linked to the workstream, written by a retried activity once per workflow run (the row's `run_id`); before the re-run the same activity stores the run's claim, an `automation.no_outcome` record marked `stage = 'claim'` that consumes the unit; it is written without its project and item columns, so it is never published and no timeline, log or feed serves a run still acting as failed, and only the unit's history and the waits it retires match it on its data. The run's record replaces it in place, taking those columns and the next event id so readers that follow events by id still see it (`CompleteAutomationRunClaim`), so a record that cannot be stored leaves the unit consumed; each housekeeping sweep of the project serves a claim whose own run is no longer open as the run's record through the same in-place replacement (`reconcileAutomationClaims`, from the stored claims, whatever the automation's config, the item's head, conditions or stage now are), so the unresolved outcome reaches the workstream's timeline, the automation's log and the bus |
+
+**The stored-reference check.** Once per run, each stored reference the lane
+reads -- the newest capture of each live link of the story, chosen as a stage
+prompt chooses it -- is checked against its item's current change value
+(`api.Server.CheckStoredReferences`, through `callerReadHost` with the lane
+owner's account, or the project's for a project connector) and recorded as one
+`stored_references_checked` event (WF.md, **Stored-reference notice**).
+`ActivityHost.RunnerBeginRun` starts the wired `StartStoredReferenceCheck` hook
+after `runflow.RegisterRunner` on every begin whose claim was not refused, which
+is where `run_started` is first recorded, so `WorkstreamRunWorkflow` carries no
+command for it. The hook runs beside the begin, not in it: the begin returns
+without waiting on the engine's start or on a failed start's fallback record,
+and the hook runs on a context detached from the begin activity's cancellation,
+bounded as one connector host read is (`storyNoteDeliveryOptions`). It
+dispatches `StoredReferenceCheckWorkflow` under `refcheck:{project}:{run_id}`
+with `WorkflowExecutionErrorWhenAlreadyStarted` and
+`WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE`: a re-begin of the same run
+(continue-as-new, retry, resume) while the engine still holds the check is
+refused as a duplicate and that is ignored. Any other start failure is logged
+and recorded, best effort, as every reference the check was to read could not
+be checked, or, when those cannot be chosen either, as the lane could not be
+checked (a record-level `not_checked` reason, with no reference guessed at). The run's
+outcome, stage, `runtime_status` and `available_actions` do not depend on the
+check. The workflow first reads its plan (`PlanStoredReferenceCheck`, bounded
+as one connector host read is, `storyNoteDeliveryOptions`, since it reads the
+connector declarations): when the run's `stored_references_checked` record
+already exists, looked up by the indexed run id, it reads and writes nothing,
+so a run resumed after the engine dropped its closed check is not checked
+again. Otherwise the plan carries the references the check is to read --
+none, with no declaration read, when the lane has no versioned capture -- and
+the check reads exactly that selection, one single-shot activity per connector,
+each bounded as one connector host read is (`storyNoteDeliveryOptions`), side
+by side -- each read is its own host subprocess, with its own account and no
+shared cache -- so it takes as long as its slowest connector, not the sum, and
+a connector whose read reaches that read's own bound is could not be checked.
+A connector that finishes keeps its results, an exclusion's nothing included,
+when another fails or the check is cancelled. The record activity, bounded by
+`storyNoteRecordTimeout`, runs on a disconnected context and reads no
+connector declaration, so a failed or cancelled check is still recorded, each
+reference of a connector that did not finish could not be checked with the
+reason, beside the finished connectors' results, and a failed plan as the lane
+could not be checked. A connector the read finds removed,
+without `READ_VERSIONS` or with a refused declaration -- in the catalog,
+in the host's `account_destinations` answer (`excluded`) or in the host's
+`read_versions` refusal (`connector_host.versions_excluded`) -- has no result.
 
 **New-form derivation of story workflow IDs.** The seven story-keyed families
 -- `plan:`, `edit:`, `plansplit:`, `arcproposal:`, `arcdecision:`, `storynote:`
@@ -5747,8 +7774,7 @@ address a planner run probe both forms through `liveStoryWorkflow`
 planning, the stored `flow_run_id` before either (`storyPlanningWorkflowIDs`):
 the story cancel route and `cancelPlannerCall`, the plan retry probe, the
 approve and forced-accept in-flight checks, `classifyPlanningDispatchFailure`,
-`planningWorkflowMaybeAlive`, the requirements-editing and Arc source-edit
-housekeeping recoveries, the Arc proposal read's editing leg, and
+`planningWorkflowMaybeAlive`, the Arc source-edit housekeeping recovery, the Arc proposal read's editing leg, and
 `runningSplitRefusal`, which gates the split offer. The paths that address an
 Arc proposal or Arc decision run probe both forms, new form first, through
 `openArcExecutionAnyForm` (`server/internal/api/story_arc_proposal.go`), which
@@ -5787,8 +7813,9 @@ refused without clearing the tech tree or recording a dispatch.
 A `DispatchWorkstreamRun` run whose merge-ready reconcile finds its open PR
 not carrying the branch leaves the workstream at `ready_to_merge` rather than
 `pr_open` (or in the PR state it already holds); in autonomous mode it
-publishes the branch before final review, re-running the merge gate when the
-publish rewrote the branch, and in gatekeeper and supervised the operator's
+publishes the branch -- after the merge gate's full test passed in a
+review-first run, before final review in a gate-first one -- re-running the
+all-complete leg on the new tip when the publish rewrote the branch, and in gatekeeper and supervised the operator's
 `hashd pr push` does. The publish is a leg of the run, not a `DispatchPRPush`: it runs the `PRPush`
 activity under `PRPushWorkflow`'s deadline (`prPushActivityOptions`) with the
 run as its claim owner, so it reports in flight through the run's
@@ -5796,6 +7823,44 @@ run as its claim owner, so it reports in flight through the run's
 operation_result rows as the verb, and a failure ends the run `failed` at
 `pr_fold_publish` at `ready_to_merge` with help naming the push (WF.md,
 **PR-state reject fold publish**).
+
+The same run's all-complete leg runs final review before any merge-gate work
+(WF.md, **Order of the all-complete leg**; version
+`final-review-before-merge-gate`, pinned at workflow run start).
+The reconcile runs with no
+substage stamped, the run's claim alone reporting it in flight; the hold
+between the merge gate and final review follows, then `runner_stage`
+`final_review` for the review. An approve holds before the merge gate (the
+same boundary and hold-failure handling as the leg's other uses of it), then
+stamps `merge_gate` (`RunnerSetSubstage`) for the gate's entry heal, its
+prepare phase (a rebase, the build only after it, the gate's own commits) and
+the dirty check, and again for its verify phase (the one full test), so the
+run reads `running` throughout with the substage it is in. A nit-only
+dismissal proceeds as an approve; other verdicts leave through their existing
+exits with no rebase, build or test.
+After the verify phase passed and the approval is current, the run publishes
+to an open PR exactly the revision the full test passed
+(`PRPushInput.TestedHead`): the push decides from the branch as the gate left
+it and pushes nothing when the branch or its base moved after the test
+(`PRPushOutcome.Untested`), and the run then goes round through the gate
+again. The gate runs with
+the workstream already at `ready_to_merge` or its PR state;
+`no_active_work` keeps merge and PR create refused until the run releases.
+Its exits route as the gate's (`RunnerMergeGateExitState`). The run is marked
+passed, and `run_complete` (`ready_to_merge`) sent, only after the verify phase,
+the dirty check and heal, and a `RunnerFinalReviewCurrency` read
+(`review.FinalReviewCurrencyOf`) that finds the approval current for the
+verified branch; a stale one patches the run blocked at `merge_gate` and goes
+round to the next cycle without announcing, and an unreadable one fails the run
+at `merge_gate`. The run pins its order at start,
+keeps it across continue-as-new (`WorkstreamRunInput.LaneOrder`)
+and hands it to every cycle child (`RunnerCycleInput.LaneOrder`), whose
+test stage defers the test command of the final planned commit and of every
+FIX (`TestStageInput.DeferTest`). A run started before that
+version runs the gate's prepare phase before final review and its verify phase after an
+approve (version `review-before-merge-gate-verify`), its review told the tip
+is the gate's (`GatePrepared`); a history before that runs the whole gate
+first. Each replays its order.
 
 The engine janitor's archive re-run is a `DispatchMerge` of a `merged`
 workstream through the same `dispatchMergeRequest` as `hashd merge`, so every
@@ -5825,7 +7890,7 @@ completion, personal admissions and automatic receipts. An initially admitted
 archive, unattended merge, completed archive or closed workstream is excluded;
 contention, active merges and uncertain liveness defer the decision.
 
-The retry uses `dispatchMergeRequest` with the workstream owner and original
+The retry uses `dispatchMergeRequest` with the story owner and original
 `ForgeMergeID`. Its single `archive_rerun_dispatched` receipt names
 `forge_merge_id` and commits through `RecordAdmission`; pre-admission refusals
 update typed watch evidence without consuming it. Startup failure after
@@ -5858,7 +7923,13 @@ may keep running until its next heartbeat, and writes its row and
 leaving its runner claim and stamp for the housekeeping sweep. A run anywhere
 else finishes as a plain cancel. Force applies only to `merge:`, `resolve:` and `run:`
 handles; any other kind is refused (`dispatch.cancel_force_unsupported`) before
-any engine call.
+any engine call. Both plain and forced cancels refuse with 409
+(`dispatch.cancel_not_running`) when nothing is running under `id` — whether
+`id` never existed, has closed, is not a workflow handle, or closed between
+describe and `CancelWorkflow`. The route's plain path goes through
+`cancelFlowRun` / `cancelRunningDispatchedWork`, while `CancelDispatchedWork`
+wraps that helper to keep treating not-running as success for its other
+idempotent callers (`cancelStoryRebase`, `cancelArcProposalRun`).
 
 `POST /stories/{id}/cancel` on a drafting or editing story closes the story's
 `plan:` or `edit:` run through `closePlannerRun`, which closes it by
@@ -5932,13 +8003,31 @@ the rows and their refusal but none is available.
 | Offer | Availability row | Endpoint |
 |---|---|---|
 | Retry story planning | existing `retry` | `POST /plan/retry` |
-| Edit/revise a story | existing `start_edit` | `POST /stories/{id}/edit` |
+| Edit a story | existing `start_edit` (admitted from `draft`, `draft_failed`, `approved` and `pending`) | `POST /stories/{id}/edit` |
 | Close a story | existing `abandon` | `POST /stories/{id}/close` |
-| Edit criteria, title, problem or non-goals | existing `update_criteria` | `POST /stories/{id}/update-criteria` or `/update-fields` |
+| Edit criteria, title, problem or non-goals | existing `update_criteria` (withheld while the story's content is locked; an implementing story's refusal, `story.content_locked`, names `hashd replan <story> --from-commit <commit in progress>`, or the full replan when its lane has none undone) | `POST /stories/{id}/update-criteria` or `/update-fields` |
 | Take a suggested split | `split` (present for a stored split recommendation, including an Arc recommendation on an Arc child) | `POST /stories/{id}/split` |
-| Answer a story bundle | `answer` on the story | `POST /stories/{id}/answer` |
+| Answer a story bundle | `answer` on the story (admitted from `draft`, `pending`, and `approved` for a breakdown decision; `storyBundleAnswerStateRefusal`) | `POST /stories/{id}/answer` |
 | Answer a workstream bundle | `answer` on the workstream | `POST /workstreams/{id}/answer` |
 | Answer one pending question | `answer_clarification:<clarification ID>` on its story/workstream | `POST /clarifications/{id}/answer` |
+
+The story question read uses `listPendingStoryQuestions` to combine the existing
+story-scoped and own-workstream pending queries in question order. The story
+bundle's `ListPendingStoryClarifications` query remains unchanged. `answerStory`
+and the story's advertised `answer` row share `storyAnswerWorkstream` as their
+scope decision: workstream-only questions delegate to `answerWorkstream` and
+`workstreamAnswerAvailability`, while story-only questions keep their existing
+owner and admission. Mixed scopes withhold the action and refuse submission
+without saving or dispatching. Their Diagnostic gives the workstream command
+first, and the story command afterwards only when the existing story admission
+permits it; otherwise it explains the story's refusal. The mutation and story
+availability share `storyBundleAnswerStateRefusal`. Clients use the served action
+rows without duplicate routing logic. The Web story header intersects its
+status-derived `CanEdit` and `CanAnswer` with the `start_edit` and `answer`
+rows (`StoryDetail`, `web/internal/service/http_service_stories.go`), so a
+pending story's AI edit and answer are offered exactly when those rows are
+available. Question notifications use the shared
+server presentation to offer `hashd answer show STORY-X --project=…`.
 
 Clients look up the exact clarification ID; an absent row grants no offer.
 Individual questions do not inherit the bundle's lifecycle restriction:
@@ -5946,7 +8035,7 @@ ordinary individual answers save text even where the bundle cannot resume
 work. Arc rounds use `ResolveArcRound`, and only their completing answer
 checks execution admission and an earlier Arc workflow. Arc-shaped split
 decisions precede the ordinary story bundle's draft and workstream checks;
-an accepted story can also answer an ordinary split proposal. Judge CANT_TELL
+an approved story can also answer an ordinary split proposal. Judge CANT_TELL
 bundles require the judge question to stand alone; the selected command's
 guards are checked on submission. Merge-gate recovery answers use
 `recoveryAnswerAdmission`, including the current failure, FIX binding,
@@ -5968,6 +8057,7 @@ save-only path. The mappings are:
 | `ac_edit_proposal` | `answerAcEditProposal`: dispatch apply, or close the proposal before resuming guidance-only. |
 | Judge `CANT_TELL` | Existing `answerJudgeCantTell` and its individual-ID entry; selected command guards return their Diagnostic intact. |
 | `merge_gate_recovery` | Existing recovery-answer admission and workflow dispatch; no agent executes in the answer request. |
+| `plan_defect`, `ac_conflict`, `ruling_defect`, `ruling_conflict` | None: verdict-gate records are not answered. Both routes refuse a pending one with `verdictGateAnswerRefusal` (`answer.verdict_gate`), whose help names `hashd approve` and `hashd reject`; it resolves at the agent-stop gate. |
 
 `decisionOptionAnswer` only normalizes selections for these decision handlers;
 it is not an execution dispatcher. Unsupported selections receive an action
@@ -6001,6 +8091,7 @@ Triggers with **no client dispatch path** in
 |---|---|
 | `all_commits_done` | runner cycle |
 | `final_review_concerns` | final-review stage |
+| `merge_gate_fix_verified` | the outer leg, once a merge-gate repair is verified (`RunnerRecordRepairReadiness`) |
 | `merge_aborted`, `merge_aborted_to_pr_open`, `merge_aborted_to_pr_approved`, `merge_success`, `push_for_pr` | merge flow; the `merge_aborted*` edges also by dead-merge recovery (housekeeping, `hashd merge --abort`) |
 | `resolve_failed` | ai-resolve |
 | `rebase_conflict` | **the merge gate, and only the merge gate** (`runflow/mergegate_driver.go:325`) |
@@ -6054,6 +8145,71 @@ no verdict, is unset. A merge that stopped on a dirty main, an uncommitted
 worktree, a missing worktree or an unreachable forge answered about the
 repository, not about a commit, and is just as true after the next push.
 
+**Story-rebase outcomes.** The `story_rebase` operation results that stand,
+as WF.md **Rebase** lists them. The landing is the one `succeeded` row
+`api.CurrentErrorFromOperationResult` builds: its payload
+(`mergeflow.StoryRebaseLanding`, written by `mergeflow.StoryRebaseLandingRecord`)
+chooses its kind, its detail states the landing and its facts name each
+generated file, and it still counts for the success sweep
+(`latestSucceededOperationResultAt` and its SQL twin).
+
+| Outcome | Stands | Error or notice | Replaced or retired by |
+|---|---|---|---|
+| Landing: `succeeded` carrying the landing's facts (`operation_landed`) | from the landing's acceptance, at the state the story returned to; where the rebase recorded a stop after that acceptance -- its reply lost, or a cancel -- the undo that finishes the landing records it again (`workflows.StoryRebaseRestateLanding`), declaring no second code change, so the landing stands over that stop | notice, stating the full base commit it landed onto, whether it was pushed, whether its carried uncommitted work was restored, every generated file that kept the base's copy, and the base-moved continuations before it | a newer `story_rebase` row other than a publication's confirmation; a newer declared code change (classed `invalidated_by: code_change`), never its own, recorded with it |
+| Returned refused, failed or unresolved rebase: `failed`, with its refusal's own source where it has one | from the stop, recorded again by the return once the rebase is undone, so it stands at the state the story returned to | error, stating why it stopped, that the story is back at that state with its branch and uncommitted work as they were before the rebase, and `hashd rebase <story> -y` unless its own help names that; every help line, explanation, output tail and Diagnostic it recorded is kept | a newer `story_rebase` row; a newer `succeeded` row of any operation |
+| Returned refused landing: `failed` | from the landing step's refusal, recorded again by the return | as the returned rebase | as the returned rebase |
+| Returned push refused for a reason other than the base moving: `failed` | from the push's refusal, recorded again by the return | as the returned rebase | as the returned rebase |
+| Returned interruption: `failed`, "rebase was interrupted before completing" | from the workflow's ending, recorded again by the return | as the returned rebase, the interruption its explanation | as the returned rebase |
+| Returned cancel: `cancelled` (`operation_cancelled`), "rebase was cancelled before completing" | from the person's cancel -- `hashd cancel <story>`, TUI `x`, Web "cancel rebase", one while the rebase waits on a conflict included, or a close that ends the rebase first -- at `rebasing` while the rebase is undone, then recorded again by the return, so it stands at the state the story returned to; a continuation rebase's cancel leaves the unlanded stop in its place | notice, stating that the rebase was cancelled, that the story is back at that state with its branch and uncommitted work as they were before the rebase, and `hashd rebase <story> -y` | a newer `story_rebase` row; never another operation's success, which sweeps faults only |
+| Discarded on placement move: `discarded` (`operation_discarded`) | from a confirmed placement move to another runner that discarded a kept base-moved rebase resolution, written in the move's transaction and published after commit so it replaces the base-moved stop | notice, stating that the move discarded the resolved rebase and naming the full resolved commit and the runner it was on | a newer `story_rebase` row; never another operation's success, which sweeps faults only |
+| Conflict waiting: `failed`, the conflict's record | while the rebase waits on a conflict for Go or AI resolve, the story at `rebasing` | error, naming the conflict and how to take it on | a newer `story_rebase` row, such as the next conflict's, the landing, or the stop that ends the rebase |
+| Undo failed: `failed`, `rebase.undo.failed` | from an undo that failed on the runner, the story kept at `rebasing` | error, with `hashd cancel <story>`, which runs the undo again | a newer `story_rebase` row: the landing an undo finishes, or, once the story returns, the stop that ended the rebase, recorded again -- or, with none beneath it, a `returned` row, which reaches neither surface; a newer `succeeded` row of any operation |
+| Landing not recorded: `failed`, `rebase.landing.unaccepted` | from a landing the server did not accept, the story kept at `rebasing` | error, with `hashd cancel <story>`, which finishes recording it | as the failed undo |
+| Return refused: `failed`, `rebase.return.refused` | from an undone rebase whose return was refused, the story kept at `rebasing` | error, with `hashd cancel <story>`, which returns it | as the failed undo |
+| Continuing: `continuing` (`operation_continuing`) | from a base-moved refusal of the landing's push, the 10th in a row at most, while hashd continues with a fresh rebase from the kept revision | notice | a newer `story_rebase` row, such as the continuation's landing, its stop or the publication's confirmation; a newer declared code change (classed `invalidated_by: code_change`), such as the continuation's own publication |
+| Limit stop: `failed`, `rebase.push.base_moved_limit` | from the 11th base-moved refusal in a row, once the story has returned, with nothing continuing it | error | a newer `story_rebase` row, such as the "publication was confirmed" row once another operation's publication fulfills the series; a newer `succeeded` row of any operation |
+| Unstarted stop: `failed`, `rebase.push.base_moved_unstarted` | from a continuation recorded and never confirmed started | error | as the limit stop |
+| Unlanded stop: `failed`, `rebase.base_moved_unlanded` | from a continuation rebase that left rebasing without landing -- undone, cancelled or refused -- recorded by the leave in place of the rebase's own returned stop, whose reason it names, so it alone stands at the state the story returned to | error | as the limit stop |
+| Publication confirmed: `succeeded`, "The resolved branch's publication was confirmed", marked `publication_confirmed` | never: it is not an outcome of its own. It is recorded when another operation's publication -- a push, or parity that pushed nothing -- fulfills the series' refusals | neither; it still counts as a success for the sweep | not applicable. It replaces no landing, of its series or another; any other older `story_rebase` row it replaces as a newer row does, which is how a continuing notice retires when the publication declared no code change |
+
+The confirmation (`mergeflow.CompleteLandingPublication`) carries no landing
+and is never shown. A landing that publishes fulfills every outstanding refusal
+in its own write without recording one under `story_rebase`, and no row it
+writes beside the landing declares a code change, so none retires the landing
+it stands beside. A landing that publishes nothing leaves its series' refusals
+owed, and a later publication's confirmation follows it. Both
+newest-per-operation readers, `api.latestOperationResultPerOperation` and its
+SQL twin `ListLatestWorkstreamOperationResultsForProject`, pass over a row
+marked `publication_confirmed` (`mergeflow.ConfirmsLandingPublication`) whose
+next-older row of its operation is a landing, so the landing keeps the slot.
+Neither matches the two by series: the landing's `resolved_landing` names its
+own record and the confirmation's a refusal it fulfilled, and the confirmation
+is no outcome of the rebase whichever series it fulfilled.
+
+The return of an unlanded rebase is written in `StoryRebaseLeave`'s
+transaction (`workflows.recordStoryRebaseReturn`, through
+`RecordOperationResult`, published after the commit). It records the stop that
+ended the rebase again: the newest failed, declined or cancelled
+`story_rebase` row, passing over the records about the rebasing stage, which
+the workflow tells by their typed source (`rebase.undo.failed`,
+`rebase.landing.unaccepted`, `rebase.return.refused`), never by title. A
+cancelled row is a person's cancel: the workflow's deferred ending tells it
+from an interruption as `unfinishedAttempt` does (`temporal.IsCanceledError`)
+and records it as the notice `mergeflow.StoryRebaseCancelledOutcome`, since
+only a person cancels the workflow -- their cancel, or the close or removal
+that ends the rebase first. The stop keeps its outcome, payload
+and recorded Diagnostic; a row recorded flat is recorded again as the
+Diagnostic of its title, detail, explanation, output tail, help and source,
+since the continuing `failure.StoryRebaseConfirmed` step is typed. The return
+is one of its facts. Where only records about the rebasing stage stand, the
+return writes a `mergeflow.StoryRebaseReturnedOutcome` row instead, which
+retires them and reaches neither surface; a landed leave retires its newest
+stop the same way. A continuation rebase leaves through
+`mergeflow.StopLandingContinuation` first: its unlanded stop, under
+`story_rebase`, replaces the rebase's own stop as the newer row, and, under
+`ai_resolve`, the rebase's own stop is retired by a `returned` row. Where it
+records no stop, the rebase's own stands.
+
 **What the reads serve.** Standing operation results separate a concise report
 from its evidence. Composers retain full authored diagnostics in `explanation`
 and actual subprocess output in `output_tail`, subject to existing capture
@@ -6071,14 +8227,17 @@ failure's own. `failure_code` is the call's catalogue code: the result's
 classification, or for a prelaunch refusal the refusal Diagnostic's code, else
 `agent.prelaunch_refused`. A kill keeps its deadline descriptor's keys (the
 bound, `setting`, `explanation`, `help`) and only the title is replaced; a
-`usage_limit` failure keeps the `agents.UsageLimitData` keys, so the run's
-failed outcome schedules the usage-limit retry. The judge call's output and its
+`usage_limit` failure keeps the account and agent from `agents.UsageLimitData`. The judge call's output and its
 whole report are recorded as an `adjudicate_response` (`concern_triage_response`
 for concern triage) transcript row and named
 by `output_transcript_id`, which `GET /transcripts/{id}` serves; a row that
 could not be written records `output_unrecorded` instead. The record's
 `explanation` is that report bounded head and tail at 32KB, the implement
-failure's bound, because the outcome crosses the activity boundary.
+failure's bound, because the outcome crosses the activity boundary; a call
+that failed with a Diagnostic carrying a body (a sign-in failure, a
+`delivered_read_refused` refusal) records that body instead. That
+Diagnostic's cause stays apart from the explanation: the record's Diagnostic
+carries it, and the stage note gives it as `caused by:` after the explanation.
 The payload names its judge under `judge` (`runflow.JudgeFailureFor`). For
 the test, build and review judges, `runflow.NotifyRunOutcome` reads the run's
 `judge_inputs` record before writing the row, on the usage-limit path too;
@@ -6086,14 +8245,14 @@ when the record is absent or incomplete it sets `judge_inputs_unrecorded`,
 and `currentErrorFacts` renders the fact that the judge's inputs could not be
 recorded, so Go runs the normal cycle. Concern-triage stops record nothing
 and are never marked.
-A plain Go and the fired usage-limit retry resume such a stop at its judge
+A plain Go and triggered run retries resume such a stop at its judge
 through `dispatchWorkstreamRunWithTransitional`'s internal `resumeJudge`
 opt-in, which sets `WorkstreamRunInput.ResumeJudgeFromRun` from
 `judgeResumeFor`; both decide currency through `failedRunStillCurrent`, as
 the `run` row's note does. A stop whose work was superseded is retired from
 state the superseding write itself changes (`judgeStopSuperseded`): a
 `command_generation` past the record's (reset, checkpoint reset, replan,
-reject, requirements edit, the PR merged or closed on the forge), or a micro-commit no longer pending in the plan
+reject, the PR merged or closed on the forge), or a micro-commit no longer pending in the plan
 with the recorded title and description (plan edits). The record itself is
 kept.
 
@@ -6346,16 +8505,24 @@ Four canonical verbs (plus a future fifth):
 | reject | `hashd reject <id> [-f "feedback"]` | Existing |
 | reset | `hashd reset <id>` | Existing |
 | retry | `hashd retry <id>` | Future addition |
-| cancel | `hashd cancel <id>` | Existing for stories: `POST /stories/{id}/cancel` takes `abandon` for a queued story or a first draft, and `cancel` to restore a retry or an edit. Workstream cancel is a future addition |
+| cancel | `hashd cancel <id>` | Existing for stories: `POST /stories/{id}/cancel` takes `abandon` for a queued story or a first draft, `cancel` to restore a retry or an edit, cancels a rebasing workstream's rebase, and stops an open workstream `run:`, `merge:` or `resolve:` through `cancelFlowRun` (refusing with `story.cancel.nothing_in_flight` when nothing is in flight, and returning pause/hold admission refusals unchanged) |
 
 The story's `cancel` capability row in `available_actions`
-(`storyCancelAvailability`, `server/internal/api/mutations_cancel.go`) is
-present only for `queued`, `drafting` and `editing`. It reads the same rule as
-the route (`storyCancelDestination`): its destination is `abandoned` for a
-queued story or a first draft, and otherwise the status the story's
-pre-entry record (`claim_origin`) names. A drafting or editing story without
-that record, one entered before the record existed, gets the row unavailable
-with the route's own reason.
+(`storyCancelAvailability`, `server/internal/api/mutations_cancel.go`) agrees
+with `POST /stories/{id}/cancel`: it is offered for `queued`, `drafting` and
+`editing` using `storyCancelDestination` (`abandoned` for a queued story or a
+first draft, and otherwise the status `claim_origin` names; a drafting or
+editing story entered before that record existed gets the row unavailable with
+the route's own reason), when the story's workstream is `rebasing`, and while
+the workstream's `run:`, `merge:` or `resolve:` workflow is in flight. Liveness
+for those three workflows comes from the workflow singletons through the
+memoized publish probe (`probePublishExecution`); an unanswered probe (`Unread`
+or `Err`) returns the row unavailable with that reason and is never read as
+closed. When the workstream is rebasing or has an open run, merge or conflict
+resolution but admission would refuse it (an unsettled dispatch, workstream
+pause for a human, restart hold, saved human edits or open worktree reset), the
+row is returned unavailable with that admission refusal. When nothing is in flight, the row is
+withheld (no row, fail-closed).
 
 A story and its workstream are one identity, so the commands `hashd show` and
 `hashd review` offer name the workstream by its story's served label
@@ -6371,13 +8538,15 @@ workstream close options (`no_changes`, `reason`, `keep_branch`) and applies
 them to the linked workstream it tears down with the story; the story's
 abandon lands in the workstream close's transaction, before the worktree is
 removed, so a refused abandon closes nothing and the request can be replayed.
-With no open workstream to close the options are refused and nothing changes.
+With no open workstream to close, `no_changes` and `keep_branch` are refused
+and nothing changes; a `reason` needs none, since it is also the story's own
+closure (an abandonment's, or a ref close's).
 
 A story's own approval on `POST /stories/{id}/approve` -- a draft's
 (`approveDraftStory`) or a forced acceptance (`forceAcceptStory`) -- over a
 stored size estimate whose verdict is `split` or `arc` is refused with a 409
 `approve.size_verdict` unless the request carries `confirm_split=true`; so is
-the generic `POST /stories/{id}/transition` accept edge (to `accepted`, through
+the generic `POST /stories/{id}/transition` accept edge (to `approved`, through
 `acceptStory` after `genericAcceptRefusal`), confirmed by the body's
 `confirm_split`, with the same override record. The
 rule is `approvalSizeGate` (`server/internal/api/story_size_offer.go`), decided
@@ -6445,6 +8614,37 @@ Certificate failures tell the person to re-join and stop runner reconnection.
 Loopback retains its existing trust boundary. Bearer tokens contain no certificate
 pin; the former `server set --token` option is removed. CA rotation requires rejoin.
 
+Python clients speak HTTP/2 over TLS to an HTTPS hashd-server, whether its
+certificate is automatic or supplied (`--tls-cert-file`/`--tls-key-file`). The
+trust rules above are unchanged: loopback skips verification, every other
+destination verifies the chain and name. Both paths share
+`server_client._httpx_client_kwargs`, whose `_TrustedHTTPTransport` refuses a
+connection whose TLS handshake does not select ALPN `h2` (a listener or TLS proxy
+offering only HTTP/1.1, or aborting with `no_application_protocol`), directly or
+through an HTTPS proxy tunnel. The refusal comes before any request or bearer
+token is written, closes the connection and is never retried as HTTP/1.1. It is
+`HTTP2RequiredError` (`server.http2_required`): REST callers get
+`ServerUnavailable` carrying its Diagnostic, and the SSE subscriber reports
+`StreamStatus.HTTP2_REQUIRED` with it, never `CONNECTED`, and delivers no frame.
+A plain `http://` address still uses HTTP/1.1.
+
+Every client of hashd-server (the hashd CLI, runners, `hashd watch`, the
+Telegram bot and browsers) uses HTTP/2 over TLS, and the server enforces it.
+`ingressHandler` (`server/cmd/hashd-server/ingress.go`) is the listener's whole
+handler chain, and its outermost link answers an HTTP/1.1-over-TLS request on any
+route (API, `/join`, `/ui`, the browser stream relays) with the
+`server.http2_required` Diagnostic (505, `Connection: close`) before any routing,
+auth or proxying. The refusal is logged only as one access-log record, never as
+a warning line. ALPN still offers `http/1.1`, so such a client completes the
+handshake and reads the Diagnostic. Plaintext HTTP to the TLS port keeps the
+listener's own 400 refusal, and h2c is never served. Connections hashd-server
+makes itself (to forges, model providers, Temporal, and its internal hop to
+hashd-web) are unaffected. A refused person connects with a hashd client or
+browser released with this server, or makes the proxy in between forward HTTP/2
+over TLS. Go clients (CLI, runner, readiness probes, self-dial) refuse a peer that does
+not select HTTP/2 with `server.http2_required` and never fall back to HTTP/1.1;
+all of them build their transport with `clientconfig.HTTP2Transport`.
+
 ### Rejoining an existing runner
 
 `hashd runner join-link <id-or-name>` is available to the runner owner or a
@@ -6452,3 +8652,86 @@ server administrator. It issues a single-use grant without changing the runner
 ID, grants, placements or assignments. Expiry follows grant issuance, using the
 existing join lifetime. The current session remains valid until redemption;
 `hashd runner connect -` stores the replacement session and installation CA.
+
+
+### Sign-in refresh health reports
+
+`HousekeepingWorkflow` calls `HousekeepingRefreshSignIns` immediately after its
+restart-hold exclusion, before MCP cleanup, project discovery and per-project
+PM sections. `ActivityHost.RefreshSignIns` binds `api.Server.RefreshSignIns`;
+providers remain behind the existing refresh action. The activity runs even
+without a projects directory. It uses `housekeepingSweepActivityOptions` with
+the existing `timeouts.workflow.cleanup` budget and one attempt. The next
+scheduled tick retries; there is no additional timer or activity retry loop.
+The `housekeeping-sign-in-refresh` version marker leaves old histories on their
+original path. Held ticks and unbound dark hosts report skipped, never complete.
+
+Only the refresh summary's counts and complete/skipped status enter activity
+and workflow results (`HousekeepingResult.sign_in_refresh`); diagnostics,
+credential identities and token material remain server-side. Infrastructure
+failures add to the tick's errors, and an incomplete attempt adds an error too.
+Activity failure, cancellation, deadline expiry or health-report delivery
+failure cannot claim completion. Refresh failure is safely logged and does not
+stop cleanup, discovery or per-project sweeps. Entra's participant preserves
+its existing expiry check under the owner lock, resource-scoped cache entries,
+and account-wide refusal/recovery handling without duplicate alert delivery.
+The `agent` participant maintains stored agent push sign-ins (**Agent
+credentials and auth preflight**); a refusal counts as refused, any other
+failure as an infrastructure failure naming the credential by its non-secret
+identity, and an enumeration failure or the sweep's end leaves it incomplete.
+With the credential cipher unavailable, both participants report that failure
+and the sweep stays incomplete rather than an empty success.
+
+After each participant, the sweep writes every pending account and agent
+sign-in alert intent itself (refusal raises, recoveries and agent presentation
+refreshes, the ones that participant just recorded included) through
+`WriteAlertChange`, the writer the alert FIFO uses, rather than queueing them.
+A failed alert write fails the sweep with its structured cause under
+`signin.refresh.account_alerts`, joined with any failure of the participant's
+own, so refresh health stays open; the write's
+transaction rolls back the intent's consumption, and the next sweep delivers it
+without another refusal or renewal. Callbacks and startup replay still enqueue;
+whichever writer commits first consumes the intent, so a late copy, a replay
+and a dismissed alert deliver nothing more.
+
+Refresh health is independent of the Temporal incident tracker. Each refresh
+source opens on one failed sweep, replaces its complete Diagnostic on later
+failures, and clears only after that source's successful sweep and successful
+recovery reporting. `/status.health.refresh_problems` exposes every current
+source and its complete Diagnostic without a history count or size cap. Doctor
+adds a failing sign-in refresh check for each current source, alongside the
+Temporal check. `engine_degraded_now`, `recentEngineIncidents`, the existing
+engine alert and its capped seven-day history remain exclusively Temporal.
+
+`refresh_failed` and `refresh_recovered` are system-scoped lifecycle events in
+the ops-root events store. Both carry `source`, the complete `diagnostic`,
+a refresh-specific `summary`, and `timestamp` (with empty `project`). Recovery
+retains the entire failure that recovered, including related Diagnostics and
+recovery guidance. Their tone roles are danger and success respectively; the
+failed event has its own `refresh_failed` attention class.
+
+The refresh emitter serializes the full report, records it durably, applies its
+alert change through the existing API alert writer, then publishes. Serialization,
+recording, alert-write and publication failures return to the reporting caller;
+a failed recovery retains its problem for the next sweep. Recovery prepares its
+fallible record and alert writes first, clears the tracker source, then invokes
+the returned publisher, so a `refresh_recovered` subscriber rereading status sees
+the source cleared. A publication failure restores the problem for retry.
+Refresh alerts bypass
+the asynchronous publisher alert FIFO to avoid duplicate delivery. Each source
+has its own `signin_refresh:<source>` critical alert and “sign-in refresh failed”
+need line; a Temporal recovery or another source's recovery cannot clear it.
+System infrastructure alerts use the existing solo-owner or team-admin routing;
+account refusals continue to use the existing owner-isolated account alert path.
+Refresh alert presentation preserves the entire recorded Diagnostic and recovery
+command rather than rebuilding its message from the title.
+
+A healthy status serves `refresh_problems: {}`, including before any sweep has
+failed. During recovery the source remains visible to status and doctor while
+its durable record and alert clear are pending. At startup, before serving or polling Temporal,
+the server restores sources with outstanding refresh alerts from their latest
+retained failure event, without re-raising or delivering their alerts again.
+Only those selected events' complete Diagnostics are decoded; restoration does
+not use the capped Temporal history. The next successful sweep clears the
+restored source and records recovery with that retained evidence. Startup refuses
+to proceed if the retained evidence cannot be read.

@@ -8,26 +8,23 @@ intake supports full URL consumption. Page titles are not resource identity.
 This provider reads one page; it does not search, follow short links, fetch
 attachment bytes, render live macros, or write to Confluence.
 
-Configure these keys through the existing project configuration editors or YAML:
+Point the connector at your site, then store your own account for it:
 
-```yaml
-confluence:
-  url: https://team.atlassian.net/wiki
-  email: reader@example.com
-  api_token: YOUR_API_TOKEN
-  # Set explicitly for a scoped token; omit for a site-based unscoped token.
-  cloud_id: YOUR_CLOUD_ID
+```bash
+hashd connector confluence configure --set url=https://team.atlassian.net/wiki
+# Set explicitly for a scoped token; leave unset for a site-based unscoped token.
+hashd connector confluence configure --set cloud_id=YOUR_CLOUD_ID
+# Your account: your Atlassian email and an API token. Page reads use it;
+# solo chat references do not use it yet.
+hashd connector login confluence --destination https://team.atlassian.net/wiki \
+    --field email=reader@example.com
 ```
 
-`CONFLUENCE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_API_TOKEN`, and
-`CONFLUENCE_CLOUD_ID` provide nonempty environment overrides on the server.
-YAML credentials remain supported in solo mode. In team mode each person reads
-with their own account instead -- `hashd connector login confluence --destination
-https://team.atlassian.net`, their Atlassian email and an API token -- and the
-connector is handed exactly that, ignoring the YAML and environment credentials.
-A variable that displaces a value the YAML
-did set is logged by name at load and named in a 401/403 read failure, so a
-shadowed account does not report as a rejected token; values are never logged. The URL must use HTTPS, with no credentials,
+The connector is handed exactly that account. Nonempty `CONFLUENCE_URL` and
+`CONFLUENCE_CLOUD_ID` variables on the server override those settings; one that
+displaces a value the YAML did set is logged by name at load and named in a
+401/403 read failure, so a shadowed site does not report as a rejected token;
+values are never logged. The URL must use HTTPS, with no credentials,
 query, fragment, nonstandard port, or path beyond `/wiki`; a bare site URL is
 normalized to `/wiki`.
 

@@ -201,6 +201,35 @@ endpoint (`/workstreams/{id}/blame`) takes a hex revision alone, and narrowing
 it to a micro-commit would mean teaching it the id -- which this arc does not
 do.
 
+### The version a review read
+
+A review round writes the tree it grades into the repository's object database
+and records its id as `diff_identity`: one tree for a per-commit round (the
+worktree as the reviewer read it, uncommitted work included) and
+`<merge-base tree>..<branch tree>` for a final review. `/diff/changes?tree=`
+takes that value unchanged and answers the change set as the reviewer saw it,
+with `scope.name` `tree` (workreads/changes_tree.go):
+
+- one tree is measured from the base `scope=story` measures from; a pair is
+  measured as given;
+- every entry's blob ids name the reviewed content, so `/diff/blob?sha=` reads
+  both sides -- none is read by path;
+- the review wrote those objects through the worktree into the object
+  database the project repository shares with it (`git worktree add`), so once
+  the checkout is gone both object-addressed reads -- `tree=` and a blob by
+  `sha` -- read the repository whether or not a commit was ever recorded: a
+  review that rejected before anything landed, on a workstream closed since,
+  stays readable (workreads `objectSource`);
+- `tree` excludes `commit`, `staged`, `uncommitted` and `scope` (`400`
+  `read.diff_changes.selectors_conflict`); anything but full object ids is
+  refused (`400` `read.diff_changes.tree_malformed`); a tree git no longer
+  holds answers `404` `read.diff_changes.tree_missing`. A review's tree is
+  referenced only by its record, so git prunes it once it ages out.
+
+It exists because the code moves on at once after a reject: the fix round
+answering the findings edits the files they name, so the working tree no
+longer shows what a finding's file and line point at.
+
 ### While a workstream is provisioning
 
 A workstream's worktree path is recorded before `git worktree add` runs, and a
@@ -211,7 +240,8 @@ stage is `provisioning`, the server does not read its working tree:
 - `/diff` and `/diff/changes` answer `200` with `pending: "provisioning"` and
   nothing else for every read not addressed by a commit -- `uncommitted`,
   `staged`, `scope=story`, `scope=current` and the no-selector default.
-  `commit=<sha>` and `commit=<micro-commit id>` are served as at any other time;
+  `commit=<sha>`, `commit=<micro-commit id>` and `tree=` are served as at any
+  other time;
 - `/changes` answers `pending: "provisioning"` with empty lists and
   `has_worktree` false, and its `story` and `current` summaries are
   `not measured` with the same reason;
@@ -546,6 +576,16 @@ The key integration point is the enrichment logic in `orchestrator/commands/line
 
 ### Rebase Resolution Safeguards
 
+The merge gate's text-union shortcut accepts only conflicts whose Git diff3
+base regions are empty (insertions, with no base lines changed or deleted).
+Ordinary union must also match diff3 union byte for byte; otherwise the
+shortcut refuses and the existing conflict recovery handles the file. The
+accepted output remains the ordinary union. This applies to the direct rebase
+and union-resolved siblings in regeneration recovery. Each staged union records
+its method and path immediately in the merge-gate audit; conflict-agent records
+retain their method and complete path list. A later build or rebase failure can
+still reject that attempted resolution. Build-ownership proofs are unchanged.
+
 The resolve flow also narrates itself: checkpoint `stage_changed` events (rebase attempt, conflicts found + agent, build verification, push) and a completion `operation_result` whose detail names the outcome (commits rebased, files resolved, attempts, build-gate verdict).
 
 Automated rebases at the merge gate and in AI conflict resolution never
@@ -753,8 +793,9 @@ rebase` acts on HEAD, and a worktree parked on another branch would
   configured parks every conflict, since nothing can prove ownership
   there. A clean rebase never runs a build. The heal runs under a budget
   derived from the project's `test_timeout` (the builds one heal runs,
-  each bounded by `test_timeout` or, when it is unset, the runner stages'
-  fallback -- the merge gate's own probe builds pass `test_timeout` raw;
+  each bounded by the resolved `test_timeout`: 1200 seconds by default,
+  with an explicit zero disabling timed repair on publish paths (a
+  build-owned conflict then parks without repair);
   the publish activities' deadlines hold the same budget on top of the
   network bound, once per rebase leg), and a heal that runs out of it
   parks with the reason and the tree restored; a rollback that itself

@@ -27,17 +27,14 @@ Import errors are logged and skipped. A broken connector cannot crash hashd.
 
 ## Module contract
 
-Declare any combination of these attributes in your connector's `__init__.py`. All are optional.
+Declare any combination of these attributes in your connector's `__init__.py`. All are optional except `ACCOUNT_KIND` and `LOGIN_METHODS` (docs/CONNECTORS.md): a connector without them is refused.
 
 ```python
 # packages/hashd-connector-my/src/hashd_connector_my/__init__.py
 
 CONNECTOR_NAME = "my_connector"          # unique name (defaults to module name)
 CONFIG_SECTION = "my_config"             # config.yaml section this connector owns
-
-CLI_COMMANDS = {
-    "mycommand": (register_fn, dispatch_fn),
-}
+ACCOUNT_KIND = "personal"                # who owns the account: "personal" or "project"
 
 DOCTOR_CHECKS = [check_health_fn]       # list of health check functions
 IS_CONFIGURED = is_configured_fn         # (project_dir) -> bool
@@ -50,20 +47,13 @@ TOOLS = [                                # list of ToolSpec
 ]
 ```
 
-### CLI_COMMANDS
-
-Each entry maps a command name to a `(register_fn, dispatch_fn)` tuple:
-
-- `register_fn(subparsers)` -- adds an argparse subparser, returns the parser object. Does **not** set `func`.
-- `dispatch_fn(args, ops_dir, project_config) -> int` -- handles command dispatch. Receives project config from cli.py's wrapper, so no circular imports.
-
 ### DOCTOR_CHECKS
 
 List of `check_fn(project_dir) -> list[DiagnosticResult]` functions. Only called when `IS_CONFIGURED` returns True. Results are printed in the `hashd doctor` Connectors section.
 
 ### IS_CONFIGURED
 
-`(project_dir) -> bool`. Gates doctor checks and artifact loading. Should check both that the config section exists **and** that required backend credentials are present.
+`(project_dir) -> bool`. Gates doctor checks and artifact loading. Should check both that the config section exists **and** that required backend credentials are present. Credentials are not settings: they arrive as the account the server hands the connector host, read through `hashd_client.connector_env` (docs/CONNECTORS.md).
 
 ### ARTIFACT_RESOLVER
 
@@ -90,11 +80,10 @@ class ToolSpec:
 
 ## Integration points
 
-Core interacts with connectors only through `discover_connectors()`. The five hook sites:
+Core interacts with connectors only through `discover_connectors()`. The hook sites:
 
 | File | What it does |
 |---|---|
-| `cli.py` | Registers CLI commands from `CLI_COMMANDS` |
 | `commands/doctor.py` | Runs `DOCTOR_CHECKS` for configured connectors |
 | `lib/ref_resolver.py` | Dispatches `@connector:ref` to `ARTIFACT_RESOLVER` |
 | `pm/planner.py`, `runner/impl/prompt_context.py` | Call `resolve_refs()` before agent invocation |
@@ -112,7 +101,7 @@ Core interacts with connectors only through `discover_connectors()`. The five ho
 - `RemoteState` -- current state of an external issue
 - `DiagnosticResult` -- health check result (name, passed, message)
 
-These are optional. A connector that only adds CLI commands or artifacts doesn't need them.
+These are optional. A connector that only adds artifacts doesn't need them.
 
 ## File structure
 
@@ -126,7 +115,6 @@ packages/hashd-connector-my/
     config.py        # Config struct, load/save, is_configured
     backend.py       # External API wrapper
     engine.py        # Reference parsing and transforms
-    commands.py      # CLI handlers + register/dispatch
 ```
 
 `pyproject.toml` registers the connector:

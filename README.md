@@ -50,7 +50,7 @@ Requirement -> Suggestion -> Story (+ acceptance criteria) -> Workstream -> micr
 
 - A **Suggestion** is a candidate piece of work discovered from your requirements (`REQS.md`).
 - Claiming it creates a **Story**: a feature or bug with acceptance criteria -- the source of truth for *what* the change should do.
-- Running an accepted Story creates a **Workstream**: one git branch in one isolated worktree, holding a plan of **micro-commits** (the smallest planned units of work).
+- Running an approved Story creates a **Workstream**: one git branch in one isolated worktree, holding a plan of **micro-commits** (the smallest planned units of work).
 - Each micro-commit runs the **governed loop** -- `implement -> test -> review -> human approval -> commit` -- where every arrow is a **gate**. When all micro-commits land, the branch gets a holistic final review and a merge gate (tests, conflict check, secrets scan), then merges.
 - Whether a gate stops for a human is set by the project's [autonomy mode](SPEC.md#autonomy-modes) (supervised / gatekeeper / autonomous). Unresolved failures still require intervention in every mode.
 - Every state change is **dual-written**: pushed live over the event bus and recorded durably in SQLite. That durable log is the spine of the **audit trail** -- `hashd lineage` reconstructs why any line of code exists, all the way back to the requirement and the human who approved it.
@@ -84,6 +84,7 @@ The bottleneck in shipping AI-written code is not typing speed -- it is **trust*
 **Reference**
 
 - **[WF.md](WF.md)** - authoritative workflow states, transitions, guards and recovery. See the [command reference](docs/walkthrough.md#command-reference) and [TUI keybindings](docs/watch.md#watch-ui-keybindings) for interface usage.
+- **[docs/REQS.md](docs/REQS.md)** - how hashd keeps REQS and SPEC and how a story owns requirement text: spec mode, WIP markers, what each scope change does at each stage, descoped criteria, edit locks.
 - **[docs/glossary.md](docs/glossary.md)** - canonical definitions: Suggestion, Story, Workstream, micro-commit, stage vs runtime_status vs runner_stage.
 - **[docs/provenance.md](docs/provenance.md)** - the audit story: `hashd lineage`, SLSA/in-toto export, hash-chain verify.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - client/server boundaries, state, events, diagnostics.
@@ -120,7 +121,7 @@ Hashd is a client (`hashd`, `hashd watch`) talking to a server (`hashd-server`).
 
 **Solo, local (the default).** Client and server run on your machine as one implicit user, no auth ceremony. This is what [QUICKSTART.md](QUICKSTART.md) sets up and what most single developers use -- if that's you, nothing below is required.
 
-**Server-backed (local or remote clients).** Run `hashd-server` on a box and point clients at it -- your laptop driving a server in the closet, or a shared team server. Off-loopback the server serves TLS with an auto-generated certificate and every request needs a bearer token, and a client pairs in one command:
+**Server-backed (local or remote clients).** Run `hashd-server` on a box and point clients at it -- your laptop driving a server in the closet, or a shared team server. The server serves HTTPS on every listener, loopback included, with an auto-generated certificate; a local `http://` address such as `http://127.0.0.1:1337` is upgraded to `https://` with the same host and port and keeps its saved sign-in. Off-loopback every request needs a bearer token, and a client pairs in one command:
 
 - **You own the server** -- mint a token with `hashd auth create`, then `hashd server set <url> --token <token>`.
 - **Your admin runs the server** -- they run `hashd admin user add you@co.com`, which prints a one-time access token; you run `hashd server set <url> --token <token>` and you're connected, attributed as yourself.
@@ -285,7 +286,7 @@ Directives are operator guidance included in agent prompts at three levels:
 
 ```
 ~/.config/hashd/directives.md     # Global user preferences
-{repo}/directives.md             # Project rules
+<ops>/projects/<project>/directives.md  # Project rules (server-side, saved through hashd)
 workstream directives           # Stored in hashd; managed through the commands below
 ```
 
@@ -334,6 +335,10 @@ hashd directives edit                  # Edit global in $EDITOR
 hashd directives edit project          # Edit project in $EDITOR
 hashd directives edit workstream <ws>  # Edit workstream's in $EDITOR
 
+# AI-assisted editing: the pm_edit agent revises the document server-side,
+# the proposal is shown as a diff, and only a confirmed save is written
+# (on a terminal the instruction is prompted for and the save confirmed;
+# without one, -m/--message and -y/--yes are both required)
 hashd directives ai-edit               # AI-assisted edit of global
 hashd directives ai-edit project       # AI-assisted edit of project
 hashd directives ai-edit workstream <ws>  # AI-assisted edit of workstream's
@@ -401,19 +406,19 @@ The Telegram bot covers the full workflow from mobile. Send `/` for the button m
    ```bash
    hashd telegram bot <YOUR_TOKEN>
    ```
-2. Get your user ID from [@userinfobot](https://t.me/userinfobot), then allow it and set as chat target:
-   ```bash
-   hashd telegram allow <YOUR_USER_ID>
-   hashd telegram chat-id <YOUR_USER_ID>
-   ```
-3. Start the bot:
+2. Start the bot:
    ```bash
    hashd telegram start
    ```
+3. Pair your account:
+   ```bash
+   hashd telegram connect
+   ```
+   Open the bot privately, tap Start, and send the code.
 
 The bot also auto-starts when you run `hashd run`.
 
-On a team server, the hashd credential the bot runs with must belong to the server owner or carry no user identity: the configured chat receives the alerts routed to that credential. Teammates who pair with `hashd telegram connect` get their own alerts in their private chat with the bot.
+Each user runs `hashd telegram connect`, opens the project’s bot privately, taps Start, and sends the code. Notifications go to that recipient’s bound account only while they can still read the project. Unbound users receive no Telegram notifications; there is no shared-chat fallback. This applies in solo mode too.
 
 ### Supporting Commands
 
@@ -430,14 +435,14 @@ On a team server, the hashd credential the bot runs with must belong to the serv
 | `hashd lineage verify` | Validate commit hash chain integrity and report coverage separately; only the chain decides the exit status |
 | `hashd reject [id] -f "..."` | Reject with additive human guidance (context-aware) |
 | `hashd review findings ID [--include-forge]` | Export editable Markdown without rejecting |
+| `hashd reject ID --no-local-findings --no-forge-findings -f "Guidance"` | Omit both sources and assign guidance alone |
 | `hashd reject ID --findings-file FILE` | Replace the complete findings set (`-` reads stdin) |
 | `hashd reject [id] --reset` | Discard changes, start fresh (human gate only) |
-| `hashd workstream resolve-oscillation <id> -f "..."` | Record an operator ruling on the latest FIX commit; does not resume execution |
 | `hashd diff [id]` | Show workstream diff |
 | `hashd test [--] <command...>` | Run a test command in the current worktree and record its verdict |
 | `hashd skip [id] [commit] [--discard]` | Mark commit as done without changes; skipping the next commit over its uncommitted work needs `--discard`, which saves that work as a patch first |
-| `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation |
-| `hashd replan [id] [-f "..."]` | Regenerate the plan from a clean base |
+| `hashd reset [id]` | Keep the plan, reset the worktree to baseline, redo the implementation; a PR on the lane is closed and removed first |
+| `hashd replan [id] [-f "..."] [--from-commit <COMMIT-ID>]` | Return the story to planning (draft, its lane held until `hashd approve` and `hashd run`; `-f` is the planner's instruction for its criteria) and regenerate the plan from the base branch's current head, retiring the lane's pending questions (`--from-commit`: replan from a micro-commit, keeping the commits before it and discarding it and every later one, with the kept/discarded lists shown and confirmed first); either form clears the lane's rulings and directives, and a PR on the lane is closed and removed first |
 | `hashd refresh [id]` | Refresh touched files |
 | `hashd conflicts [id]` | Check for file conflicts |
 | `hashd archive work` | List archived workstreams |
@@ -445,10 +450,10 @@ On a team server, the hashd credential the bot runs with must belong to the serv
 | `hashd open <id> [--force]` | Resurrect archived workstream |
 | `hashd answer list` | List entities with pending clarifications |
 | `hashd answer show <entity>` | Show pending questions for a story or workstream |
-| `hashd answer <entity> "<text>"` | Bundle-answer pending clarifications and dispatch the next agent run |
+| `hashd answer <entity> "<text>"` / `hashd answer <entity> -f <file>` | Bundle-answer pending clarifications and dispatch the next agent run; a file path given as the answer is read on the client machine and its content sent |
 | `hashd directives` | View/edit project directives |
-| `hashd workstream add-commit <ws> "title"` | Add AI-generated micro-commit to plan |
-| `hashd workstream edit-commit <ws> <id>` | Edit a micro-commit's title/description |
+| `hashd story add-commit <story> "instruction"` | Add AI-generated micro-commit to plan |
+| `hashd story edit-commit <story> <id>` | Edit a micro-commit's title/description |
 | `hashd workstream feedback <ws> "text"` | Append guidance to the workstream's standing directives and print the saved text |
 | `hashd workstream remove <ws>` | Remove orphaned workstream |
 | `hashd story retry STORY-xxx` | Retry failed planning run |
@@ -536,7 +541,7 @@ When reopening archived workstreams, `hashd open` analyzes staleness by comparin
 
 ## Lifecycle
 
-Stories flow: `drafting` -> `draft` -> `accepted` -> `implementing` -> `implemented` (also: `draft_failed`, `editing`, `abandoned`)
+Stories flow: `drafting` -> `draft` -> `approved` -> `implementing` -> `implemented` (also: `draft_failed`, `editing`, `abandoned`)
 
 Workstreams loop: `breakdown` -> `implement` -> `test` -> `review` -> `human_review` -> `commit` (repeat for each micro-commit)
 
@@ -566,6 +571,11 @@ current changes-requested review bodies by default; other gates fold internal
 findings only unless `--include-forge` is given. The existing PR and its
 metadata are preserved.
 
+`hashd show <id>` prints `forge#<stored finding id>` beside forge thread
+findings, including those in details. These stable handles identify hashd
+records for that workstream; `hashd review show <review-id>` remains a saved
+internal review.
+
 ```bash
 hashd reject my_feature                              # Internal findings; at a PR gate, forge feedback too
 hashd reject STORY-0042 --include-forge -f "Keep the public API"  # Also include open forge findings at any FIX gate
@@ -574,11 +584,20 @@ hashd reject STORY-0042 --findings-file findings.md -f "Human ruling"
 hashd reject my_feature --findings-file - < findings.md
 ```
 
+Repeatable `--exclude-finding <ref>` (`exclude_findings` on REST) subtracts only the named stored identity from this reject. References must resolve within the target project and workstream before any mutation or forge refresh. A valid reference outside the selection removes nothing and never enables or loads its source. Exclusions record no ruling, resolve no thread and do not affect later rejects. They conflict with replacement findings, including empty files or stdin; explicit dismissals remain usable with replacements. Automatic selection and FIX thread bookkeeping retain identity even for duplicate wording; replacement Markdown matching is unchanged.
+
 Both commands accept workstream IDs or story IDs. A story must have a linked
 workstream. `--findings-file` replaces the **complete** findings set; an empty
-file excludes all findings. It cannot be combined with `--include-forge`.
+file excludes all findings, as does empty stdin. It cannot be combined with
+source selection flags. `--no-local-findings` omits internal findings;
+`--no-forge-findings` omits both forge threads and review-level requests without
+reading the forge. Both omissions may be combined and only subtract from the
+gate’s existing selection; neither enables a source. `--include-forge` cannot
+be combined with `--no-forge-findings`. Explicit `--dismiss` rulings remain
+available with replacement findings or source omissions. These selection
+options are only supported when rejection creates a FIX.
 Forge-fetch failures, requested or by default, are reported before rejection;
-pass `--findings-file` to reject without forge findings.
+pass `--no-forge-findings` to reject without forge findings.
 `-f` adds human guidance, which takes precedence over findings. A FIX needs
 findings or guidance; if both are empty, rejection is refused.
 
@@ -637,11 +656,14 @@ tea login add --name work --url https://git.example.com --token $TOKEN  # Gitea
 hashd forge login --host dev.azure.com --scope <organisation>           # Azure Repos (Entra sign-in)
 ```
 
-For GitHub and GitLab PR operations, solo mode uses an authenticated local CLI
-first, then a stored credential. Team mode uses the workstream owner's stored
-credential for the target repository's host; it never falls back to the server's
-CLI account. Store credentials with `hashd forge login --host <host>` or in the
-web's **Settings > Forge** panel. Stored credentials remain encrypted and are
+A workstream's forge operations (PR create, status, threads, merge, watch,
+close) act as the workstream's owner, in solo and team alike: they use the
+owner's stored credential for the target repository's host and never the forge
+CLI's own login, so a CLI login alone does not let them act. Store credentials
+with `hashd forge login --host <host>` or in the web's **Settings > Forge**
+panel. Project-level calls that belong to no workstream (project PR feedback,
+project clone) still use an authenticated local CLI first in solo mode, then a
+stored credential. Stored credentials remain encrypted and are
 never returned by the listing API. Each host (and, on Azure Repos, each
 organisation) holds one credential: a static token or an Entra binding.
 `hashd forge status [--host H --scope S]` lists each key with its source, and
@@ -740,8 +762,8 @@ Minimum agent/tool versions verified for this release:
 
 | Tool | Minimum | Notes |
 |------|---------|-------|
-| Claude Code | 2.1.220 | required - the default agent for every stage |
-| Codex CLI | 0.145.0 | optional - swap in per stage if you want it |
+| Claude Code | 2.1.312 | required - the default agent for every stage |
+| Codex CLI | 0.163.0 | optional - swap in per stage if you want it |
 | uv | 0.11+ | |
 | Go | 1.26+ | |
 
@@ -766,7 +788,7 @@ spec_path: "SPEC.md"
 test_cmd: "make test"            # impl-phase tests; falls through to merge_gate_test_cmd if empty
 build_cmd: ""
 merge_gate_test_cmd: "make test" # merge-time tests; the visible failure surface
-test_timeout: 300
+test_timeout: 1200              # seconds; default: 20 minutes; 0 = no timeout
 merge_mode: "local"              # "local" or "pr"
 forge: ""                        # auto-detected from remote; "github", "bitbucket", "gitlab", "gitea", "azuredevops"
 # How the forge merges a PR (merge_mode: pr). Project scope only; checked
@@ -776,7 +798,7 @@ forge: ""                        # auto-detected from remote; "github", "bitbuck
 #                                  #   and hashd never rewrites its branch once a person reviewed it); unset is the
 #                                  #   forge's default: forge on Azure Repos, hashd elsewhere; forge needs Azure Repos
 #                                  #   or GitHub, whose PR reads report every review
-#   merge_strategy: merge          # merge (default), rebase, rebase_merge; squash is refused until squash lineage exists (#2211)
+#   merge_strategy: merge          # merge (default), squash, rebase, rebase_merge; within what the forge supports
 #   delete_source_branch: true     # true/false; unset deletes in forge completion mode and keeps each forge's own call in hashd mode
 # Build artifacts written into the TRACKED tree that must never land on a
 # branch (compiler doc output, say). The merge-gate heal still proves the
@@ -801,6 +823,20 @@ Run `hashd doctor --show-defaults` to see all available settings and their defau
 Run `hashd doctor --reset-to-defaults` to strip behavioral overrides and restore defaults while preserving identity and build settings.
 
 Use `hashd config ...` for system-wide overrides and `hashd project config ...` for project overrides. `list` shows the effective config and marks overridden values on TTYs, `diff` shows only overrides with their baseline values, and `show <key>` prints the effective value plus its Default/System/Project provenance. `reset --all` clears all overrides at the invoked scope. Shell completion includes config verbs and schema-backed key names.
+
+The system-only `upgrade.backup.keep` setting controls how many
+retention-eligible automatic upgrade backups to keep (default **2**).
+Zero keeps none of those eligible backups; it does not disable backup
+creation or delete protected upgrade backups or manual backups. Project
+overrides are not supported. Values must be non-negative integers;
+negative, fractional and non-integer values are refused.
+
+```bash
+hashd config set upgrade.backup.keep 5
+hashd config get upgrade.backup.keep
+hashd config set upgrade.backup.keep 0
+hashd config reset upgrade.backup.keep  # restore the default
+```
 
 ### Test Command Configuration
 
@@ -827,11 +863,17 @@ file it runs that file's own tests, or a source file's sibling `foo_test.go`
 tests (never the rest of the package, nor its importers); it also runs the tests
 that read a touched non-Go file, and the pytest suites and shell tests the
 touched files reach. A file nothing claims runs nothing there and is named in the log;
-the full suite covers it, and everything else, at the plan's last micro-commit
-and at the merge gate. After a pass it records, in the checkout's git dir, the
-content it passed on; the next run on the same base selects only the touched
-paths that changed since, and any other run (a new base, changed fast-check
-scripts, no record) selects them all.
+the full suite covers it, and everything else, at the merge gate and at the plan's last
+micro-commit. There the test stage runs `merge_gate_test_cmd` as its full check until a
+passing test-stage run of that command is recorded for that micro-commit on the branch
+head the stage runs on; once one is, that micro-commit takes the fast check like every
+other, while a failed full run, a moved head, or no selected fast check keeps the full
+command coming. A head that only clean sync rebases moved is the exception when
+`workflow.post_rebase_test` is `fast`: the pass they carried releases a fast check handed
+both the branch's paths and those the base moved under it. After a pass `ci-fast.sh`
+records, in the checkout's git dir, the content it passed on; the next run on the same
+base selects only the touched paths that changed since, and any other run (a new base,
+changed fast-check scripts, no record) selects them all.
 Enable it on a project with:
 
 ```bash
@@ -1072,8 +1114,9 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 | **Codex** | `codex` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
 | **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
 | **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
+| **Antigravity** | `agy` | available | print, json, edit, implement, implement_resume | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google account or Gemini API key |
 | **OpenCode** | `opencode` | available | print, json, review, review_resume, implement, implement_resume | `npm install -g opencode-ai` | Depends on model |
-| **Kimi Code** | `kimi` | available | print, json, edit, review, review_resume, implement, implement_resume | `uv tool install kimi-cli` | Moonshot (~$19/mo) |
+| **Kimi Code** | `kimi` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @moonshot-ai/kimi-code` | Moonshot (~$19/mo) |
 | **Qwen Code** | `qwen` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @qwen-code/qwen-code` | Qwen OAuth (free) |
 
 **Status:** `active` = tested and verified. `available` = config defined, not yet verified (assign with `--force`).
@@ -1153,12 +1196,12 @@ Connectors are hashd's plugin system for external integrations. They're auto-dis
 
 | Connector | What it does | CLI | Docs |
 |---|---|---|---|
-| **GitHub** | Resolve GitHub issue references -- `@github:42` in stories, ACs, chat | `hashd github setup`, `hashd github status` | [docs](docs/CONNECTORS.md#github) |
-| **Jira** | Resolve Jira issue references -- `@jira:PROJ-123` in stories, ACs, chat | `hashd jira setup`, `hashd jira status` | [docs](docs/CONNECTORS.md#jira) |
-| **Confluence** | Read Cloud page artifacts -- `@confluence:123456` in reference-enabled inputs | None; existing project configuration editors | [docs](docs/CONNECTORS.md#confluence) |
-| **Azure** | Read Azure DevOps Services work items -- `@azure:123` and shared reference search | None; existing project configuration editors | [docs](docs/CONNECTORS.md#azure-boards) |
-| **ClickUp** | Read ClickUp tasks -- `@clickup:86a4xte6z` and shared browsing of one configured List | None; existing project configuration editors | [docs](docs/CONNECTORS.md#clickup) |
-| **Figma** | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | `hashd figma connect`, `hashd figma list`, `hashd figma import`, `hashd figma show`, `hashd figma status`, `hashd figma sync`, `hashd figma profile` | [docs](docs/CONNECTORS.md#figma) |
+| **GitHub** | Resolve GitHub issue references -- `@github:owner/repo#42` in stories, ACs, chat; `@github:42` is shorthand for the configured repository | `hashd connector github status`, `hashd connector github check`, `hashd connector github configure` | [docs](docs/CONNECTORS.md#github) |
+| **Jira** | Resolve Jira issue references -- `@jira:PROJ-123` in stories, ACs, chat | `hashd connector jira status`, `hashd connector jira check`, `hashd connector jira configure` | [docs](docs/CONNECTORS.md#jira) |
+| **Confluence** | Read Cloud page artifacts -- `@confluence:123456` in reference-enabled inputs | `hashd connector confluence status`, `hashd connector confluence check`, `hashd connector confluence configure` | [docs](docs/CONNECTORS.md#confluence) |
+| **Azure** | Read Azure DevOps Services work items -- `@azure:123` and shared reference search | `hashd connector azure status`, `hashd connector azure check`, `hashd connector azure configure` | [docs](docs/CONNECTORS.md#azure-boards) |
+| **ClickUp** | Read ClickUp tasks -- `@clickup:86a4xte6z` and shared browsing of one configured List | `hashd connector clickup status`, `hashd connector clickup check`, `hashd connector clickup configure` | [docs](docs/CONNECTORS.md#clickup) |
+| **Figma** | Import and reference Figma designs -- `@figma:frame` in stories, ACs, chat | `hashd connector figma status`, `hashd connector figma check`, `hashd connector figma configure` | [docs](docs/CONNECTORS.md#figma) |
 
 The GitHub and Jira connectors are reference resolvers: they read issue details
 on demand, cache them, and unfold the reference into agent context. Neither

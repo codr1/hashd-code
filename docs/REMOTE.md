@@ -21,8 +21,8 @@ hashd pair
 
 Turning Network access on or off restarts the managed server and Web processes.
 The command and settings screen show the restart notice before applying the
-change. With access on, hashd-server listens on all interfaces and serves HTTPS.
-Requests from another device require authentication. Managed hashd-web stays
+change. hashd-server serves HTTPS whether access is on or off; with access on it
+listens on all interfaces. Requests from another device require authentication. Managed hashd-web stays
 on loopback in every mode; browsers reach it through hashd-server's HTTPS
 `/ui` and `/join` relay.
 
@@ -49,8 +49,8 @@ To close network access again, run this on the server machine:
 hashd network off
 ```
 
-hashd-server returns to a localhost-only listener; managed hashd-web remains
-on loopback. Existing pairings can be managed from Network access; turning the
+hashd-server returns to a localhost-only HTTPS listener; managed hashd-web
+remains on loopback. Existing pairings can be managed from Network access; turning the
 listener off is not a replacement for revoking an unwanted device.
 
 ## Invite someone to a Team server
@@ -66,7 +66,9 @@ account; first-time setup lets the person choose a password. They open the link
 in a browser or use `hashd join '<join-link>'` on their machine.
 
 Team mode keeps per-person identity and ownership. Only a story's owner may
-change it; unassigned work is open to claim, and assignment remains open-grab.
+change it, and assignment remains open-grab. Unassigned work does not run and
+takes no change until someone takes it with `hashd assign`; closing it takes it
+for the person closing. Work in flight cannot be unassigned.
 Server settings are available only when the server offers their actions. The
 TUI and Web do not grant permissions independently.
 
@@ -85,12 +87,22 @@ sign-in methods and runner placement.
 From Network access, choose **Add a runner**, or register it from the CLI:
 
 ```bash
-hashd runner add build-box --project <project>
+hashd runner add build-box
 ```
 
-In Settings, enter the runner name and its allowed projects. Leaving Projects
-blank registers the runner without project access. No project is granted
-implicitly.
+With no access flags (or `--access private`), the runner is private to you: it
+runs only your work, from any project you can work on. A server administrator
+can also register:
+
+- `--access anyone`: accepts any project's work (Anyone).
+- `--project <name>` (repeatable): accepts only those projects' work (These
+  projects).
+- `--owner <email>` (optionally with `--access private`): private to that
+  active user instead of yourself.
+
+Do not combine `--project` with `--access` or `--owner`, or `--access anyone`
+with `--owner`. In every level the work's owner must still have access to its
+project; runner access never grants project access.
 
 Run the returned link on the runner machine:
 
@@ -109,6 +121,41 @@ execute. Inspect the resulting registration and its observations with:
 hashd runner list
 hashd runner show build-box
 ```
+
+`hashd runner list` shows only runners eligible to run your work in at least
+one project you can access; `hashd runner show` reads any runner you can see by
+its ID or name.
+
+Each remote runner's `Access:` line shows its level: `Anyone`,
+`These projects: <projects>` (only the projects you can view, followed by
+`; others not visible to you` when some are hidden), or
+`Private (owner <name>)`.
+
+### Change a runner's access
+
+Change an active remote runner's access level after registration with:
+
+```bash
+hashd runner access build-box --access anyone
+hashd runner access build-box --project alpha --project beta
+hashd runner access build-box --access private
+hashd runner access build-box --access private --owner alice@example.com
+```
+
+`hashd runner access` accepts the same `--access anyone|private`, `--project`
+(repeatable) and `--owner <email>` flags as `hashd runner add`, requires a
+selection, and never prompts:
+
+- **Private runner**: only its owner may change its access (even a server
+  administrator who is not the owner cannot). Its owner may widen it to
+  `--access anyone` or `--project <name>` without administrator approval. A
+  Private runner keeps its current owner; naming another `--owner` is refused.
+- **Shared runner** (`Anyone` or `These projects`): only a server administrator
+  (owner or admin role) may change its access. Converting a shared runner to
+  Private takes an active `--owner` and defaults to yourself.
+
+Work already placed on the runner drains to completion under its current
+placement; only new placements follow the new access level.
 
 To rejoin an existing runner after a CA change, its owner or a server
 administrator issues a fresh link:
@@ -139,6 +186,19 @@ links carry its CA pin, and the client saves the CA trust separately from its
 sign-in. Server certificates cover the detected names and addresses. A changed
 address can get a new serving certificate without replacing the CA or breaking
 existing pairings.
+
+Local connections use HTTPS too. Every automatically generated serving
+certificate covers `localhost`, `127.0.0.1` and `::1`, and the CA persists
+across restarts; a supplied certificate covers the names it was issued for. A local `http://`
+address, from the built-in default, `HASHD_SERVER_URL`, `--server` or a saved
+connection, is dialled as `https://` with the same host, port and path, and
+keeps the sign-in and CA trust saved for it. A loopback address without a
+port keeps its port 80 (`http://127.0.0.1` dials `https://127.0.0.1:80`); a
+remote `http://` address is left as given.
+Saved connections record the `https://` address: `hashd server set`, `hashd
+restart` and a runner's start save it, and upgrading to this release rewrites
+the server user's saved connection and the runner profile in its ops root,
+keeping their sign-in and CA (runtime migration `M038_local_https_connections`).
 
 CLI join saves trust for hashd clients; it does not install the CA into the
 operating system or browser. A browser opening a direct hashd HTTPS address
@@ -309,7 +369,7 @@ alive. Offline registrations retain their last values and observation
 times, marked historical. Missing or unreadable measurements are unavailable,
 not zero. The server's `/status` read measures its own host with the same probe.
 
-Remote link timings show the preceding successful check-in round trip and the
+Remote link timings show the preceding successful check-in, timed from before the runner's stage-journal reconciliation to the end of reply handling, and the
 latest successful forwarded response, each with its measurement time. Failed
 or cancelled reads do not replace a successful timing. Same-machine link
 timings are not applicable to the local runner.
@@ -338,6 +398,26 @@ the URL/code instructions. Closing Fleet does not cancel it. A new press
 supersedes it; failure, connection loss or the five-minute timeout stops its
 process group and removes its temporary home. The previous login stays in place
 until a successful attempt is confirmed by the agent and promoted.
+
+Fleet's `sign_out` action is `DELETE /agents/{agent}/login?runner_id=<id-or-name>`.
+The runner selector is required, and the login is always the acting person's:
+an administrator who can see another owner's metadata is offered no sign-out
+for it. The runner runs the agent's own declared sign-out (`logout_args`) in that
+person's hashd login folder over the same connection, and the same attempt
+record serves it through `GET /agents/{agent}/login`: progress, an outcome
+(`signed_out` once the agent's status command confirms it, `logout_failed`,
+`unconfirmed`) and a Diagnostic for a failure. It never removes or changes a
+registered credential, and `DELETE /agents/{agent}/credentials` keeps its
+meaning. When the person still has a registered credential that runs receive
+(any method, unless set to manual or in a state the credential policy
+refuses), the read's `notice` says so in one line and names
+`hashd agents logout <agent>`. `sign_out` is offered only for an agent with its
+own sign-out, on a connected runner on the server's version, after a fresh
+readable observation (its login expiry included), and while no sign-in or
+sign-out attempt runs; the DELETE reads the login first and accepts only what
+that read offers, and the runner's own check refuses a race. A reply lost on
+the way back, or a connection lost after the request was sent, answers 503:
+the sign-out may have started, so refresh and read, never repeat it blind.
 
 The agent's own status command supplies sign-in state. Capability-declared
 `login_expiry` names a relative login file, a JSON field path, its `unix_ms` or

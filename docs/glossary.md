@@ -20,7 +20,7 @@ The bulleted, testable conditions a Story must satisfy to be considered done.
 ACs are *input documentation* that grounds the implementer and reviewer — they
 are not completion markers, and merge readiness is gated by FSM state and review
 verdicts, not by checking off AC bullets. Operators reshape ACs with `hashd plan
-{edit-ac, delete-ac, descope-ac, rescope-ac}`.
+{edit-ac, delete-ac, descope-ac}`.
 
 ### Workstream
 

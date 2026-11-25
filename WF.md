@@ -2,19 +2,7 @@
 
 ## Usage-limit failures
 
-An implementation or final-review usage limit fails the run. It is not work in flight, holds no restart
-boundary, and keeps the normal failure actions. Its standing error names the
-agent, account and any reset time from the structured error envelope, with
-guidance to run again, switch account or switch agent. Account marks are
-informational and never refuse, skip or delay a launch.
-
-When a reset time is supplied, one separate durable server timer schedules a
-retry at that instant, in every autonomy mode. The failure shows the retry
-time and remaining duration. No reset means no timer. The timer can dispatch
-only while that exact failed run still stands; an operator workstream/story
-action supersedes it. A retry goes through normal admission and guards. An
-unconfirmed dispatch is reported, never blindly repeated. See
-[Architecture](docs/ARCHITECTURE.md) for persistence and restart recovery.
+An agent call that hits its account usage limit may make one immediate second attempt within its existing attempt budget. If it succeeds, work continues. If it fails, the run ends with the final attempt's error and releases its slot. An operator can switch accounts or agents and use `hashd run` to try again. Account marks are informational. Runs started on this release create no quota timers. When upgrading from a release with reset timers, follow the legacy timer cleanup in [Architecture](docs/ARCHITECTURE.md#failure-catalogue).
 
 ## Needs-sign-in failures
 
@@ -32,11 +20,10 @@ status. A transient token failure is not this failure: it is an
 infrastructure error the activity retries.
 
 A run that fails this way records, with its failure, one
-single retry of the same kind as a usage-limit retry, triggered by sign-in
-rather than by a time: it names the owner, the credential key and the
+retry triggered by sign-in: it names the owner, the credential key and the
 account, has no reset time and uses no timer. The failure says hashd retries
 the run once when the owner can use that key again, and an operator
-workstream/story action supersedes the retry as it does a timed one. A
+workstream/story action supersedes the retry on the same terms as other run retries. A
 failure at provisioning records it too, with the failure, whether the
 refusal came from the server's clone or fetch, a runner's acquisition or a
 baseline command's credential. A failure publishing to the open PR records no
@@ -53,8 +40,8 @@ sign-in, an account reuse or bind, or a stored static token for the key.
 Whether the key is usable is read from stored state only, never from the
 identity provider or the forge: the key is bound to an account recorded as
 usable (a rebinding to another account included), or the owner stored a static
-token for it. It fires once, in every autonomy mode, through the same
-dispatcher as a timed retry, and records a `sign_in_retry` result. A run
+token for it. It fires once, in every autonomy mode, through normal
+run dispatch, and records a `sign_in_retry` result. A run
 whose own workflow is still closing keeps its retry until it has closed.
 Housekeeping fires a waiting retry whose key is already usable, and reports a
 spent one with no recorded result as unconfirmed without sending it again. An
@@ -77,6 +64,31 @@ logging out again retires it. A `retired` retry is never dispatched, recovered
 by housekeeping or revived by an operator action. Storing a static token or
 rebinding the key is a trigger, not a retirement.
 
+## Server-unavailable failures
+
+A runner stage that ended on the server's own 503 answer to one of its calls
+fails with `server.unavailable`, unless the server's answer named a code of its
+own other than a transient one (a 503 carrying a transient code still fails
+with `server.unavailable`); nothing else makes a failure wait, not Temporal's default retryability nor
+the runner's default retry flag. The failure records one retry, as a sign-in
+failure does, with no reset time and no timer. Each housekeeping sweep
+dispatches it through the same dispatcher, once the failed run's own workflow
+has closed and while no restart hold or reservation of the workstream stands,
+and records an `available_retry` result. The run it dispatches starts the
+stage again from its start and is the check: if the server answers 503 again it
+fails with its own new retry, so the workstream waits sweep by sweep. Its
+standing error says hashd runs it again when the server can serve it. A failure
+publishing to the open PR records no retry. An operator action, a newer run or
+a closed workstream supersedes it, and `hashd run <ws>` runs it at once.
+
+A finished stage's result and evidence are saved in the runner journal before
+delivery. Transport failures retry the identical uploads and result on the
+existing reconnect schedule, including after runner or server restart. The
+execution deadline does not discard finished work. The server's existing
+execution fences still decide acceptance: a stale result cannot advance work,
+and its evidence and refusal remain retained. A non-fencing refusal stays
+pending and is reported. The stage is never executed again to deliver its result.
+
 ## Scope and related references
 
 This document owns FSM and sub-FSM workflow semantics: states, transitions,
@@ -97,9 +109,12 @@ positions. See [Workstream State Model](#workstream-state-model).
 ## Identity and authorization
 
 Solo and team deployments share these workflow semantics. Team-mode operator
-mutations require the item's owner; unassigned items remain open, and explicit
-assignment is open-grab. Assignment changes responsibility, not execution or
-content ownership. Internal and agent-telemetry exemptions, bootstrap identity,
+mutations require the item's owner, and explicit assignment is open-grab. An
+unassigned item does not run in either deployment: every request that would
+start or continue its work is refused naming `hashd assign`, and a close first
+assigns it to the person closing. `hashd unassign` is a team-server command and
+is refused while the item is in flight. Assignment changes responsibility, not
+execution or content ownership. Internal and agent-telemetry exemptions, bootstrap identity,
 transport and token rules are in the [server security model](docs/REMOTE.md#server-security-model).
 
 Runner registration is independent of story/run state. Solo has only the
@@ -187,7 +202,7 @@ its base stage's role. The table is pinned to `roleStageMap`
 
 | role | stages |
 |---|---|
-| `planner` | `breakdown`, `browser_classify`, `chat`, `concern_triage`, `detect`, `failing_tests`, `plan_add`, `plan_split`, `pm_annotate`, `pm_describe`, `pm_discovery`, `pm_docs`, `pm_edit`, `pm_refine`, `pm_route`, `pm_spec`, `tech_tree` |
+| `planner` | `ac_amendment_derive`, `breakdown`, `browser_classify`, `chat`, `concern_triage`, `detect`, `failing_tests`, `plan_add`, `plan_split`, `pm_annotate`, `pm_describe`, `pm_discovery`, `pm_docs`, `pm_edit`, `pm_refine`, `pm_route`, `pm_spec`, `tech_tree` |
 | `coder` | `fix_generation`, `implement` |
 | `reviewer` | `final_review`, `review` |
 | `reviewer_adjudicator` | `adjudicate`, `scope_adjudicate` |
@@ -388,7 +403,7 @@ The main planner stays conservative: never surfaces work that depends on in-flig
   Done
 ```
 
-**Reads:** before reading REQS, discovery brings the REQS checkout up to its remote with the same best-effort sync the REQS writers use, under the REQS lock, and releases the lock before the agent starts. The prompt's REQS and the working tree the agent inspects both come from that synced checkout. A REQS repo with no remote configured is read as it stands. When the checkout cannot be brought current, discovery runs on local state, and its discovery record says so with the git cause; `hashd plan status` shows that notice.
+**Reads:** before reading REQS, discovery brings the REQS checkout up to its remote with the same best-effort sync the REQS writers use, under the REQS lock, and releases the lock before the agent starts. The prompt's REQS and the working tree the agent inspects both come from that synced checkout. A REQS repo with no remote configured is read as it stands. When the checkout cannot be brought current (a failed fetch or pull, a fetch killed by `git.network_timeout`, a rebase in progress, unpublished commits, or a checkout on no branch or off the default branch), discovery stops before it reads REQS, prepares sources or runs the agent, leaves the project's suggestions unchanged, and records a failed run whose Diagnostic names the checkout, the git cause and the step that fixes it; `hashd plan status` shows that Diagnostic whole. This sync and read apply only in `repo` and `local`: `external` hands discovery the team's `spec_paths` instead, and `none` refuses it ([Spec Mode](docs/REQS.md#spec-mode)).
 
 **Concurrency:** discovery and tech-tree generation share one per-project workflow.
 A second discovery dispatch while that workflow is open is refused; it does not
@@ -471,8 +486,8 @@ decides no proposal and starts no story edit. The answer that completes the
 round resumes that attempt as a new `resume` attempt (see **Arc proposal**).
 
 Discovered stories (`discovery` and any other origin that must anchor) require a
-REQS region. Ad-hoc stories (`manual`, `bug`, `split`, `tracker`, `deferred`, and
-legacy origins) may be planned and edited without REQS; they may omit anchoring,
+REQS region. Ad-hoc stories (`manual`, `bug`, `split`, `tracker`, `deferred`,
+`chat`, and legacy origins) may be planned and edited without REQS; they may omit anchoring,
 but supplied annotations still undergo normal validation. A connector-imported
 suggestion claims as `tracker`. A `planner`-origin suggestion (a planned story's
 deferred work) records whether that planning anchored the story in REQS: one
@@ -505,8 +520,8 @@ it. Until then the story does not start implementation (`start_impl`'s guard
 `story_reqs_scope_written`), and the TUI and web say the narrowing is not yet
 written. The raw `accept` transition
 refuses a draft with a scope (`approve.reqs_scope_pending`), and a split of the
-story, an Arc decision among them, removes it. An Arc, a story under Arc review
-and a requirements revision never narrow. Deferred
+story, an Arc decision among them, removes it. An Arc and a story under Arc review
+never narrow. Deferred
 work whose requirement text lies inside the claimed region goes to `excluded`,
 so the archive's burn of the story's region leaves it in REQS.
 
@@ -521,7 +536,7 @@ Created by the **implement-stage agent** during workstream execution. When the i
 | Emission shape | Multi-emit — the implementer emits one or more questions in `clarifications_needed: [...]`; the runner persists the batch as blocking CLQs for the current micro-commit and stops for an answer |
 | Operator UX | Bundle answer — operator reads every pending CLQ for the workstream, submits one combined answer string. The CLQ-NNN ids are hidden as an *address*, not as a label: `hashd answer` refuses a `CLQ-` prefix so the operator only ever types a story or workstream id, while `hashd show <workstream>` prints `CLQ-041 [BLOCKING] ...` and the web's clarification cards read `CLQ-041 · round 2`. |
 | Operator answers via | `hashd answer <workstream-id> "..."` (TUI: `c` key on workstream detail) |
-| Trigger on submit | Every pending CLQ on the workstream flips to `answered` with the bundled answer text and the next agent run auto-dispatches (start_impl from `active`, resume_impl from `awaiting_human_review`). |
+| Trigger on submit | Every pending CLQ on the workstream flips to `answered` with the bundled answer text and the next agent run auto-dispatches (start_impl from `active` or `awaiting_human_review`). |
 | Consumed by | The implement-stage prompt context on the next workstream run picks up the answered CLQs as part of the implement prompt |
 | Loop | Implement agent emits new workstream CLQs as further ambiguities surface across runs. Each CLQ persists independently in storage; operators always see them grouped by workstream. |
 
@@ -532,7 +547,7 @@ Created by the **implement-stage agent** during workstream execution. When the i
 | | Story-planning | Workstream-runtime |
 |---|---|---|
 | Discriminator | `story_id` set, `workstream_id` null | `workstream_id` set |
-| Submit trigger | Bundle answer or final individual blocking planning answer dispatches edit-flow | Bundle answer dispatches workstream run (start_impl or resume_impl) |
+| Submit trigger | Bundle answer or final individual blocking planning answer dispatches edit-flow | Bundle answer dispatches workstream run (start_impl) |
 | Re-emit on next round | Planner emits replacement bundle; old answered CLQs preserved as context | Implement emits new CLQs as needed |
 | Operator surface | TUI 'a' (story_detail) → bundle modal | TUI 'c' (workstream_detail) → bundle modal |
 | CLI surface | `hashd answer STORY-X "..."` | `hashd answer <workstream-id> "..."` |
@@ -545,12 +560,27 @@ questions. Individual story answers save first, then dispatch when the final
 blocker is answered. Workstream bundle answers also save first so the resumed
 run cannot immediately re-block on an unanswered CLQ.
 
+A story's question read includes pending questions from its own workstream;
+question alerts open `hashd answer show STORY-X --project=…`. When only
+workstream questions are pending, `hashd answer STORY-X "..."` uses the existing
+workstream answer path and its exact pending scope. Story-only questions keep
+the story answer path and its admission. If both scopes are pending, the bundle
+is refused without saving or dispatching: answer the workstream questions first,
+then the story questions only when the story's admission permits it. Otherwise
+the Diagnostic explains why the workstream holds the story's own questions.
+The advertised story `answer` action follows this same server decision; clients
+render that row without their own routing rules.
+
 ### Story Scope Management
 
+What each scope change does to the story's claim on REQS, stage by stage, is in [docs/REQS.md](docs/REQS.md#a-storys-claim-stage-by-stage). The rule every change to requirement text follows, a minimal edit that a person approves, is [there too](docs/REQS.md#the-rule-for-changing-requirement-text).
+
 Descoping removes a criterion from active acceptance criteria and excludes it
-from implementation. Rescoping restores it. Merge finalization preserves deferred
-criteria in REQS with their source story's provenance after burning its WIP
-sections. See [scope commands](docs/walkthrough.md#adjust-story-scope).
+from implementation. On a draft, descoping writes any returned REQS prose
+directly and records a final outcome (`recorded` or `no_text`); draft approval
+does nothing with descopes. Merge finalization preserves deferred criteria with
+no recorded outcome in REQS with their source story's provenance after burning
+its WIP sections. See [scope commands](docs/walkthrough.md#adjust-story-scope).
 
 After planning or editing stores a result, autonomous size-offer failures keep
 that result intact and record their originating Diagnostic for the operator.
@@ -620,7 +650,7 @@ description or criteria list two or more independently deliverable features
 gets `split` (or `arc`) whatever its size, and `fits` with a `reason` saying why
 the features are inseparable when they cannot be delivered separately. The
 stored estimate describes the story as last planned:
-planning, an edit and an approved revision store it, a direct operator edit of
+planning and an edit store it, a direct operator edit of
 the story's fields or criteria leaves it unchanged, and every other content
 write deletes it. It never blocks acceptance, changes stage or raises a
 clarification. Split and Arc proposals receive the same advisory threshold when
@@ -663,7 +693,7 @@ nonexistent), then:
 a draft or draft_failed story with an unfinished prerequisite moves to
 `pending` and replans once they are implemented; a pending story whose
 prerequisites are then all implemented or abandoned -- an emptied list included -- is
-released to `queued` and replanned now; an accepted story may lose prerequisites or gain
+released to `queued` and replanned now; an approved story may lose prerequisites or gain
 implemented ones, never an unfinished one, and does not move. An Arc records
 any valid edit, an unfinished prerequisite included, and never moves: an Arc
 is approved, and completed, only once no prerequisite is active -- each is
@@ -695,99 +725,13 @@ releases. In supervised mode the child starts as a `draft` for the operator.
 
 #### Descoped Criteria Lifecycle
 
-```mermaid
-flowchart LR
-    AC["Acceptance Criteria"] -- "descope" --> DC["Descoped Criteria"]
-    DC -- "rescope" --> AC
-    DC -- "merge" --> REQS["REQS.md\n(Deferred from STORY-xxxx)"]
-```
-
-- A criterion remains part of its story while descoped and can be rescoped before merge.
-- Merge finalization adds a "Deferred from STORY-xxxx" section to REQS.md after
-  burning the implemented story's WIP sections.
-- The deferred REQS items are picked up by the next `hashd plan` discovery run.
-- During implementation, descoped criteria are injected into agent prompts as
-  negative requirements ("DO NOT implement").
-
-TUI controls are in [Story scope operations](docs/watch.md#story-scope-operations).
+See [docs/REQS.md](docs/REQS.md#descoped-criteria-lifecycle): what descoping a criterion does to the story and to REQS, at each stage.
 
 ---
 
 ## Artifact Edit Locks (REQS / SPEC)
 
-Manual artifact inspection is read-only. Editing always reloads the current
-protected REQS or SPEC document under its lease; historical views cannot be
-saved as current edits. REQS writes preserve WIP protection; SPEC writes do not
-change requirements or acceptance criteria. [Viewer controls](docs/watch.md#document-inspection-and-editing)
-are documented separately.
-
-REQS.md and SPEC.md have independent per-project edit locks coordinating human
-editors with planning, story-edit and documentation workflows. Housekeeping REQS
-cleanup holds the PM singleton and local flock, but does not acquire the artifact
-lock; these locks therefore do not cover every automated writer. Each lock is a
-workflow-ID singleton (`reqs-lock:{project}` / `spec-lock:{project}`) --
-`ArtifactLockWorkflow` -- the same primitive family as `pm:{project}` and
-`mergelock:{project}`. Whoever's holder currently runs under that ID holds the
-lock; the lock's state (holder, FIFO queue, lease) is durable across restarts.
-
-A cancelled merge keeps `mergelock:{project}` until its locked section ends, and
-undoes its admission only after the lock child has closed. The local section
-stops at its next step boundary: it starts no new step after the cancel, and
-once `merge_attempt` begins it runs through to its record. A step that fails
-after the cancel arrived stops as the cancel, returning the workstream to the
-state it was admitted from, and the cancel record carries the step's failure
-and output as evidence.
-
-A forced cancel (the merge execution cancelled, then sent `force-cancel` on the
-same run; a failed signal leaves a plain, waiting cancel) does not wait: the
-`local` or `pr_approved` locked section is no longer waited for, the lock
-frees, and the merge undoes its admission at once. It records a work-in-progress
-stop saying the git work in the repository may have been cut off partway, with
-`git -C <repo> status` and the retry as next steps.
-
-Both are `POST /flow-runs/{id}/cancel` on the `merge:{project}:{ws}` (or
-`resolve:{project}:{ws}`) handle. With no body the cancel waits: the lock and
-the admission are released when the running git work ends, and the response says
-a stop was requested, not that the run is cancelled. With `{"force": true}` they
-are released at once. Force is refused on any other kind of run.
-
-Waiting is **event-driven, never polled**. Two acquire paths feed one FIFO queue:
-
-- **Clients** (TUI editor, CLI) acquire via a blocking Update -- it parks in the
-  workflow until granted, then returns a lease token. The TUI drives a **10-min
-  idle lease** reset on keystrokes (2-min warning, then drop-to-read-only); the
-  CLI is identity-keyed (the holder is the calling user, no token threaded).
-- **Automated writers** (planning, story-edit, docs) acquire via a signal and
-  are **signaled back** on grant, so a waiting plan costs O(1) history, not one
-  event per poll. Planning/edit take `reqs-lock` **inside** their pm section (pm
-  stays the automated-vs-automated mutex; the artifact lock is purely the human
-  boundary); docs takes `spec-lock` for its run. A 2-min heartbeat holds the
-  lease; release is explicit, and the writer's body deadline + lease are the
-  crash backstop.
-
-```mermaid
-sequenceDiagram
-    participant H as Human editor (TUI/CLI)
-    participant L as reqs-lock:{project}
-    participant P as Planning (pm section)
-    H->>L: acquire (Update) -> holds, 10-min idle lease
-    P->>L: acquire (signal) -> queued behind H
-    Note over H: edits REQS, heartbeats on keystroke
-    H->>L: release (or lease lapses after 10-min idle)
-    L-->>P: granted (signal back) -> planning proceeds
-    P->>L: release when the section completes
-```
-
-**Save guard:** a write is rejected if its token / caller-identity no longer
-holds the lock (a lapsed lease). A write while an **automated** writer holds the
-lock is always rejected (its edit must not interleave); another **human** holder
-also blocks tokenless writes and document creation. **Break-glass steal**
-exists server-side but is unpublished (no CLI verb, no TUI key) and refuses to
-steal from a system process -- yanking a live planning run would corrupt its
-in-flight REQS write. When Temporal is absent the whole mechanism degrades to
-CAS-only writes. A connectivity failure never authorizes this fallback. Save
-responses pair document content with its revision; clients must not advance a
-draft's base revision without the corresponding content.
+See [docs/REQS.md](docs/REQS.md#artifact-edit-locks-reqs--spec).
 
 ---
 
@@ -804,14 +748,53 @@ or gate re-entry, and activity retry reconciles it before composing Git context.
 Reset/replan clear it only after their authorized Git reset succeeds; partial
 breakdown preserves it along with the worktree.
 
-`hashd reset <workstream> --checkpoint` is an explicit recovery for a stopped
+`hashd reject <workstream> --reset` is an explicit recovery for a stopped
 implementation whose pending attempt changed history. It restores that attempt's
 recorded starting HEAD, discards the attempt's committed/staged/unstaged/untracked
 changes, clears its saved agent session and checkpoint, and preserves the plan's
-completed micro-commits and review guidance. This is not ordinary `reset`, which
-redos the whole plan, nor permission to rewrite published work. A running or
-unverifiable conflicting execution, changed branch, incomplete/published history,
-or unfinished merge/rebase refuses recovery without resetting files.
+completed micro-commits and review guidance. Ordinary `reset` redos the whole
+plan. Published history uses the existing PR rewrite rule and an explicit origin
+lease, retained across retries. A running or unverifiable conflicting execution,
+changed branch, unreadable publication state, or unfinished merge/rebase refuses
+recovery without resetting files.
+
+Before rewinding, checkpoint reset records `reset_discard` with every commit
+reachable from the backup's saved original tip and not from checkpoint HEAD,
+including merged history. Retained checkpoint history is never a dropped origin.
+A record-write failure prevents the rewind. The discard is stamped only after
+an observed rewind; a failed rewind withdraws it only if HEAD provably remains
+at its original tip. Later failures preserve the backup, checkpoint and discard.
+Retries use the saved original tip and reuse the same scoped discard, even at
+checkpoint HEAD; an earlier unstamped record remains unresolved. Its receipt
+transaction explicitly refuses until the required discard has observed rewind
+confirmation; HEAD already equaling the checkpoint cannot supply that confirmation.
+The original discard, completed intents, checkpoint and backup remain intact,
+with no success receipt or receipt-backed cleanup. Once the
+checkpoint receipt commits, cleanup performs no rewind or discard writes.
+
+The unchanged checkpoint's receipt transaction also retires completed intents
+for its pending micro-commit whose resolved SHAs are dropped origins of that
+confirmed discard or reach them through earlier proven rewrite links, on the
+same project, repository, workstream and branch. This includes a successful
+rebase followed by failed publication; investigative evidence grants no link. Their outcome
+becomes `did_not_survive`; SHA, trees, candidates, attribution, replacement links
+and historical commit rows remain evidence. Retained and unrelated intents stay
+unchanged. A changed checkpoint or failed transaction retires nothing, and
+receipt events publish only after commit. Restarting a discarded, unpublished
+FIX invokes fresh implementation, ordinary verification and commit completion
+instead of adopting its old SHA or reporting its rewrite gap. Earlier completed
+micro-commits, plan completion and review guidance remain. Cleanup-only retries
+leave subsequent intents alone.
+
+It is also available at `awaiting_human_review` with a pending checkpoint, to
+discard a parked attempt while keeping the completed micro-commits. There it
+closes the parked run (`run:{project}:{ws}`) first, as the full reset does, and
+the receipt's transaction ends the park through the `reset` transition to
+`active`, so a receipt that lands has always left the park. A park with no
+pending checkpoint refuses with nothing touched, and any other running or
+unverifiable execution still refuses. A refusal after the close says the run was
+closed and the workstream is still parked: approve, reject and the same
+`reject --reset` retry still work, with nothing left to close.
 
 Before destruction, one private worktree-owned backup retains current history,
 index and files (including ignored files); failure to preserve it refuses reset.
@@ -821,7 +804,7 @@ unchanged checkpoint and writes `checkpoint_reset`, the reset retires the
 merge-gate repair at the story's recovery key, including a record owned by an
 earlier workstream (or the workstream recovery key when unlinked). An existing
 repair gets its own `merge_gate_repair_retired` timeline entry containing the
-whole row, with operation `reset --checkpoint`; absence adds no entry. Both
+whole row, with operation `reject --reset`; absence adds no entry. Both
 receipts publish only after commit. A changed checkpoint or receipt-write
 failure leaves the checkpoint, repair and timeline untouched. The next gate
 uses the repo's configured commands and a new failure has one automatic FIX.
@@ -869,7 +852,11 @@ flowchart TD
 
 **Build side effects in the test and commit stages.** The test stage stages the worktree, and the commit stage stages it again, through `mergeflow.StageWorktree`, which never stages a path the repo's `build_side_effects` names (`restore`, `clean`, `ignore`). After the build and the tests the stage restores each `restore` path the command changed from clean and removes each `clean` path it created; a path dirty before the command is left alone, and one `build_side_effects` timeline row says what was done. A `restore` path that holds an edit -- an agent's real lockfile change, say, read by the review stage in the checkout on the story's runner -- parks the human review gate with "build-owned path edited: <paths>" in every autonomy mode, autonomous included; `hashd approve` commits it with the change, and the commit stage refuses it without that approval. The implementation's dirty checks leave `ignore` paths out.
 
-**Fast check in the test stage.** The test stage's configured test gate runs one of two checks. The full check is the effective impl-phase test command (`test_cmd`, falling through to `merge_gate_test_cmd`). The fast check is `fast_test_cmd`, handed the files the branch touched. On a single-repo project both keys are project settings; on a multi-repo project each repo row carries its own `fast_test_cmd` and `commit_check` (`hashd project repo edit <repo> --fast-test-cmd ... --commit-check fast|full`, or `--repo-fast-test-cmd` on `hashd project add`), and a workstream runs its target repo's, whose worktree is the one the touched list is taken from. `gates.commit_check` (a repo's `commit_check`) picks: `fast` runs `fast_test_cmd`, `full` runs the full check, and unset runs `fast_test_cmd` when one is set and the full check otherwise. `hashd project config set` refuses a write that would leave a combination the stage cannot run -- `gates.commit_check=fast` with no `fast_test_cmd`, a value other than `fast` or `full`, or either project-level key on a multi-repo project, whose fast check lives in its repo rows -- the repo edit and project create paths refuse the same combinations in a repo's values, and the test stage, after the pre-commit hook, refuses them from a config edited by hand: the stage fails with that Diagnostic, is not retried, and runs no other command. The fast check runs `fast_test_cmd` with the stage's `tests_skipped` handling, deadline, failure parsing, loop guards, baseline exclusion and unresolvable-command skip. Baseline exclusion never passes a run whose build adapter reports that its failures cannot prove the whole build compiled unless the build command passed earlier in the same test-stage run; such a run stays test failed, and its baseline note and failure say why and name `build_cmd`. Its handoff is the list of every path that differs between the workstream's merge base (the same fork point the branch's other evidence uses) and the worktree's content -- the branch's commits, the staged change, the hook's rewrites and non-ignored untracked files -- taken with renames off, so a rename lists both its old and new path, and a deleted file is listed. The list is deduplicated, sorted and written one path per line, newline-terminated, to `stages/touched-files.txt` in the run directory; an empty set is an empty file. The command's environment carries `HASHD_TOUCHED_FILES` (that file's absolute path), `HASHD_TOUCHED_FILES_COUNT`, `HASHD_BASE_SHA` (the merge base), `HASHD_HEAD_SHA` (the worktree's HEAD) and `HASHD_TOUCHED_FILES_INLINE`, the complete list, only when it is at most 32 KiB; a longer list leaves that variable absent, never partial, and the file stays complete. A git failure taking the list fails the stage. When a touched path contains a newline, which the line-per-path list cannot carry, the stage runs the full check instead and records why. The record names the check. Every `test_result` row whose verdict a test command produced carries metadata `check` (`fast` or `full`), plus `touched_files` (the count) for a fast check and `check_reason` for a fast configuration's fallback; the row's content takes the same label after its existing qualifiers -- `COMMIT-X - Test PASSED (fast check, 12 touched files)`, `COMMIT-X - Test PASSED (baseline excluded; full check)` -- and `result` keeps its values. An automatic FIX's required verification produces the verdict it records, so that row reads `(required verification; full check)` whatever the configured gate ran first. A hook refusal's row names no check, since no test command ran. `stages/test.log` opens with a `=== CHECK ===` header naming the check, `touched_files` for a fast check, the fallback's `check_reason` and the command, ahead of `=== STDOUT ===` and of any baseline note; the reason and command are Go-quoted with `===` escaped, so no command can add a field or open a section, and a required verification's log reads `full`, as it runs the recorded command. The per-commit reviewer reads the row's metadata (the header when no row landed) and the final reviewer reads that header, and both say in their test results when the result came from a fast check and how many touched files it covered; a full check reads as it always has. A fast pass never satisfies an automatic FIX's test-kind required verification: the recorded command always runs after it. The merge gate, the pre-push gate and the finalize gates always run the full suite; post-rebase verification does too unless the project sets `workflow.post_rebase_test` to `fast` (see Post-rebase check).
+**Fast check in the test stage.** The test stage's configured test gate runs one of two checks. The full check is the effective impl-phase test command (`test_cmd`, falling through to `merge_gate_test_cmd`). The fast check is `fast_test_cmd`, handed the files the branch touched. On a single-repo project both keys are project settings; on a multi-repo project each repo row carries its own `fast_test_cmd` and `commit_check` (`hashd project repo edit <repo> --fast-test-cmd ... --commit-check fast|full`, or `--repo-fast-test-cmd` on `hashd project add`), and a workstream runs its target repo's, whose worktree is the one the touched list is taken from. `gates.commit_check` (a repo's `commit_check`) picks: `fast` runs `fast_test_cmd`, `full` runs the full check, and unset runs `fast_test_cmd` when one is set and the full check otherwise. `hashd project config set` refuses a write that would leave a combination the stage cannot run -- `gates.commit_check=fast` with no `fast_test_cmd`, a value other than `fast` or `full`, or either project-level key on a multi-repo project, whose fast check lives in its repo rows -- the repo edit and project create paths refuse the same combinations in a repo's values, and the test stage, after the pre-commit hook, refuses them from a config edited by hand: the stage fails with that Diagnostic, is not retried, and runs no other command. The fast check runs `fast_test_cmd` with the stage's `tests_skipped` handling, deadline, failure parsing, loop guards, baseline exclusion and unresolvable-command skip. Baseline exclusion never passes a run whose build adapter reports that its failures cannot prove the whole build compiled unless the build command passed earlier in the same test-stage run; such a run stays test failed, and its baseline note and failure say why and name `build_cmd`. Its handoff is the list of every path that differs between the workstream's merge base (the same fork point the branch's other evidence uses) and the worktree's content -- the branch's commits, the staged change, the hook's rewrites and non-ignored untracked files -- taken with renames off, so a rename lists both its old and new path, and a deleted file is listed. The list is deduplicated, sorted and written one path per line, newline-terminated, to `stages/touched-files.txt` in the run directory; an empty set is an empty file. The command's environment carries `HASHD_TOUCHED_FILES` (that file's absolute path), `HASHD_TOUCHED_FILES_COUNT`, `HASHD_BASE_SHA` (the merge base), `HASHD_HEAD_SHA` (the worktree's HEAD) and `HASHD_TOUCHED_FILES_INLINE`, the complete list, only when it is at most 32 KiB; a longer list leaves that variable absent, never partial, and the file stays complete. A git failure taking the list fails the stage. When a touched path contains a newline, which the line-per-path list cannot carry, the stage runs the full check instead and records why. The plan's last undone micro-commit runs `merge_gate_test_cmd` as its full check until a passing test-stage run of it is recorded for that micro-commit on the branch head the stage runs on, and takes the fast check after that. A head that only the workstream's recorded clean sync rebases moved since that pass -- publish, story, pre-merge or merge-gate rebases that replayed every commit unchanged, never an AI-resolve, owned-conflict heal or regeneration rebase -- is released by the pass they carried, as a pre-rebase full pass releases the merge gate's fast check after a clean rebase: the stage takes the merge gate's post-rebase decision (see Post-rebase check), reading the migrations both sides added across the rebases' range as the merge's migration step reads them, and on a fast decision runs the fast check handed both sides' paths: the branch's against the current merge base and every path the base changed between the merge base the pass's tested commit sat on and the current one, the whole chain as one range, with each side's count on the touched-file record. Its `check_reason` names the micro-commit, the pass's tested commit and recording time, the head it was carried to and each side's path count. A later round on that head is carried again, since a fast check's evidence never counts as the full run, and a fast check standing in for that run is never handed the branch's paths alone. A passing fast check is accepted only once a `test_verdict_reused` row names the carried full pass, the fast check's pass the verdict store retained and the range the full pass was carried across -- its tested commit and the head. A full decision (`workflow.post_rebase_test` not `fast`, or a migration trigger) or a list that cannot be taken or carried runs `merge_gate_test_cmd` on the head instead; a fast check that fails or cannot resolve its test target, or whose pass is not retained or whose row cannot be recorded, is followed by it on the same tree. Either way the command is executed rather than answered from a recorded pass, with the reason recorded, and that run is the head's own full pass. The record names the check. Every `test_result` row whose verdict a test command produced carries metadata `check` (`fast` or `full`), plus `touched_files` (the count) for a fast check and `check_reason` for a fast configuration's fallback; the row's content takes the same label after its existing qualifiers -- `COMMIT-X - Test PASSED (fast check, 12 touched files)`, `COMMIT-X - Test PASSED (baseline excluded; full check)` -- and `result` keeps its values. An automatic FIX's required verification produces the verdict it records, so that row reads `(required verification; full check)` whatever the configured gate ran first. A hook refusal's row names no check, since no test command ran. `stages/test.log` opens with a `=== CHECK ===` header naming the check, `touched_files` for a fast check, the fallback's `check_reason` and the command, ahead of `=== STDOUT ===` and of any baseline note; the reason and command are Go-quoted with `===` escaped, so no command can add a field or open a section, and a required verification's log reads `full`, as it runs the recorded command. The per-commit reviewer reads the row's metadata (the header when no row landed) and the final reviewer reads that header, and both say in their test results when the result came from a fast check and how many touched files it covered; a full check reads as it always has. When the run's tests were covered by the full+fast pair -- the last test record is a passing fast check for the plan's last micro-commit, and the header's recorded `check_reason` names the full pass that released it, with that pass's tested commit and recording time, written by the same one definition the test stage builds the reason with -- both reviewers' test results cite both records instead, each as recorded: the full suite's pass with its tested commit and recording time, and the fast check's pass on the final tree with its recording time and touched-file count, its time read from the fast check's own result row through the round's prefetched latest-transcript read for that micro-commit. A release carried across clean sync rebases is cited the same way, its `check_reason` read back by the same one definition the test stage writes it with, and the citation also names the clean rebase between the two passes -- the full pass's tested commit and the head it was carried to -- and how many touched paths the branch and the base's move under it each handed the fast check. A miss -- a reason neither reader knows -- keeps the fast-check sentence, and so does a fast check with no recording row to take the fast leg's time from. A fast pass never satisfies an automatic FIX's test-kind required verification: the recorded command always runs after it. The pre-push gate and the finalize gates always run the full suite; the merge gate runs its full suite before any rebase, and after a clean rebase a passing both-sides fast check finishes it on the pre-rebase full pass it names; post-rebase verification on the other paths runs the full suite unless the project sets `workflow.post_rebase_test` to `fast` (see Post-rebase check).
+
+**The lint command's setting.** `lint_cmd` is set where `fast_test_cmd` is: on a single-repo project as a project setting (`hashd project config set lint_cmd '<command>'`, refused on a multi-repo project, whose lint command is per repo); on a multi-repo project per repo, with `hashd project repo edit <repo> --lint-cmd ...`, `--repo-lint-cmd NAME=CMD` or a `--repo-config` file's `lint_cmd` on `hashd project add`, or the Web project form's Lint command row. `hashd project show` and `hashd project repo show` print it when set, the Web merge-gate settings show it, the planner's configured-gate-command section names it, the project-add dry-run runs it and `hashd doctor` checks its tools.
+
+**Lint in the merge gate.** When the scope has a `lint_cmd`, the merge gate runs it before its full suite, and its auto-rebase leg runs it (the full command only) before the fast check or the full command, by the same run, after the leg's documentation commit: stamped `merge_gate_lint` and back to `merge_gate` after it, logged to `stages/merge_gate_lint.log` (`stages/rebase_verify_lint.log` after a rebase), with its own `test_timeout`, and a recorded pass of the lint command for exactly this content standing in. No pass of the test command stands in for it: lint's verdicts carry the configured lint command and the suite `lint`. A lint failure is the gate's failure, titled `Merge gate lint failed (exit N)` with the note that the tests did not run, and its repair re-runs the lint command; the suite does not run. A lint command that passes on its judge-requested re-run, or a lint failure that is accepted, settles lint alone: the suite (after a rebase, the post-rebase tests) then runs before the gate goes on. A lint check runs before every test the verification runs, a recorded repair's required test check included, and the test command's full+fast pair never stands in for it. The lint check runs with an empty baseline.
 
 ---
 
@@ -877,33 +864,211 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    TRIGGER["All micro-commits complete"] --> MG["Merge gate: branch checks, tests,<br/>rebase if needed, secret scan"]
-    MG -->|PASS| ROUND{"FIX since the last verdict?"}
+    TRIGGER["All micro-commits complete"] --> ROUND{"FIX since the last verdict?"}
     ROUND -->|"No: entry round, or a fallback"| FULLROUND["Full round:<br/>AI reviews entire branch diff"]
     ROUND -->|"Yes"| DELTAROUND["Delta round:<br/>AI checks the FIX commits answer<br/>the last verdict's findings"]
     FULLROUND --> AI{Verdict}
     DELTAROUND --> AI
-    MG -->|"Verification fails"| ASSESS[Shared failure assessment]
+    MG -->|"Post-rebase build fails"| ASSESS[Shared failure assessment]
+    MGV -->|"Verification fails"| ASSESS
     ASSESS -->|"In-scope defect; allowance unused"| GENERATED["Generate one automatic FIX"]
     GENERATED --> IMPLEMENT["Existing implement/test/review loop"] --> TRIGGER
     MG -->|"Rebase conflict"| CONFLICT[merge_conflicts]
     ASSESS -->|"Unresolved"| VERIFY[merge_test_failed]
     ASSESS -->|"Agent-output stop: FIX failed, branch build break not FIXABLE, or still failing after the FIX"| STOPPARK["awaiting_human_review (agent stop)<br/>approve re-runs the gate"]
     STOPPARK -->|approve| TRIGGER
-    MG -->|"Suite, or post-rebase build or tests, stopped by hashd's own test_timeout"| TIMEPARK["awaiting_human_review (time-bound park)<br/>no comparison, ruling or FIX"]
+    MGV -->|"Suite, or post-rebase build or tests, stopped by hashd's own test_timeout"| TIMEPARK["awaiting_human_review (time-bound park)<br/>no comparison, ruling or FIX"]
     TIMEPARK -->|"approve: re-run the gate on the unchanged head"| TRIGGER
     TIMEPARK -->|"reject: append one operator FIX, allowance not claimed"| IMPLEMENT
+    MGV -->|"Suite did not exit normally, other than test_timeout: the test command ended without a result hashd could read<br/>how it ended; not judged, no comparison or FIX"| BLOCKED
+    ASSESS -->|"Judge-requested re-run did not exit normally: the same no-result report, not judged"| VERIFY
     ASSESS -->|"Adjudicator/base probe cannot complete"| FAILED
     MG -->|"Other failure"| BLOCKED["Run stops; diagnostic preserved"]
-    AI -->|APPROVE| READY[Ready to Merge]
+    AI -->|APPROVE| MG["Merge gate prepare: branch checks,<br/>rebase if needed, build after a rebase, gate commits"]
+    MG -->|PREPARED| MGV["Merge gate verify: the full test,<br/>secret scan"]
+    MGV -->|"PASS, approval still current"| READY[Ready to Merge]
+    MGV -->|"PASS, a change made the approval stale"| TRIGGER
     AI -->|"ERROR / timeout exhaustion"| FAILED["Run failed; runner released\nMacro stage, code and PR preserved"]
     AI -->|CONCERNS| MODE{"Autonomous, a minor or major finding,<br/>under the round cap, and progress?"}
     MODE -->|"Yes"| AUTOFIX["Automatic round: append one FIX<br/>folding the review's findings"] --> TRIGGER
-    MODE -->|"Autonomous, nit / suggestion only, under the round cap"| DISMISS["Record one ruling per finding<br/>and proceed as an approve"] --> READY
+    MODE -->|"Autonomous, nit / suggestion only, under the round cap"| DISMISS["Record one ruling per finding<br/>and proceed as an approve"] --> MG
     MODE -->|"No, or gatekeeper / supervised"| HUMAN["final_review_with_concerns\nHuman decides"]
     HUMAN -->|"hashd merge: proceed\ndespite concerns"| MERGE["Merge flow; existing gates apply"]
     HUMAN -->|"hashd reject"| FIX["Append one authorized FIX\nExisting implement/test/review loop, up to 5x"] --> TRIGGER
 ```
+
+**Order of the all-complete leg.** Final review runs before any merge-gate
+work. The review is semantic and the rebase mechanical: when the reviewed code
+does what it should and the one full test after the rebase passes, the rebase
+did not break it. The order is pinned at workflow run start (version
+`final-review-before-merge-gate`) and handed to its children and continued executions
+(`WorkstreamRunInput.LaneOrder`). A rejected branch spends no rebase, build or
+test, and nothing rebases the branch before the verdict. The leg runs, in order (`runAllCompleteLeg`):
+
+1. The merge-ready reconcile (to `ready_to_merge`, or the PR state) and the
+   externally-merged completion. A merge-gate repair completing stays
+   `implementing` here (see **Repair readiness** below).
+2. The hold boundary between the merge gate and final review, then final
+   review. Reject, a concerns park or self-heal FIX, error and cancel take
+   their exits and run no merge-gate work. A nit-only dismissal proceeds as
+   an approve, through the gate and full test before ready to merge.
+3. On approve, the hold boundary before the merge gate, then the gate's entry
+   heal and its prepare phase: the entry admission, the fetch, the migration
+   preparation, the gate's pre-test checks and, for a branch behind its base,
+   the rebase and its post-rebase build, with every commit the gate makes (the
+   migration renumber, the regeneration commit, the trailing-whitespace fix).
+   It builds only after a rebase: a branch it does not rebase was built by its
+   last commit's own test stage. It runs no test command.
+4. The post-gate dirty check and its ownership heal.
+5. The gate's verify phase on the prepared head: after any rebase the verify
+   phase performs and before the full test, in `spec_mode repo` when the
+   configured merge mode is PR, the verify phase writes the story's SPEC update
+   and (when the requirements destination is the lane's repository and base
+   branch) REQS burn as one ordinary lane commit (`merge_doc_update`) in the
+   lane checkout, holding no merge lock or cross-lane lock. It writes nothing in
+   any other spec mode or merge mode, in the prepare or legacy whole-gate
+   phases, when `HEAD` is already a `merge_doc_update` commit (including a clean
+   replay), or when nothing is staged; a REQS destination in another repository
+   or branch is left untouched. Before any rebase hashd runs on a lane, if the
+   lane's tip is a hashd `merge_doc_update` commit that would not apply cleanly
+   on the rebase target, hashd drops that tip before rebasing the lane's other
+   commits; a docs tip that applies cleanly stays and is replayed, a docs commit
+   buried under any later lane commit is treated as ordinary history, and the
+   docs are written again at the next merge gate (or inside the merge hold
+   when the drop happened there). From then on the commit is an ordinary lane
+   commit covered by the full test, the PR and the merge gate's review link
+   (with no test proof, forge check or approval exempted or inherited). Next run
+   the one full merge-gate test (no fast check stands in, since no full pass of
+   this tree exists), the after-suite checks, the FIX's required verification
+   and the secret scan, with the gate's existing flake, granted re-run and
+   verdict-reuse rules. A base that moved since the prepare phase is rebased and
+   verified there. Its exits -- a failed build or test included, whose FIX runs
+   the same order -- start from `ready_to_merge` or the PR state and end where
+   they end from `active`.
+6. The dirty check and heal again, then the final-review currency answer
+   (`FinalReviewCurrencyOf`, the merge guards' own): the gate's own changes
+   keep the approval current through their recorded links; any other change
+   leaves it stale, and the run goes round to the next cycle without
+   announcing.
+7. When the reconcile found the PR open, the PR publish of exactly the
+   revision the full test passed, through the existing publish and its guard;
+   review bots see that tested tree. What to publish is read from the branch
+   as the gate left it, so a gate rebase or commit is published, and a PR
+   already carrying it is up to date. Before anything is pushed the push
+   checks that the branch is still that revision and its base has not moved
+   past it (`PRPushInput.TestedHead`); otherwise it pushes nothing and the run
+   goes round to the next cycle, back through the gate's rebase, build and
+   full test, publishing only what that pass tested.
+8. A merge-gate repair's deferred readiness (below), then the run row marked
+   passed and `run_complete` (`ready_to_merge`).
+
+Merge and PR create from `ready_to_merge` stay refused while the gate runs
+after the approval: the run's live claim and stamp fail `no_active_work`.
+`runner_stage` reads `test` during the end-game commit's build, `final_review`
+during the review and `merge_gate` while the gate runs.
+
+**Automatic FIX hand-off.** The gate's automatic FIX leaves the merge-ready
+stage in the write that appends it: from `ready_to_merge`,
+`final_review_with_concerns`, `pr_open` or `pr_approved`, the plan append, the
+allowance binding and the move to `implementing` (`start_merge_gate_fix`, an
+internal runner edge with no guards) land in one transaction, with their
+`microcommit_added` and `state_changed` rows, published only after it commits
+(`runflow.RecordAutomaticMergeGateFix`). The bind admission, taken with the
+gate's own verification baseline, is the hand-off's admission. A failed write
+appends, binds and moves nothing and announces nothing. Before that write the
+server withdraws a forge_autocomplete auto-merge from a PR state, and a clear
+that does not land refuses the append. From `active` or `implementing` the
+stage is left to select's ordinary start of implementation. A FIX already bound
+undone at a merge-ready or PR state whose append made no hand-off (one bound
+before it existed) is handed off by select: the bound-FIX repair admission,
+then `start_merge_gate_fix` to `implementing`, a PR state's auto-merge cleared
+first. From such a state a plain `hashd run` is still refused while the final review is current (`dispatch.run.no_pipeline_forward`); a run dispatched by an offered clarification answer is let past that refusal while the FIX is bound undone, so select hands it off with the answer as its guidance. A refusal fails the run at select with the stage and FIX as they were. The run then
+selects the FIX with the stage already `implementing`, so list, show, the TUI
+and Web read that stage, and merge and PR create are not offered from it. The
+operator's `add_commit` (whose contract rows return `ready_to_merge` and
+`merge_test_failed` to `active`) and `add_fix_commit` from merge-ready states
+keep their `no_active_work` guard.
+
+**Repair readiness.** A merge-gate repair is ready only once the repaired
+branch is verified. When the plan completes with the workstream `implementing`
+and the story's merge-gate record binding a FIX the plan marks done, the
+merge-ready reconcile reads the forge as always (an open PR and whether it
+carries the branch, a closed PR, an external merge) but makes none of its
+readiness moves: no `all_commits_done` to `ready_to_merge` and no hop through
+it to `pr_open` (`MergeReadyReconcileOutcome.ReadinessDeferred`). A PR merged
+outside hashd still lands `merged`, straight from `implementing` by the
+internal `github_merged`, its `state_changed` row in the same write. Final review then judges the repair at
+`implementing`, and its concerns are decided as at `ready_to_merge`: the park
+moves `implementing` -> `final_review_with_concerns` (`final_review_concerns`,
+an internal runner edge) and opens the review gate, an autonomous FIX round
+appends from `implementing` to `active` (the internal `add_fix_commit`, its
+plan, move and `state_changed` row in one transaction, published after it
+commits), and a nit-only dismissal proceeds as an approve. The park and the FIX round land only while the deciding run
+still holds the workstream's runner claim, read in their own transaction, so
+a delayed verdict never parks or appends over a replacement run. After the
+approval, the gate's verify phase, the post-gate checks and the currency
+answer, the run publishes the verified head to an open PR in either lane
+order (the gate-first publish before review carried a tip the verify phase
+may have rebased or healed since), and then records readiness:
+`implementing` -> `ready_to_merge`, or -> `pr_open` when the reconcile found
+the PR open, by the internal `merge_gate_fix_verified`, with its
+`state_changed` row in the same transaction, published after it commits, and
+only while the run still holds the claim (`runflow.RecordRepairReadiness`,
+version `repair-readiness-after-verify`).
+Only then are the run row marked passed and `run_complete(ready_to_merge)`
+announced. A refused record moves and announces nothing and fails the run at
+`merge_gate` with the workstream `implementing`. A branch the approval no
+longer describes, or a publish that rewrote it, goes round again at
+`implementing`; a failed verification, a reject, a park, an error or a cancel
+takes its own exit from `implementing` as it does from `active`, and never
+passes through `ready_to_merge`. A retry after a failed or blocked
+verification finds the repair done at `merge_test_failed` or `active`: select
+returns it to `implementing` by `start_merge_gate_fix`, with its
+`state_changed` row in the same write, so its readiness again waits for that
+run's final review and verification.
+
+**End-game commits.** With `workflow.final_commit_test=none`, the plan's final planned micro-commit and every FIX run
+the implement / test / review loop as every micro-commit does, except that the
+test stage runs the build (with its failure handling) and the pre-commit hook
+and defers the test command: no `fast_test_cmd`, `test_cmd` or
+`merge_gate_test_cmd` runs before final review (`TestStageInput.DeferTest`, a
+`test_gate_deferred` SKIPPED row), and neither does an automatic FIX's
+test-kind required verification, with `tests_skipped` set too: the merge
+gate's required verification runs it after its full test. The cycle decides
+this after select from the recorded selection and the lane's order, for every
+test-stage run of that cycle, its rebuilds after a per-commit reject included. The QA gate refuses only on a recorded red test,
+so a deferred test does not block the commit.
+
+The project setting `workflow.final_commit_test` selects `none` (defer),
+`fast` (the default: the usual touched-file check, irrespective of `gates.commit_check`), or
+`full` (the merge gate's command, whose same-tree pass the gate reuses). It is
+read once when the test stage starts; changes apply to the next stage. Earlier
+commits keep `gates.commit_check`, and final review, gate and push keep their
+order. Explicit skips and judge re-runs retain their existing semantics.
+
+**What each review has.** With `none`, the per-commit review of an end-game commit reads
+its build result and that no test of this commit has run yet: the full test
+runs at the merge gate after final review. Final review reads, from the
+records alone, each planned commit's own latest build and test results (the
+final micro-commit's and the FIXes' test deferred, each build as its own build
+result records it), the merge gate's
+executions of its previous round (none in the first round), and that the gate
+runs after its verdict (`GateAfterReview`). A failed full test reaches the
+FIX, and the next final review sees it.
+
+The order is selected at workflow-run start and kept by its children and
+continued executions. A run started after the upgrade runs review-first. A
+run started before `final-review-before-merge-gate` keeps the old order: its
+end-game commits run their own test command (the merge gate's for the final
+planned commit), and the leg runs gate-first: the gate's prepare phase, the dirty
+check, the reconcile and publish, final review, and on approve the verify
+phase (version `review-before-merge-gate-verify`). Its final review is told
+the gate prepared the tip it judges (`GatePrepared`, also read from a
+final-review assignment recorded with the retired `tip_evidence`): the build
+and test sections are the last recorded test stage's, not the tip's. A history before
+that version runs the whole gate first, marks the run passed before the
+reconcile, and reviews a verified tip, whose build and test sections are
+authoritative for it.
 
 A current final-review failure remains visible at `ready_to_merge` and PR
 stages; older implementation failures still retire when the stage advances.
@@ -917,7 +1082,7 @@ An operator's `reject` appends one FIX and resumes implementation through
 `address_concerns: final_review_with_concerns -> active`. The existing
 `workflow.max_review_attempts` budget applies: up to five implement/test/review
 attempts on that same FIX, then the normal human gate on exhaustion. Once the
-FIX commits, merge preparation runs again, then a final-review round.
+FIX commits, a final-review round runs, and the merge gate after its approval.
 
 In gatekeeper and supervised modes every concerns verdict at `ready_to_merge`
 parks at `final_review_with_concerns` for that decision. In autonomous mode the
@@ -1018,8 +1183,32 @@ row that recorded no head; its head commit no longer exists; the branch has an
 unreviewed merge commit since the verdict; no commit gained since the verdict
 is a FIX; a reset or replan deleted the reviews, leaving no
 verdict; the delta comes out empty; or `workflow.final_review_incremental_after_fix`
-is false (default true, read every round). Every row records `reviewed_head` and
-`round_kind`; a delta row, error rows included, also records `anchor_head`. A
+is false (default true, read every round).
+
+When the newest verdict is an approval and every commit gained since its head
+is a replay of a commit it reviewed -- a rebase whose conflicts were resolved
+outside the merge, so no new commit of any kind -- the round is a **rebase
+round** instead of a full one. It shows the reviewer git's comparison of the
+approved commits with their replays, `git range-diff --creation-factor=100
+<old fork point>..<approved head> <merge base>..<head>` (the old fork point is
+the merge base of the approved head and the current one), the replays' recorded
+messages and, at head, every file whose patch the comparison shows changed. It
+asks one question: does each replayed commit still do what the approved commit
+did, on the base as it is now. A finding must cite one of those files or a
+replayed commit's full SHA, and verification sends any other back to the
+reviewer; the prompt asks that it be about a line the comparison shows as
+changed. A comparison that changes no file's patch makes the round full
+(`empty_delta`). A rename's header names both of its paths, and a hunk header's function
+context (`@@ path: func ...`) is not part of the path: each header is resolved
+against the paths the replays touch. A comparison that names a
+changed path the replays do not list, or that leaves a replay unpaired with its
+approved commit, makes the round full too (`unmatched_path`): no changed file is
+left out of the reviewer's scope unseen. Its verdict is handled like any final review's, and a FIX's
+delta round then anchors on it. Its prompt is `final_review_rebase.md`.
+
+Every row records `reviewed_head` and
+`round_kind` (`full`, `delta` or `rebase`); a delta or rebase row, error rows
+included, also records `anchor_head`. A
 delta round measured against its reviewer's input limit also records, error rows
 included, `prompt_mode` (`embedded` or `listed`), `prompt_chars` and
 `prompt_limit_chars`; a full round and an unmeasured delta round record none of
@@ -1167,7 +1356,7 @@ flowchart TD
 - Allow **one automatically generated FIX per story**, shared by both gate
   locations and AI resolve. Persist its consumption; restart, Go and another rebase do not
   replenish it. Further FIX work requires explicit operator authorization: the
-  answer to a pending recovery clarification, or `hashd workstream add-commit`,
+  answer to a pending recovery clarification, or `hashd story add-commit`,
   which the server refuses while one is pending. A `merge_test_failed` park that
   schedules no FIX -- the runner's or AI resolve's -- names one list: `hashd
   answer`, `hashd show` and `hashd merge` while a recovery question is pending,
@@ -1206,13 +1395,13 @@ flowchart TD
   merge attempt. The judge's first call renders the retry form
   (`retry_offered`) only while that allowance is unspent; the offer reads the
   durable row, never the failing output. A retry request is checked with the
-  implement loop's verbatim-quote check against the output the judge was shown
-  (Test-Conflict Escalation, "The verbatim-quote check"), less the framing hashd
-  writes ahead of it -- the command, tested revision and base comparison, and
-  for evidence over the prompt ceiling the file reference that leads the
-  excerpt -- so a quote must come from what the verification printed and the
-  judge was shown: the start and end of an excerpted capture, never its
-  omitted middle; a retry field on any
+  implement loop's verbatim-quote check against the verification's captured
+  output (Test-Conflict Escalation, "The verbatim-quote check"), less the
+  framing hashd writes ahead of it -- the command, tested revision and base
+  comparison -- so a quote must come from what the verification printed: the
+  capture whole, its omitted middle included when the judge was shown an
+  excerpt and told to search the evidence file; for structured evidence, the
+  console pieces it was shown; a retry field on any
   verdict but CANT_TELL is ignored and that verdict routes as itself. A refused
   request is a final CANT_TELL: the park for a human ruling (`Merge-gate repair
   requires a human ruling: ...`), its reason naming the refusal. An honored
@@ -1354,7 +1543,7 @@ Counts below are total attempts, including the first, not additional retries.
 | Implement/test/review, including FIX | Same micro-commit and worktree; resume implementation when possible | `workflow.max_review_attempts`, default 5; approval commits, exhaustion reaches the human gate; terminal outcomes can stop earlier |
 | Planner and story edit | Same proposal; validation feedback resumes the rejected attempt's session; infrastructure reruns resume the killed run's own registered session ID | Shared `runPlannerLoop`, up to 3 attempts |
 | Review output repair, normal and final | Same review task and latest session; repair verdicts, not code | Shared budget of 3 calls across schema and verifier repairs. A lost/stale prior-round session permits one cold fallback with its own budget; no recursive fallback |
-| Plan split and tech tree | Same generation task with validation feedback | Separate two-attempt redraft implementations |
+| Breakdown (full and partial), merge-gate FIX generation, plan split and tech tree | Same stage call; the rejected answer's reason follows its prompt (`include_answer_redraft`) | Shared `answercheck.Ask`, 2 calls: one re-ask, made only while the stage's deadline fits another call as long as the first; a failed agent run is never re-asked |
 | Transport / activity retries | Retry a failed invocation or crash-safe activity, not rejected work | Transport policy and Temporal RetryPolicy; bounded separately by stage/activity deadlines |
 
 A FIX starts with its full FIX prompt. Subsequent attempts use the normal
@@ -1381,7 +1570,7 @@ timeout for every nested retry. Discovery has its own invocation and activity re
 
 ## Phase 4: Merge
 
-**Default: direct merge to main.** For external review, use `hashd pr create`; merge the reviewed PR in configured PR mode or with `hashd merge --pr`. Supports GitHub, Bitbucket, and GitLab. The forge is auto-detected from your git remote or set explicitly via `forge:` in config.yaml.
+**Default: direct merge to main.** For external review, use `hashd pr create`; merge the reviewed PR in configured PR mode or with `hashd merge --pr`. The supported forges are listed in [docs/FORGES.md](docs/FORGES.md). The forge is auto-detected from your git remote or set explicitly via `forge:` in config.yaml.
 
 ```mermaid
 flowchart TD
@@ -1402,7 +1591,7 @@ flowchart TD
     RETRY --> ARCHIVE
 ```
 
-**Test verdict cache.** A project test command's verdict is recorded under the project's `gate-receipts/` directory, one file per key. The key is the git tree of everything the command could observe (tracked changes and non-ignored untracked files, written through a scratch index so the worktree and its index are untouched), the argv with its working directory relative to the worktree root, and the resolved path and content digest of the executable argv[0] names there. Workstream, branch, destination SHA, worktree path and timeout are not part of it, nor is HEAD outside the clean-HEAD form below. When the per-commit fast check recorded the verdict, the key also carries the sha256 of the touched-file list it was handed: such a verdict is reused only for the same command, content and touched set, and never matches a full-command lookup. A checkout whose tree cannot name its content (a `.gitattributes` file or a converting attribute, `core.autocrlf` other than false, `core.filemode=false`, `core.symlinks=false`, `core.ignoreCase=true`, an assume-unchanged or skip-worktree index entry, or a submodule gitlink) is keyed by its HEAD commit instead, and only while the tree the worktree holds, written the same way through a fresh scratch index from every non-ignored file's bytes, is HEAD's tree; no stat data is consulted. A checkout with `core.ignoreCase=true`, whose tree would fold a new path into a tracked one, is never keyed that way. That key also carries a fingerprint of every HEAD path as it sits on disk, read without git's conversions (a file's bytes and permission bits, a symlink's target, and a checked-out submodule's own clean HEAD and fingerprint taken the same way; any other gitlink state is a miss), so an unchanged checkout still reuses a pass and any uncommitted byte is a miss, including one git normalises away (a line ending). A verdict is recorded only for a run that completed and left the key unchanged, with its complete redacted output, its duration and where and for which workstream it was recorded. The latest verdict for a key wins, and only a pass is reused: a recorded fail never short-circuits a run, and a pass is reused only within seven days of recording and when its recorded duration fits the reusing site's test timeout. Expired receipts are ignored, not pruned. The merge gate's suite and its post-rebase leg, and post-rebase verification on the landing, PR and resolve paths (the gate's command and test-kind required checks), read and write the cache; build commands are never cached. Narrowed post-rebase verification reads the store twice: before the rebase it looks up a full-command pass for the pre-rebase tree as its proof, and its fast check reads and writes its verdict under the fast-check key. The per-commit test stage's test phase reads and writes it too, for the impl-phase test command and an automatic FIX's test-kind required verification, keyed by the argv run from the worktree root; its build phase and a build-kind required verification are not cached, and a run that exits non-zero but passes through baseline exclusion is recorded as a fail. The committed-breakage probe and the merge-gate base comparison read and write it as well. They look up the revision they would test before creating their throwaway worktree, with the key a fresh checkout of that revision would get, computed without a checkout; the lookup is a miss, and the site creates its worktree and runs, when that revision would be keyed by clean HEAD (a `.gitattributes` file or a converting attribute or setting, case folding, or a submodule gitlink) or when argv[0] resolves to a path inside the checkout. A verdict's provenance records which key form it used. Every reuse records a `test_verdict_reused` timeline row naming the command, the key form and its tree or HEAD commit, where and by whom the pass was recorded, and when. A reuse whose row cannot be recorded is not a reuse: the command runs as on a miss. A pass recorded by a runner other than a stage is reported by that runner and trusted on reuse. `hashd test [--] <command...>` also writes the cache: it runs the command in the current directory of a git worktree, computes the key before and after the run with the same key function, and posts a completed run whose key did not change to `POST /test-verdicts` with site `hashd test`. A report whose key carries a touched-file digest is refused, since `hashd test` never computes one. Its pass is reported by whoever ran it. The server attributes such a verdict only from records it holds, and the two attributions have separate conditions. The workstream is attributed when the request's forwarded run identity names a workstream whose live `runner_run_id` is that run; otherwise the verdict is attributed to no workstream and no commit. The commit is attributed, on top of that workstream, only when an implement-stage invocation is registered for it and its recorded micro-commit selection resolves; a live run outside implement, or one without a selection, keeps its workstream attribution with no commit.
+**Test verdict cache.** In the approved-PR chute (`RunMergeApprovedLocked`), a clean rebase selects only the configured build, or no ordinary proof when the build is unconfigured or explicitly skipped. This local execution policy precedes file selection, migration-triggered full-proof rules and ordinary fast/full settings. Migration preparation and review stops still run, and the existing document-only exemption keeps its eligibility and omits the build too. Successful chute AI conflict resolution selects the configured build followed by the target repository’s `fast_test_cmd`, falling back to the existing full merge-gate command when no fast command is configured. This selection needs neither a fresh pre-rebase full-command receipt nor permission from ordinary fast/full settings. It reuses the both-sides touched-file handoff, fast verdict keys; a narrowed fast pass cannot discharge an unrestricted required command, even with identical argv. Resolution provenance is recorded only after the selected verification succeeds. Standalone recovery, earlier merge-gate verification, resolution eligibility and attempt counts remain unchanged; paths outside the chute keep their existing behavior. Further clean preparations in the same hold retain the earlier full-test proof as evidence without requiring a full-command receipt for each rebased tree. A preparation that needed no rebase reuses a recorded pass of the merge-gate test command for exactly the content the branch holds. With none recorded, it is checked as a clean rebase is (build only) when a full pass of that command is recorded on a tree that recorded clean sync rebases alone carried to the branch head (`ReadCleanRebases`, every commit replayed unchanged); a resolved conflict, an AI resolve or a commit since then on the way runs the command. A command that runs there still validates its exit tree, so a pass on content the command changed is not recorded for reuse. The build uses the existing regeneration handling. Required commands remain independent: each preparation refreshes durable obligations, executes unpaid commands through the shared required-check loop and discharges only the commands actually paid. A build-only pass neither claims a full-command verdict nor retires unrelated failures. The `post_rebase_check` timeline and attempt evidence name the selected build or no-proof policy and the actual command executions, without manufacturing a full-test pass. A project test command's verdict is recorded under the project's `gate-receipts/` directory, one file per key. The key is the git tree of everything the command could observe (tracked changes and non-ignored untracked files, written through a scratch index so the worktree and its index are untouched), the argv with its working directory relative to the worktree root, and the resolved path and content digest of the executable argv[0] names there. Workstream, branch, destination SHA, worktree path and timeout are not part of it, nor is HEAD outside the clean-HEAD form below. When the per-commit fast check recorded the verdict, the key also carries the sha256 of the touched-file list it was handed: such a verdict is reused only for the same command, content and touched set, and never matches a full-command lookup. A checkout whose tree cannot name its content (a `.gitattributes` file or a converting attribute, `core.autocrlf` other than false, `core.filemode=false`, `core.symlinks=false`, `core.ignoreCase=true`, an assume-unchanged or skip-worktree index entry, or a submodule gitlink) is keyed by its HEAD commit instead, and only while the tree the worktree holds, written the same way through a fresh scratch index from every non-ignored file's bytes, is HEAD's tree; no stat data is consulted. A checkout with `core.ignoreCase=true`, whose tree would fold a new path into a tracked one, is never keyed that way. That key also carries a fingerprint of every HEAD path as it sits on disk, read without git's conversions (a file's bytes and permission bits, a symlink's target, and a checked-out submodule's own clean HEAD and fingerprint taken the same way; any other gitlink state is a miss), so an unchanged checkout still reuses a pass and any uncommitted byte is a miss, including one git normalises away (a line ending). A verdict is recorded only for a run that completed and left the key unchanged, with its complete redacted output, its duration and where and for which workstream it was recorded. The latest verdict for a key wins, and only a pass is reused: a recorded fail never short-circuits a run, and a pass is reused only within seven days of recording and when its recorded duration fits the reusing site's test timeout. Expired receipts are ignored, not pruned. The merge gate's suite and its post-rebase leg, and post-rebase verification on the landing, PR and resolve paths (the gate's command and test-kind required checks), read and write the cache; build commands are never cached. Narrowed post-rebase verification reads the store twice: before the rebase it looks up a full-command pass for the pre-rebase tree as its proof, and its fast check reads and writes its verdict under the fast-check key. When the fast check is selected, that proof also comes in a paired form for the plan's last micro-commit M: a passing test-stage run of the merge gate's own command for the workstream whose execution names M (the full leg), paired with a later passing test-stage fast-check run for the same workstream and M keyed to exactly the tree the rebase judges (the fast leg), both records admitted under the store's own reuse rules -- age, timeout fit, exec environment. The fast leg's tested commit must be the judged commit's parent, and the full leg's that same commit or a branch head the workstream's recorded clean sync rebases alone carried to it (`LookupStageMicrocommitPass`'s carried answer for the parent). A carried full leg pairs only with a fast leg handed both sides' paths, the base's taken from the merge base the full leg's tested commit sat on: the proof keys the judged tree's fast check with that list, as the test stage keyed the fast check standing in for the carried pass, so a fast pass handed the branch's paths alone never matches. The judged commit is also cross-checked against the newest commit the project's chain recorded for M, so it is M's own commit and not any replacement that merely shares the pair's tree and parent, and a rebase between the two passes that was not a recorded clean sync rebase, a rebase between the fast leg and the judged tree, or one over the recorded commit breaks the pairing. The fast leg's execution must carry the test stage's fast-check site, so a fast pass any other site recorded never pairs. A verification that narrows on the pair records one `test_verdict_reused` row naming both of its passes and, for a carried full leg, the rebase range it was carried across: its tested commit and the judged commit's parent. The merge gate's own suite, when it needs no rebase, accepts the same pair, a carried one included, in place of running its command: a full pass recorded for exactly the tree it judges is reused as always, and when none is, the pair stands in, recording the same row and leading the gate's stage log with the same note. The gate's judge-requested re-run, a recovery verification and a FIX's required-verification command never consult the pair, and a pair-answered suite does not discharge a pending required verification: its recorded command runs even when it matches the configured suite. The per-commit test stage's test phase reads and writes it too, for the impl-phase test command and an automatic FIX's test-kind required verification, keyed by the argv run from the worktree root; its build phase and a build-kind required verification are not cached, and a run that exits non-zero but passes through baseline exclusion is recorded as a fail. The committed-breakage probe and the merge-gate base comparison read and write it as well. They look up the revision they would test before creating their throwaway worktree, with the key a fresh checkout of that revision would get, computed without a checkout; the lookup is a miss, and the site creates its worktree and runs, when that revision would be keyed by clean HEAD (a `.gitattributes` file or a converting attribute or setting, case folding, or a submodule gitlink) or when argv[0] resolves to a path inside the checkout. A verdict's provenance records which key form it used. Every reuse records a `test_verdict_reused` timeline row naming the command, the key form and its tree or HEAD commit, where and by whom the pass was recorded, and when. A reuse whose row cannot be recorded is not a reuse: the command runs as on a miss. A pass recorded by a runner other than a stage is reported by that runner and trusted on reuse. `hashd test [--] <command...>` also writes the cache: it runs the command in the current directory of a git worktree, computes the key before and after the run with the same key function, and posts a completed run whose key did not change to `POST /test-verdicts` with site `hashd test`. A report whose key carries a touched-file digest is refused, since `hashd test` never computes one. Its pass is reported by whoever ran it. The server attributes such a verdict only from records it holds, and the two attributions have separate conditions. The workstream is attributed when the request's forwarded run identity names a workstream whose live `runner_run_id` is that run; otherwise the verdict is attributed to no workstream and no commit. The commit is attributed, on top of that workstream, only when an implement-stage invocation is registered for it and its recorded micro-commit selection resolves; a live run outside implement, or one without a selection, keeps its workstream attribution with no commit.
 
 ### Merge Modes
 
@@ -1427,7 +1616,7 @@ Merge routing contract -- one route per merge, decided by the server:
 - The merge is offered only when it can proceed, and dispatch refuses exactly where the offer is withheld (one decision): no PR in PR mode, unpublished local work, or -- for `pr_open` / `pr_approved` -- a change request or a PR the forge does not report ready, judged on a running PR watch's stored read of the PR's current head (never a forge call; up to one poll interval behind, and a refusal asks the watch to read again). A stopped watch's read decides nothing: the merge judges the forge live and starts the watch again. A conflict, mergeability not computed yet, and a PR merged on the forge are admitted: the merge handles them. The refused row's `next_action` names the way forward (`create_pr`, `pr_push`, `reject`); a wait names none, and clients render that step in place of the merge.
 - Dispatch refuses nothing from the recovery states: a `merge_conflicts` resume whose conflicts were cleared without a merge starts over at `merging`, and that restart applies the route checks then, after admission; a restart they refuse parks at `ready_to_merge`.
 
-PR merge options: `pr.merge_strategy` (`merge`, the default, `rebase`, `rebase_merge`) and `pr.delete_source_branch` (true or false; unset deletes the source branch in forge completion mode and sends each forge's own call in hashd mode) are project settings read into the merge profile, and the PR merge passes them to the forge's completion call. Each backend reports the strategies and the deletion it can honour (`forge.Capabilities`), and one check refuses anything else, naming the forge: the project config write (a `pr.*` or `forge` change that would leave an unsupported combination is refused before it lands), merge dispatch, and every backend's `MergePR` before any forge call. GitHub, GitLab: `merge`, `squash`, `rebase`; Bitbucket: `merge`, `squash`; Gitea: all four, no deletion; Azure Repos: all four. The default reproduces the forge calls made before the settings existed. `squash` is refused everywhere a strategy is chosen or used -- the config write, merge dispatch and every `MergePR` -- until squash lineage exists (#2211), because lineage cannot yet resolve a squashed commit to its micro-commits; the refusal names the strategies the forge allows (`forge.merge.strategy_squash_refused`).
+PR merge options: `pr.merge_strategy` (`merge`, the default, `squash`, `rebase`, `rebase_merge`) and `pr.delete_source_branch` (true or false; unset deletes the source branch in forge completion mode and sends each forge's own call in hashd mode) are project settings read into the merge profile, and the PR merge passes them to the forge's completion call. Each backend reports the strategies and the deletion it can honour (`forge.Capabilities`), and one check refuses anything else, naming the forge: the project config write (a `pr.*` or `forge` change that would leave an unsupported combination is refused before it lands), merge dispatch, and every backend's `MergePR` before any forge call. GitHub, GitLab: `merge`, `squash`, `rebase`; Bitbucket: `merge`, `squash`; Gitea: all four, no deletion; Azure Repos: all four. The default reproduces the forge calls made before the settings existed. A completed squash records the observed source-to-squash transformation through the shared transactional writer before source cleanup, using the authoritative completion evidence retained by observation and landing checkpoints. A requested strategy alone does not establish completion. Each origin is `combined`, including a one-commit squash; the result tip remains the squash commit even when the forge creates a distinct final merge commit. The landing retains both identities. Missing evidence or a recording failure produces the durable transformation diagnostic without blocking closure or cleanup.
 
 #### Who completes a PR: `pr.completion`
 
@@ -1437,16 +1626,19 @@ PR merge options: `pr.merge_strategy` (`merge`, the default, `rebase`, `rebase_m
 
 What the merge waits on: in `forge_autocomplete` a check still running, or a forge review policy not yet answered, is the forge's to wait on, so neither stops `hashd merge` from setting auto-merge (`mergeflow.AutoMergeAdmits`, taken by the merge's admission and its `start_merge` row on the PR watch's snapshot, the `pr_open` check and the merge's pre-write read). On Azure Repos, whose readiness stays on the aggregate of its checks and reviews, the rule reads the status read's `policies`: one typed row per blocking policy evaluation, its merge check and a draft. A definite no at the head still stops it as in forge mode: a failing check, changes requested, blocking threads, a conflict, a check that needs queueing, or a review only hashd counts (`pr.min_approvals`, which no forge policy waits on). After the initial forge read confirms the PR is open, the merge withdraws an auto-merge an earlier merge set before its remaining checks (`RunMergeBegin`). Merged, closed, failed and stateless initial reads make no auto-merge call. The notice is retired once the PR is seen merged or closed -- by the merge, by `hashd merge`'s `pr_open` check or by the PR watch.
 
-Every exit from `pr_open`, `pr_approved` or `merging` (where the merge leg sets it, as its last act) that abandons the intent to merge withdraws the auto-merge first. The operator's routes -- reject, close, abandoning the story, reset, a requirements edit, the generic transition, and an answer to a judge CANT_TELL question that picks close -- clear it before they take the project lifecycle lock, since the clear is a forge write, and check again under the lock from the database alone: a clear that did not land, or a merge that set auto-merge again in between, refuses the exit with nothing moved, naming the PR and the retry. Removal clears before it closes the PR and goes ahead with a warning and a `pr_auto_merge_clear` row when the clear does not land, as it goes ahead past a close failure. A run whose merge gate ends the PR state, and a publish conflict routed to `merge_conflicts`, clear first too. `TestEveryPRStateExitClearsTheAutoMerge` lists every exit edge out of those three states with the functions that fire it, or, out of `merging`, why the PR it leaves holds no auto-merge: the leg is admitted only from a PR state and returns there, so the other stops out of `merging` fire before the set or for a merge that never had one. A project in any other completion mode makes none of these calls. Because no other mode withdraws an auto-merge, `pr.completion` cannot leave `forge_autocomplete` while any PR still has one set: a config set, a reset of the key or a reset of every override is refused (`forge.completion.auto_merge_standing`), naming each such PR and its workstream, until each is merged, rejected, reset or closed. **The mode's limit:** a push made outside hashd after auto-merge is set can be completed by the forge without hashd's merge gate -- Azure Repos' auto-complete holds no head (INFERRED from its API) and the PR watch only reads. A branch policy that resets reviews on a push narrows this; hashd cannot enforce one.
+Every exit from `pr_open`, `pr_approved` or `merging` (where the merge leg sets it, as its last act) that abandons the intent to merge withdraws the auto-merge first. The operator's routes -- reject, close, abandoning the story, reset, replan, the generic transition, and an answer to a judge CANT_TELL question that picks close or replan -- clear it before they take the project lifecycle lock, since the clear is a forge write, and check again under the lock from the database alone: a clear that did not land, or a merge that set auto-merge again in between, refuses the exit with nothing moved, naming the PR and the retry. Removal clears before it closes the PR and goes ahead with a warning and a `pr_auto_merge_clear` row when the clear does not land, as it goes ahead past a close failure. A run whose merge gate ends the PR state, and a publish conflict routed to `merge_conflicts`, clear first too. `TestEveryPRStateExitClearsTheAutoMerge` lists every exit edge out of those three states with the functions that fire it, or, out of `merging`, why the PR it leaves holds no auto-merge: the leg is admitted only from a PR state and returns there, so the other stops out of `merging` fire before the set or for a merge that never had one. A project in any other completion mode makes none of these calls. Because no other mode withdraws an auto-merge, `pr.completion` cannot leave `forge_autocomplete` while any PR still has one set: a config set, a reset of the key or a reset of every override is refused (`forge.completion.auto_merge_standing`), naming each such PR and its workstream, until each is merged, rejected, reset or closed. **The mode's limit:** a push made outside hashd after auto-merge is set can be completed by the forge without hashd's merge gate -- Azure Repos' auto-complete holds no head (INFERRED from its API) and the PR watch only reads. A branch policy that resets reviews on a push narrows this; hashd cannot enforce one.
 
-**The rewrite rule** (`mergeflow.rewriteAllowed`): in hashd mode hashd may always rewrite the PR's branch. In the forge modes it may while the branch has no PR or no person has reviewed the PR -- a review is approved or changes requested from a reviewer who is not a bot (forge-declared or matched by `review.bot_identities`); a comment is not one -- and after a review only with the operator's acknowledgment. A PR read that fails is not "no reviews": it refuses. Every function that publishes a workstream branch takes the rule's decision, so each caller supplies one (`TestEveryPushSiteAsksTheRewriteRule` holds where it comes from; the runner's per-unit commit publication, which the server does not hand completion facts, is the one listed exception). A push the rule does not let rewrite publishes only commits on top of the PR's head -- one that would replace it is refused -- and is not held back for being behind its base, since an approved branch is not rebased onto a moved base and the forge reports its conflicts.
+**The rewrite rule** (`mergeflow.rewriteAllowed`): in hashd mode hashd may always rewrite the PR's branch. In the forge modes it may while the branch has no PR or no person has reviewed the PR -- a review is approved or changes requested from a reviewer who is not a bot (forge-declared or matched by `review.bot_identities`); a comment is not one -- and after a review only for a requested rewrite: an operation the operator asked for that rewrites the branch by its nature (AI resolve, replan), so the forge resetting the reviews is what was asked for, and nothing further is asked. Automatic rewrites stay review-protected. A PR read that fails, or one that does not report every review, is not "no reviews": it refuses, a requested rewrite included. Every function that publishes a workstream branch takes the rule's decision, so each caller supplies one (`TestEveryPushSiteAsksTheRewriteRule` holds where it comes from; the runner's per-unit commit publication, which the server does not hand completion facts, is the one listed exception). A push the rule does not let rewrite publishes only commits on top of the PR's head -- one that would replace it is refused -- and is not held back for being behind its base, since an approved branch is not rebased onto a moved base and the forge reports its conflicts.
 
 What that means, per path, once a person has reviewed the PR in forge mode:
 
-- `hashd merge` of the approved PR does not rebase, re-test a rebased tree or push. A conflict the forge reports parks the workstream at `merge_conflicts` with the stop "PR with N human reviews conflicts with <base>" (`mergeflow.merge.approved_conflict`). Otherwise the merge gate runs on the PR's head (a gate that changes the branch stops instead of publishing, `mergeflow.merge.rewrite_after_review`), and the forge is asked to complete exactly the head hashd verified (`MergeOptions.ExpectedHead`: Azure Repos `lastMergeSourceCommit`, GitHub `--match-head-commit`). A head pushed outside hashd since then stops as "Head changed since verification" (`mergeflow.merge.head_moved`), back at `pr_open`. A person's review that arrives while the merge prepares a rewrite is caught at the push: the push re-reads the PR's reviews and refuses (`mergeflow.merge.rewrite_after_review`), and that stop's next steps are the forge or `hashd reject`, since only AI resolve takes the acknowledgment.
+- `hashd merge` of the approved PR does not rebase, re-test a rebased tree or push. A conflict the forge reports parks the workstream at `merge_conflicts` with the stop "PR with N human reviews conflicts with <base>" (`mergeflow.merge.approved_conflict`). Otherwise the merge gate runs on the PR's head (a gate that changes the branch stops instead of publishing, `mergeflow.merge.rewrite_after_review`), and the forge is asked to complete exactly the head hashd verified (`MergeOptions.ExpectedHead`: Azure Repos `lastMergeSourceCommit`, GitHub `--match-head-commit`). A head pushed outside hashd since then stops as "Head changed since verification" (`mergeflow.merge.head_moved`), back at `pr_open`. A person's review that arrives while the merge prepares a rewrite is caught at the push: the push re-reads the PR's reviews and refuses (`mergeflow.merge.rewrite_after_review`), and that stop's next steps are the forge or `hashd reject`, since only AI resolve and replan are requested rewrites.
 - The `pr_open` check does not send a forge-reported conflict to the automatic rebase loop: it parks the workstream at `merge_conflicts` with the same stop.
 - `hashd pr push`, `hashd pr create` and the merge-for-PR leg push the new commits without rebasing onto a moved base; `pr push` says so in its outcome.
-- AI resolve rewrites the branch, so it needs the operator's acceptance that the forge resets the reviews: `hashd merge <ws> --ai-resolve --accept-review-reset` (REST `acknowledge_review_reset` on `POST /workstreams/{id}/ai-resolve`). Without it the admission refuses with `mergeflow.resolve.review_reset_unacknowledged`, naming the flag and the review count, and nothing changes; the AI-resolve row stays offered with a note saying the same. The admission judges on the PR watch's latest read, or reads the PR when there is none, and the resolve's push asks the rule again.
+- AI resolve (`hashd merge <ws> --ai-resolve`) is a requested rewrite: publishing the resolution rewrites the branch and the forge resets the reviews, and it asks for no acknowledgment. The AI-resolve row stays offered with a note naming the reviews the resolution resets. When hashd cannot tell whether anyone reviewed (a failed or incomplete PR read, a `pr.completion` the forge cannot honour) the admission refuses with `mergeflow.resolve.rewrite_refused` and nothing changes. The admission judges on the PR watch's latest read, or reads the PR when there is none; the resolve's push asks the rule again, its lease refusing a head that moved.
+- Replan (`hashd replan`, full or `--from-commit`) and `hashd reset` restart the plan, so they close the lane's PR and remove it from the lane before their reset (**A restarted plan removes the PR**, below). The rewound branch is then published with no PR on it, still through the rule and with the lease of the origin head the reset observed.
+
+**A restarted plan removes the PR.** A lane has a PR only while its plan is complete. `hashd replan` (full or `--from-commit`) and `hashd reset` restart the plan, so each takes the lane's PR off it, under the project lifecycle lock and before it touches the code or the plan (`api.retireLanePR`). The PR is read on the forge: an open one is closed with a note naming the verb (`mergeflow.ClosePRWithNote`), and one already closed there counts as closed, with no close asked. At the PR-closed stop the close is already recorded, so the verb retires that decision and asks nothing of the forge. The removal is one `pr_state_changed` timeline row ("removed from the lane") written with the cleared `pr_url` and `pr_number`, and the PR watch is stopped with its standing condition. The PR step then opens a new PR from the same branch, as for a lane that never had one. A PR that reads neither open nor closed, a failed read, or a close the forge refuses or never confirms refuses the verb (`replan.pr_close`, `reset.pr_close`) with the lane as it was. A close an earlier attempt failed to confirm stops standing when the PR is removed. A failure of the verb after the removal says the PR was closed and removed, and that rerunning the verb continues without it. A reject at the PR step keeps the PR: it is a fix on a finished plan.
 
 `GET /workstreams/{id}` carries `pr_completion` (`mode`, `source` default/configured, `human_reviews`, `rewrite_allowed`, `auto_merge` -- whether the forge will complete the PR, from the PR watch's latest read -- and the server's sentences), which `hashd show` prints under the PR line. In forge mode the forge's own build validation covers the merged result; hashd records that the forge completed the PR, with the landed commit, on `merge_landed`.
 - A merge from `pr_open` / `pr_approved` that stops before landing returns to the state it started from, except where merging always goes: a merge conflict to `merge_conflicts`.
@@ -1559,7 +1751,7 @@ The begin-preflight exit includes closed, failed and stateless initial PR reads.
 
 #### A dead merge
 
-A merge whose worker died -- a server killed mid-merge -- reaches none of the exits above. The housekeeping sweep's merging failsafe records `stage_timeout` and `run_failed` once the merging substage passes its threshold, and then recovers the lane when the merge is dead. Dead means all three hold: a failure of the current merging substage is recorded since that substage was entered, under the current merge's admission (a stamp the merge before it left does not count), the `merge:{project}:{ws}` run has no pending activity, and the `mergelock:{project}` run held for that exact merge run has none either. A merge whose record is already gone cannot be running, so a lock it abandoned, one parented by this workstream's merge ID, is still judged and closed as its own. A merge parked on its lock child shows no activity of its own, which is why the lock is judged with it. A lock held by another workstream's merge is not this lane's and is never touched. A read that fails is not dead, and the sweep tries again next time. The record is judged again after the lane: a new admission means the lane is another merge's now, and a workstream that left `merging` or entered another or the same substage again under the same admission has moved past the failure judged, so it is left alone.
+A merge whose worker died -- a server killed mid-merge -- reaches none of the exits above. The housekeeping sweep's merging failsafe records `stage_timeout` and `run_failed` once the merging substage passes its threshold, and then recovers the lane when the merge is dead. `acquire_lock` is the exception for new-rule FIFO attempts: a merge waiting there for its turn is never failed or recovered while its `merge:{project}:{ws}` execution is running (a read that fails counts as running), so its threshold applies only to an orphaned stamp, one whose merge workflow is gone. Dead means all three hold: a failure of the current merging substage is recorded since that substage was entered, under the current merge's admission (a stamp the merge before it left does not count), the `merge:{project}:{ws}` run has no pending activity, and the `mergelock:{project}` run held for that exact merge run has none either. A merge whose record is already gone cannot be running, so a lock it abandoned, one parented by this workstream's merge ID, is still judged and closed as its own. A merge parked on its lock child shows no activity of its own, which is why the lock is judged with it. A lock held by another workstream's merge is not this lane's and is never touched. A read that fails is not dead, and the sweep tries again next time. The record is judged again after the lane: a new admission means the lane is another merge's now, and a workstream that left `merging` or entered another or the same substage again under the same admission has moved past the failure judged, so it is left alone.
 
 Recovery closes the merge run, then the lock run held for it, each by its exact run ID and by terminate rather than cancel: a cancel is delivered to workflow code, which would run the merge's admission undo and the lock section's cancellation wait after the workstream had already moved. The merge goes first because closing the lock child under a live parent would wake the parent into that same undo. The lock is then judged from a read taken after the merge closed: a merge about to start its lock child shows no activity, so the lock can be taken between the first read and the terminate, and a closed parent starts no child. A lock found executing then leaves the lane at `merging`; a newer merge run leaves it to that merge. A merge that has no record by then (its terminate found nothing) is gone, not replaced, and its lock is still closed. Each close is an `engine_cleanup` row on the workstream; a run already gone counts as closed. A row that fails to land fails the recovery, naming the exact run. A later recovery, or a terminate that finds the run already closed by another recovery, writes the missing row from the run's close event in the engine. A recovery's terminate carries the workstream, actor and reason there, and the later recovery lists the terminated runs of the merge and lock workflow IDs through visibility, which keeps a closed run whatever has run under its ID since, so a lock that has passed to another merge, or whose merge has no record left, is still found. Only a run whose terminate names this workstream is recorded, under the actor and reason it carried, so an operator's abort stays the operator's; a run closed any other way, its own exit, a terminate from outside hashd or another workstream's recovery, gets none. This is the one place the server closes a `mergelock:` execution itself. The lock outlives its parent by design (`AbandonOnParentClose`), so leaving it would hold every merge in the project, this workstream's retry included, for up to the section deadline. Only when both closes succeed does the workstream leave `merging`, by the merge-abort edge for the state the merge was admitted from (read from the admission's `state_changed` row): `pr_open` and `pr_approved` return there, any other origin, or none recorded, to `ready_to_merge`. The merging stamp is then cleared. The exit and the clear hold the project lifecycle lock that merge admission decides under, so a retry cannot stamp its own substage in between and have it wiped. The closes run outside that lock, where the dead merge's own undo can return the workstream and a new merge be admitted; the exit checks, under the lock, that the record is still the one judged -- the newest admission, the state and the failed substage's entry -- and otherwise leaves the lane alone. The sweep takes that lock without waiting; when another holder has it, the closed lane stays at `merging` and the next sweep exits it. A close that fails leaves the lane at `merging` for the next sweep.
 
@@ -1582,7 +1774,7 @@ flowchart TD
     EXIT --> CLEAR["clear the merging stamp"]
 ```
 
-**Rebase only on a forge conflict.** The `pr_open` check sends a merge to the auto-rebase only when the forge reports a conflict (`forge.PRStatus.Conflict`): GitHub's `CONFLICTING`, an open Gitea PR Gitea reports unmergeable, GitLab's `conflict` or `need_rebase` on an open MR. Bitbucket's read carries no conflict signal. Any other reason a forge withholds the merge on an open PR -- on GitLab a missing approval, a draft, unresolved discussions, a mergeability check still running -- is the not-ready stop above, work-in-progress at the `pr_open` gate. Its title, the merge reply and the dashboard row all read `PR open · merge blocked · <reason>`, where the reason names the forge and its blocker (`MergeBlocker`, for example `GitLab: required reviewer approval missing`); the detail keeps the forge's review, checks and mergeable facts.
+**Rebase only on a forge conflict.** The `pr_open` check sends a merge to the auto-rebase only when the forge reports a conflict (`forge.PRStatus.Conflict`; what each backend reports as one: [docs/FORGES.md](docs/FORGES.md), section 5). Any other reason a forge withholds the merge on an open PR -- on GitLab a missing approval, a draft, unresolved discussions, a mergeability check still running -- is the not-ready stop above, work-in-progress at the `pr_open` gate. Its title, the merge reply and the dashboard row all read `PR open · merge blocked · <reason>`, where the reason names the forge and its blocker (`MergeBlocker`, for example `GitLab: required reviewer approval missing`); the detail keeps the forge's review, checks and mergeable facts.
 
 #### The head test on a forge changes-requested verdict
 
@@ -1594,7 +1786,15 @@ open forge threads and the bodies of current changes-requested reviews (those
 submitted against the PR head, or undatable) beside the internal findings, with
 or without `-f`; an edited `--findings-file` replaces that selection and reads no
 forge. Other gates keep internal-only defaults, with forge findings opt-in
-through `--include-forge`.
+through `--include-forge`. `--no-local-findings` and `--no-forge-findings`
+only subtract from that existing selection and may be combined. Forge omission
+skips the forge read and excludes threads and review-level requests. Source
+selection flags conflict with replacement findings (including empty files or
+stdin); `--include-forge` conflicts with `--no-forge-findings`. Explicit
+dismissals remain usable with replacements or omissions. A FIX still requires
+findings or additive guidance; non-FIX gates refuse selection options.
+Repeatable `--exclude-finding <ref>` (`exclude_findings` on REST) subtracts only the named stored identity from this reject. References must resolve within the target project and workstream before any mutation or forge refresh. A valid reference outside the selection removes nothing and never enables or loads its source. Exclusions record no ruling, resolve no thread and do not affect later rejects. They conflict with replacement findings, including empty files or stdin; explicit dismissals remain usable with replacements. Automatic selection and FIX thread bookkeeping retain identity even for duplicate wording; replacement Markdown matching is unchanged.
+
 This separates a forge verdict from the operator's decision to assign more work.
 Rebase-conflict and merge-abort transitions are unchanged.
 The `pr_changes_requested` trigger is ledgered as undispatched: operator reject
@@ -1609,7 +1809,6 @@ One exit's class is not fixed by the leg. A forge `changes_requested` decision i
 | `stale` | work-in-progress | the notice surface: the verdict refers to an older head and the forge has not cleared it |
 | `undecidable` | work-in-progress | the notice surface, with the record stating that freshness could not be determined |
 
-`TestWFHeadTestTableMatchesTheClassifier` holds this table to `changesRequestedStop` and to the freshness values `fsm` declares, so a fourth classification cannot land without a row.
 
 **The local branch against the published head.** The freshness test dates the verdict against the commit the PR points at; it never asks whether that commit is the code the operator has. The same stop asks second, locally: `mergeflow.ComparePublishedHead` compares the workstream branch tip with the head the forge snapshot names, and the answer rides the stop's payload as `published_head_state` with `published_head_local_sha` and the ahead/behind counts beside it. When it reports commits the published head has never seen, the record is worded from it -- the title and detail say that unpublished local work is what stands between this branch and a merge, naming the local tip, the published head and the ahead count. A tip with commits on both sides reports one of two shapes: `rebased` when every commit only on the published head has a patch-identical commit on the branch (`rev-list --left-only --cherry-pick`, the shape hashd's own rebase onto the base leaves), and `diverged` when at least one does not, or when that check cannot be read. The standing review is still named, from what the changes-requested row actually carried: its reviewer and the commit it was recorded on where the forge gave them, and where that row carried no reviewer the sentence stays with the forge's aggregate decision and the account of why nothing could be dated, because a row with no reviewer is a review hashd never read rather than a nameless one. Nothing in the wording says the review saw the unpublished commits, or that publishing will clear the verdict, because the stop knows neither. The merge's own reply carries the same account, so an operator who only catches the response reads what the row says.
 
@@ -1617,11 +1816,15 @@ The recorded help for that shape leads with the publish step and drops the rejec
 
 **Publication is confirmed before the forge merge.** The PR merge proceeds only when the PR head the forge reports equals the local committed branch tip. `MergeApprovedPRLocked` checks this immediately before the forge merge call, after the rebase, the post-rebase test and any force-push. Both routes reach the check: the `pr_open` loop's ready verdict and the `pr_approved` verdict. It reads the forge status once more and runs `mergeflow.ComparePublishedHead` against that read. A push that succeeded counts for nothing; only the head the forge reports now counts. The merge is refused on `ahead`, `rebased`, `behind`, `diverged` and `unverified`, including a failed status read and a read that reports no PR head, and on a PR the forge reports already merged or closed. A refusal records a work-in-progress stop through the existing recorder, with the comparison on the record and help that leads with the publish step for that state (`hashd pr push <ws>` when ahead or rebased, `hashd pr push <ws> --sync` otherwise) followed by `hashd merge <ws>`. A PR found merged by this later check still refuses the current merge attempt; `hashd merge <ws>` retries through the initial forge read from either PR state and reconciles the landing. A closed PR remains a stop; the approved-state stop also offers `hashd close <ws>`. The workstream returns to `pr_open` or `pr_approved`, whichever it came from. No CLI flag, REST route or bypass is added.
 
-**The approval decision.** Where the forge reports its own reviewer policy, that evaluation is the decision; hashd does not recount. Otherwise hashd counts approvals that are not by a bot and are dated at the current head against `pr.min_approvals` (shipped `0`: a branch with no review rule needs no approval). The status read carries one reviewer row per answer and per outstanding request, each with its review in the common vocabulary (`approved`, `changes_requested`, `commented`, `none`), the forge's own value verbatim beside it (`forge_review`), and the commit the review applies to where the forge dates it (`review_head_sha`); each backend maps its own values, and an undated review never counts. A review counts only from an account the repository admitted, never from the PR's own author or a deleted account; one that cannot count stays in the reviewer list with `not_counted` naming why. Which accounts are admitted is the backend's rule: the GitHub backend admits an author whose association is owner, member or collaborator, since on a public repository any account can submit an approval; the GitLab backend lists approvals undated, as GitLab names no commit for them, so they never count. A change request is the forge's aggregate decision asking for changes or a failing reviewer-policy row; where hashd counts (no forge reviewer policy), a counting reviewer's `changes_requested` review at head is one too, while under a forge reviewer policy the forge alone decides. `review.bot_identities` is applied once, at the forge resolver (`forge.WithBotIdentities`), matching `display_name`, `username` or `id` by glob, each backend declaring which of those its reads fill (Gitea fills only `username`) and an entry on any other field refused naming the forge: a listed identity's review never counts, its threads are labelled bot, and its `threads_block` (`forge`, `always`, `never`) decides whether its unresolved threads block. Both merge paths (the pr_open check and the pre-merge re-read) read the open PR's review threads with its status and judge them together: each unresolved thread, outdated or not, is a reason labelled human or bot, and a human's blocks where the forge's comment-resolution rule does; a failed thread read is an error verdict at pr_open and a work-in-progress stop before the merge. Bot findings reach a FIX tagged `<label> (bot)`.
+**The approval decision.** Where the forge reports its own reviewer policy, that evaluation is the decision; hashd does not recount. Otherwise hashd counts approvals that are not by a bot and are dated at the current head against `pr.min_approvals` (shipped `0`: a branch with no review rule needs no approval). The status read carries one reviewer row per answer and per outstanding request, each with its review in the common vocabulary (`approved`, `changes_requested`, `commented`, `none`), the forge's own value verbatim beside it (`forge_review`), and the commit the review applies to where the forge dates it (`review_head_sha`); each backend maps its own values, and an undated review never counts. A review counts only from an account the repository admitted, never from the PR's own author or a deleted account; one that cannot count stays in the reviewer list with `not_counted` naming why. Which accounts are admitted, and whether a review is dated, is the backend's rule ([docs/FORGES.md](docs/FORGES.md), section 5). A change request is the forge's aggregate decision asking for changes or a failing reviewer-policy row; where hashd counts (no forge reviewer policy), a counting reviewer's `changes_requested` review at head is one too, while under a forge reviewer policy the forge alone decides. `review.bot_identities` is applied once, at the forge resolver (`forge.WithBotIdentities`), matching `display_name`, `username` or `id` by glob, each backend declaring which of those its reads fill (Gitea fills only `username`) and an entry on any other field refused naming the forge: a listed identity's review never counts, its threads are labelled bot, and its `threads_block` (`forge`, `always`, `never`) decides whether its unresolved threads block. Both merge paths (the pr_open check and the pre-merge re-read) read the open PR's review threads with its status and judge them together: each unresolved thread, outdated or not, is a reason labelled human or bot, and a human's blocks where the forge's comment-resolution rule does; a failed thread read is an error verdict at pr_open and a work-in-progress stop before the merge. Bot findings reach a FIX tagged `<label> (bot)`.
 
-**pr_approved has one writer.** `mergeflow.ReconcileApproval` moves a `pr_open` workstream whose PR is ready at its head to `pr_approved` (trigger `pr_approved`), recording that head in `workstreams.pr_approved_head_sha` in the same CAS; a `pr_approved` workstream whose PR is no longer ready, or whose head is not the recorded one, goes back to `pr_open` (trigger `pr_approval_withdrawn`), and is approved again at the new head when the PR is ready there. A landed push that moved the PR head withdraws an approval decided at another head (`ReconcilePushedHead`), and no approval is written from a read that a push (a `code_change` outcome row) landed after: the push records that row before its own reconcile, and the approval is checked against it before and after it is written. The same rule holds when a merge from `pr_approved` force-pushed its rebased branch, or tried to, and then stopped: the stop returns it to `pr_approved` and the withdrawal follows unless the branch tip is the approved head; a tip that cannot be read withdraws it. A dead merge's recovery (`hashd merge --abort`, the housekeeping sweep) applies it to every return to `pr_approved`, since its records cannot say whether the push ran. Both triggers are internal: no operator verb fires them. `pr_approved` means the PR is approved or no approval is required: ready to merge; a PR on a branch with no reviewer rule is ready without a vote, and the state's wording says so. Writing, withdrawing or re-recording the approval is a state change and nothing else: it starts no run, review or test. A merge whose pre-merge read is no longer ready records a work-in-progress stop naming what is outstanding and returns to `pr_open`.
+**pr_approved has one writer.** `mergeflow.ReconcileApproval` moves a `pr_open` workstream whose PR is ready at its head to `pr_approved` (trigger `pr_approved`), recording that head in `workstreams.pr_approved_head_sha` in the same CAS; a `pr_approved` workstream whose PR is no longer ready, or whose head is not the recorded one, goes back to `pr_open` (trigger `pr_approval_withdrawn`), and is approved again at the new head when the PR is ready there. A read whose only blocker is that the forge has not computed mergeability yet (`forge.RequirementMergeabilityRowID` in state `unknown`), at the approved head, keeps the approval: the forge has not answered. Any other not-ready read, or that read at another head, withdraws it as before. A landed push that moved the PR head withdraws an approval decided at another head (`ReconcilePushedHead`), and no approval is written from a read that a push (a `code_change` outcome row) landed after: the push records that row before its own reconcile, and the approval is checked against it before and after it is written. The same rule holds when a merge from `pr_approved` force-pushed its rebased branch, or tried to, and then stopped: the stop returns it to `pr_approved` and the withdrawal follows unless the branch tip is the approved head; a tip that cannot be read withdraws it. A dead merge's recovery (`hashd merge --abort`, the housekeeping sweep) applies it to every return to `pr_approved`, since its records cannot say whether the push ran. Both triggers are internal: no operator verb fires them. `pr_approved` means the PR is approved or no approval is required: ready to merge; a PR on a branch with no reviewer rule is ready without a vote, and the state's wording says so. Writing, withdrawing or re-recording the approval is a state change and nothing else: it starts no run, review or test. A merge whose pre-merge read is blocked only by mergeability not computed yet, at that read's head, whether or not the merge pushed, waits inside the held merge lock, asking the forge again every 10 s for at most 4 minutes (Deadline inventory, `pr_merge_mergeability_wait`), and merges on a ready answer; still not computed after 4 minutes, it records a blocked forge notice naming `hashd merge <id>` and returns to where it was dispatched from, so a `pr_approved` lane whose tip is still the approved head keeps its approval. A merge whose pre-merge read is otherwise no longer ready records a work-in-progress stop naming what is outstanding and returns to `pr_open`.
 
-**The PR watch.** `prwatch:{project}:{ws}:{pr}` is one Temporal workflow per open hashd PR; the last segment is the PR's key within its workstream (its number, after the repository it was opened in when the workstream names one), so a second PR of one workstream is a second watch. It starts when PR create or PR push lands, when either returns without its workflow (a `pr create` that found the PR, a `pr push` with nothing to push), or when a merge is dispatched, and the housekeeping sweep starts it for any `pr_open` / `pr_approved` workstream whose watch is not running, which is how PRs opened before an upgrade are watched; the singleton ID makes a second start a no-op. Each poll reads the PR as the workstream's owner, records one timeline row per kind of change (`pr_head_changed`, `pr_state_changed`, `pr_reviews_changed`, `pr_requirements_changed`, `pr_threads_changed`, each with the before and after), stores the newest snapshot in `pr_watch` (in the change rows' transaction, so no change is recorded twice), runs the approval reconcile, and keeps one standing condition current as a `pr_watch` operation result, written with the condition `pr_watch` records in one transaction: recorded when it appears, withdrawn (outcome `withdrawn`) when it clears. A change is any change to what decides readiness: a review, its head, whether it counts, whether its reviewer is required; a requirement's state and whether it blocks. Each PR's condition stands apart (the standing reader groups `pr_watch` rows by `pr_key`), so an earlier PR's watch withdrawing its own never hides the current PR's, and the watch alone clears it: another operation's success, such as a `pr push` with nothing to push, does not. A merge check dates votes against the watch's snapshot as read before its own forge read. The conditions are: waiting for the owner's forge credential (error; no forge call until one is stored, never another credential), PR closed on the forge (a nonerror human decision; `hashd reject -f` is Rework on the intact branch, `hashd close --ref <ref> --reason <reason>` closes the story as `closed_by_person`, or `hashd close` is Abandon), changes requested at head (error; `hashd reject`), a blocking requirement failing (error), ready to merge (notice; `hashd merge`; raised, and served, only while the workstream branch carries nothing the PR head lacks and can be compared with it, the hold `pr_readiness` applies), and the archive conditions below for a PR merged on the forge. A PR the forge reports merged is recorded once as a `pr_merged_on_forge` timeline row: who merged it (the forge's merger and whether it is a bot, matched by `review.bot_identities` like any reviewer; on Azure Repos, which declares no bots, the identity that enabled auto-complete when one did, else the user who closed the PR, so a build service that sets auto-complete needs its own `review.bot_identities` entry), the people whose approval counts at the merged head, the commit that landed and when, and the hashd work the merge left unfinished, read in the record's write before the generation advances from what the workstream already records and only where it is running by runtime_status's rule (its `runner_stage` while that stamp's owner runs, probed just before the write, and its `active_agent_invocations` rows whose holder is alive, a final review in progress for one), or none when nothing was running. A close parks the workstream at `awaiting_human_review` without closing the story or changing its branch. The park, the existing `abandoned` standing closure record and the command-generation advance commit together. Rework appends a FIX with the supplied guidance, consumes the closure decision and resumes at `active`; Abandon uses story close. Reopening a PR on the forge does not leave this park. The closure raises one human-decision alert carrying PR closed and the recorded closure facts, with no duplicate generic review alert; other blocked operation results do not alert. The merge record, like the `abandoned` condition when it records a close (once per close: raised again after another condition replaced it, with no change of the PR's state seen since, it is the same close), advances the workstream's command generation in its own write and carries the generation it advanced to (unless that write finds hashd's own merge running: the merge owns the PR and records its own landing or stop, so a merge on the forge is then not recorded and a close neither parks nor advances anything), so a stage running when the PR ended on the forge has its result refused naming the record (who merged it and when, or when the close was seen), while the archive dispatched after it runs. A person stands behind the merge when the forge names a merger who is neither a bot nor an account a `review.bot_identities` entry could not check (the field it matches was not reported), or when a person's approval counts at the merged head (an approval dated to an older iteration, or one no read dated, does not). With a person behind it, the watch dispatches hashd's archive (`hashd merge`'s workflow) as the workstream owner, once per record whatever the dispatch answers, and the landing row names the record (`forge_merge_id`). That archive ends the story `closed_by_person` (from `accepted` or `implementing`), never `implemented`: its closure (kind `forge_merge`, actor the PR watch) is built from the record -- the PR, the landed commit, the forge's merger and merge time, each `unavailable` when the forge supplied none and never filled from the operator, the watch or the time it was seen, plus when the watch saw it (`observed_at`), the approvers and the unfinished work -- and stored in the transition's own write. The requirement is burned, as the archive burns it for any merge; no story-implemented note is published (a `closed_by_person` story publishes none), and the one transition raises the `forge_merge` alert (see Alerts). The watch and the external-merge stages atomically look up or create one `pr_merged_on_forge` record per workstream and `PRWatchKey`; existing evidence wins unchanged, including after the database is reopened. The watch yields to an active merge; that merge records under its assignment fence without advancing its own command generation. Events publish after commit. The archive reads the merge from the workstream's landing row (`forge_merge_id`), or from the `external_merge_reconciled` link committed with that move if execution stopped before the landing row, so a re-run the janitor or `hashd merge` dispatches ends it the same way; a re-run, or the merge seen again, finds the story `closed_by_person` and changes nothing; a merge through hashd's own full flow, including its auto-merge, still ends the story `implemented`: the evidence retains the set decision at the merged head even after the completion notice is retired. Configured bot identities label both the merger and reviewers before either command path creates canonical evidence. A delayed watch observation of hashd's completed merge cannot replace a missing hashd landing with a person's ending. Recording, closure and archive recovery do not require current final-review evidence. A dispatch refused raises `merged_dispatch_refused` (notice). Its recovery stop is derived from the canonical merge, durable refusal, admission receipts and latest unfinished attempt, independently of the watch condition: withdrawal, idle-stop, restart and repeated observations neither erase newer outcomes nor revive a stale refusal. It reports blocked while unresolved with no archive running, running while the archive executes, the latest unfinished outcome when it stops, and no recovery stop after completion. Before admission spends the automatic allowance, help explains the janitor attempt and offers `hashd merge <STORY>` when current admission permits; afterward, or after personal admission supersedes it, help describes personal recovery without promising more automatic attempts. A missing worktree retains its guard cause and recovery step and withholds Merge. An initially admitted archive that stopped without landing raises `archive_stopped` (error). The watch dispatches neither again; a refused dispatch is eligible for the janitor's later attempt under the [unfinished archive recovery rule](#unfinished-archive), while an initially admitted `archive_stopped` archive is not. A refusal that a credential gap replaced stands again when the credential returns, since that archive never started. With nobody behind it, the watch archives nothing and raises `merged_unattended` (notice) naming `hashd merge`, which records the merge and archives the workstream. The readiness is one server object, `pr_readiness`: `GET /workstreams/{id}` and `/snapshot` embed the watch's latest from `pr_watch` with no forge call (verdict, summary, reasons, approval, reviewers with each review's freshness against the head, requirements, `last_poll_at`, `next_poll_at`, `watch_state`), `GET /workstreams/{id}/pr/threads` carries the same object judged from its own live read, and a `pr_readiness_changed` frame announces a change, carrying the verdict with that same hold. `hashd show`, the TUI forge review section and the web forge-review panel render it; none of them judges readiness. It polls at `pr.watch.interval_active` while a blocking check runs or the forge has not settled a state, at `pr.watch.interval_idle` while the PR waits on people, and after a failed read at the active interval doubled per failure up to the idle one. `hashd merge` starts it if it is not running (afresh if its PR's idleness stopped it) and signals it to poll at once. It holds at a restart-hold boundary before each poll, acknowledged, and a restart hold or a workstream pause asks it to check its holds at once (`execution-hold-requested`), so it never keeps either waiting. It holds no execution lock; its writes serialize with operator decisions under the project lifecycle lock. It never merges, approves or pushes, dispatches no merge on readiness, and stops once the workstream has left `pr_open`, `pr_approved` and `merging`, withdrawing its condition except for an undecided PR-closed park. That closure stays standing when the watch stops and through housekeeping, credential-condition replacement and restart. Repeated observations neither park again nor undo an accepted Rework. It also stops when the PR goes longer than `pr.watch.max_age` without a change it sees, counted from the watch's start or its last timeline row, including while its reads fail or no credential can make one: then it leaves a `watch stopped: PR idle N days` notice in place of its condition, naming the condition it last saw and why its last read failed, the housekeeping sweep does not start it again, and a PR create, a PR push or a merge dispatch starts a fresh watch, whose first poll replaces the notice. The same verbs on a PR whose watch is running restart its idle clock, and an idle stop a poll decided before such a verb does not land (the stop is conditional on the watch's `generation`), so a watch a verb finds running stays watching; the housekeeping sweep is no verb and restarts nothing. The sweep withdraws that notice once the workstream leaves the PR states, or when the workstream's next PR starts its own watch; a start for the next PR also asks a still-running earlier PR's watch to poll at once, which stops it.
+**The PR watch.** `prwatch:{project}:{ws}:{pr}` is one Temporal workflow per open hashd PR; the last segment is the PR's key within its workstream (its number, after the repository it was opened in when the workstream names one), so a second PR of one workstream is a second watch. It starts when PR create or PR push lands, when either returns without its workflow (a `pr create` that found the PR, a `pr push` with nothing to push), or when a merge is dispatched, and the housekeeping sweep starts it for any `pr_open` / `pr_approved` workstream whose watch is not running, which is how PRs opened before an upgrade are watched; the singleton ID makes a second start a no-op. Each poll reads the PR as the linked story's owner, records one timeline row per kind of change (`pr_head_changed`, `pr_state_changed`, `pr_reviews_changed`, `pr_requirements_changed`, `pr_threads_changed`, each with the before and after), stores the newest snapshot in `pr_watch` (in the change rows' transaction, so no change is recorded twice), runs the approval reconcile, and keeps one standing condition current as a `pr_watch` operation result, written with the condition `pr_watch` records in one transaction: recorded when it appears, withdrawn (outcome `withdrawn`) when it clears. A change is any change to what decides readiness: a review, its head, whether it counts, whether its reviewer is required; a requirement's state and whether it blocks. Each PR's condition stands apart (the standing reader groups `pr_watch` rows by `pr_key`), so an earlier PR's watch withdrawing its own never hides the current PR's, and the watch alone clears it: another operation's success, such as a `pr push` with nothing to push, does not. A merge check dates votes against the watch's snapshot as read before its own forge read. The conditions are: waiting for the owner's forge credential (error; no forge call until one is stored, never another credential), PR closed on the forge (a nonerror human decision; `hashd reject -f` is Rework on the intact branch, `hashd replan` or `hashd reset` restarts the plan and removes the closed PR from the lane, `hashd close --ref <ref> --reason <reason>` closes the story as `closed_by_person`, or `hashd close` is Abandon; `hashd story add-commit` is refused there, since a new micro-commit cannot go onto a closed PR), changes requested at head (error; `hashd reject`), a blocking requirement failing (error), ready to merge (notice; `hashd merge`; raised, and served, only while the workstream branch carries nothing the PR head lacks and can be compared with it, the hold `pr_readiness` applies), and the archive conditions below for a PR merged on the forge. A PR the forge reports merged is recorded once as a `pr_merged_on_forge` timeline row: who merged it (the forge's merger and whether it is a bot, matched by `review.bot_identities` like any reviewer; on Azure Repos, which declares no bots, the identity that enabled auto-complete when one did, else the user who closed the PR, so a build service that sets auto-complete needs its own `review.bot_identities` entry), the people whose approval counts at the merged head, the commit that landed and when, and the hashd work the merge left unfinished, read in the record's write before the generation advances from what the workstream already records and only where it is running by runtime_status's rule (its `runner_stage` while that stamp's owner runs, probed just before the write, and its `active_agent_invocations` rows whose holder is alive, a final review in progress for one), or none when nothing was running. A close parks the workstream at `awaiting_human_review` without closing the story or changing its branch. The park, the existing `abandoned` standing closure record and the command-generation advance commit together. Rework appends a FIX with the supplied guidance, consumes the closure decision and resumes at `active`; Abandon uses story close. Reopening a PR on the forge does not leave this park. The closure raises one human-decision alert carrying PR closed and the recorded closure facts, with no duplicate generic review alert; other blocked operation results do not alert. The merge record, like the `abandoned` condition when it records a close (once per close: raised again after another condition replaced it, with no change of the PR's state seen since, it is the same close), advances the workstream's command generation in its own write and carries the generation it advanced to (unless that write finds hashd's own merge running: the merge owns the PR and records its own landing or stop, so a merge on the forge is then not recorded and a close neither parks nor advances anything), so a stage running when the PR ended on the forge has its result refused naming the record (who merged it and when, or when the close was seen), while the archive dispatched after it runs. A person stands behind the merge when the forge names a merger who is neither a bot nor an account a `review.bot_identities` entry could not check (the field it matches was not reported), or when a person's approval counts at the merged head (an approval dated to an older iteration, or one no read dated, does not). With a person behind it, the watch dispatches hashd's archive (`hashd merge`'s workflow) as the story owner, once per record whatever the dispatch answers, and the landing row names the record (`forge_merge_id`). That archive ends the story `closed_by_person` (from `approved` or `implementing`), never `implemented`: its closure (kind `forge_merge`, actor the PR watch) is built from the record -- the PR, the landed commit, the forge's merger and merge time, each `unavailable` when the forge supplied none and never filled from the operator, the watch or the time it was seen, plus when the watch saw it (`observed_at`), the approvers and the unfinished work -- and stored in the transition's own write. The requirement is burned, as the archive burns it for any merge; no story-implemented note is published (a `closed_by_person` story publishes none), and the one transition raises the `forge_merge` alert (see Alerts). The watch and the external-merge stages atomically look up or create one `pr_merged_on_forge` record per workstream and `PRWatchKey`; existing evidence wins unchanged, including after the database is reopened. The watch yields to an active merge; that merge records under its assignment fence without advancing its own command generation. Events publish after commit. The archive reads the merge from the workstream's landing row (`forge_merge_id`), or from the `external_merge_reconciled` link committed with that move if execution stopped before the landing row, so a re-run the janitor or `hashd merge` dispatches ends it the same way; a re-run, or the merge seen again, finds the story `closed_by_person` and changes nothing; a merge through hashd's own full flow, including its auto-merge, still ends the story `implemented`: the evidence retains the set decision at the merged head even after the completion notice is retired. The auto-merge decision retains the strategy only when the forge acknowledges the set request successfully; an ambiguous acknowledgement verified merely as armed or completed establishes no requested strategy. Archive classification and strategy attribution select the same latest decision for the matching PR and source actually merged, respecting explicit withdrawal and preserving completion-notice retirement. Later project strategy settings supply no completion evidence. Authoritative completed-read strategy, merged head and squash identity remain independent forge facts and take precedence over decision-derived strategy. Evidence and landing checkpoints retain whether strategy came from acknowledged request options, so a later completed-read strategy supersedes those options through canonical replay and archive recovery. Finding the PR already completed before setting auto-merge records the observed completion without acknowledging the requested options. A previously unattended observation that later establishes the gated merged head gains hashd auto-merge provenance and admits its first archive dispatch under the original record identity. Configured bot identities label both the merger and reviewers before either command path creates canonical evidence. A delayed watch observation of hashd's completed merge cannot replace a missing hashd landing with a person's ending. Recording, closure and archive recovery do not require current final-review evidence. A dispatch refused raises `merged_dispatch_refused` (notice). Its recovery stop is derived from the canonical merge, durable refusal, admission receipts and latest unfinished attempt, independently of the watch condition: withdrawal, idle-stop, restart and repeated observations neither erase newer outcomes nor revive a stale refusal. It reports blocked while unresolved with no archive running, running while the archive executes, the latest unfinished outcome when it stops, and no recovery stop after completion. Before admission spends the automatic allowance, help explains the janitor attempt and offers `hashd merge <STORY>` when current admission permits; afterward, or after personal admission supersedes it, help describes personal recovery without promising more automatic attempts. A missing worktree retains its guard cause and recovery step and withholds Merge. An initially admitted archive that stopped without landing raises `archive_stopped` (error). The watch dispatches neither again; a refused dispatch is eligible for the janitor's later attempt under the [unfinished archive recovery rule](#unfinished-archive), while an initially admitted `archive_stopped` archive is not. A refusal that a credential gap replaced stands again when the credential returns, since that archive never started. With nobody behind it, the watch archives nothing and raises `merged_unattended` (notice) naming `hashd merge`, which records the merge and archives the workstream. The readiness is one server object, `pr_readiness`: `GET /workstreams/{id}` and `/snapshot` embed the watch's latest from `pr_watch` with no forge call (verdict, summary, reasons, approval, reviewers with each review's freshness against the head, requirements, `last_poll_at`, `next_poll_at`, `watch_state`), `GET /workstreams/{id}/pr/threads` carries the same object judged from its own live read, and a `pr_readiness_changed` frame follows every poll the watch completes or fails, carrying the verdict with that same hold; it is publish-only, so it refreshes open panels and raises no notification, toast or message. Each read also carries `presentation`, the PR panel the server composes (title, blockers, current reviews and findings, the next step, folded details). `hashd show`, the TUI forge review section and the web forge-review panel render it; none of them judges readiness. It polls at `pr.watch.interval_active` while a blocking check runs or the forge has not settled a state, at `pr.watch.interval_idle` while the PR waits on people, and after a failed read at the active interval doubled per failure up to the idle one. `hashd merge` starts it if it is not running (afresh if its PR's idleness stopped it) and signals it to poll at once. It holds at a restart-hold boundary before each poll, acknowledged, and a restart hold or a workstream pause asks it to check its holds at once (`execution-hold-requested`), so it never keeps either waiting. It holds no execution lock; its writes serialize with operator decisions under the project lifecycle lock. It never merges, approves or pushes, dispatches no merge on readiness, and stops once the workstream has left `pr_open`, `pr_approved` and `merging`, withdrawing its condition except for an undecided PR-closed park. That closure stays standing when the watch stops and through housekeeping, credential-condition replacement and restart. Repeated observations neither park again nor undo an accepted Rework. It also stops when the PR goes longer than `pr.watch.max_age` without a change it sees, counted from the watch's start or its last timeline row, including while its reads fail or no credential can make one: then it leaves a `watch stopped: PR idle N days` notice in place of its condition, naming the condition it last saw and why its last read failed, the housekeeping sweep leaves an ordinary idle stop alone (renewable credential recovery is the exception below), and a PR create, a PR push or a merge dispatch starts a fresh watch, whose first poll replaces the notice. The same verbs on a PR whose watch is running restart its idle clock, and an idle stop a poll decided before such a verb does not land (the stop is conditional on the watch's `generation`), so a watch a verb finds running stays watching; the housekeeping sweep is no verb and does not reset a running watch's idle clock. The sweep withdraws that notice once the workstream leaves the PR states, or when the workstream's next PR starts its own watch; a start for the next PR also asks a still-running earlier PR's watch to poll at once, which stops it.
+
+A PR watch interrupted specifically by a renewable Entra binding keeps the owner's id, credential key, account and tenant in `pr_watch.credential_recovery_json`, separately from its visible condition and whole failure diagnostic. An idle stop retains this continuation even when its notice replaces the credential notice. Housekeeping reads committed credential state (`ssocred.ProjectedState`), without contacting Entra or the forge, and recovers it when the current owner can use that same credential key. Another owner or an account not bound to that key cannot release the wait. An explicit reassignment uses the new owner's credential; rebinding the key to a usable account, or replacing the binding with a stored static token, can continue observation. A static token beside an unusable binding never substitutes for it. The current PR identity, PR lifecycle, owner removal and `pr.watch.enabled` are checked again; superseded PRs and work that left the PR states retire the stopped continuation with its condition.
+
+Recovery uses the same watch singleton and start admission, including holds. An idle-stopped watch starts a fresh generation with no old snapshot; a watch still polling is asked to poll now with `PRWatchPollNowSignal`. Dispatch failure, a failed signal, or an already-running execution that is closing retains the continuation, so a later sweep can finish the handoff. Only a successful forge observation clears it (a PR verb can supersede it, and normal lifecycle stops retire it). Every resumed poll resolves the current owner's credential through the normal forge resolver, with no fallback while its binding is unusable. This observation continuation does not depend on account-alert delivery and grants no merge, PR create, push or publication retry.
 
 
 ---
@@ -1637,13 +1840,79 @@ Escalation"). They differ only in scope and whether the plan is kept:
 | Verb | Plan | Worktree | Feedback | What it's for |
 |------|------|----------|----------|---------------|
 | **reset** | kept (commits unmarked) | reset to **baseline** (drops committed + uncommitted work) | -- | The plan is right, the implementation went bad: redo it from clean. |
-| **replan** | **regenerated** (breakdown re-runs) | reset to **baseline** | optional (`-f`) | The plan is wrong: re-derive it from the requirement. |
+| **replan** | **regenerated** (breakdown re-runs once the story is accepted again) | reset onto the **base branch's current head** | optional (`-f`, the planner's) | The plan is wrong: back to planning, re-derive it from the criteria. |
+| **replan** from a commit (`from_commit`; `hashd replan <ws> --from-commit <COMMIT-ID>`) | kept, the boundary and every later commit unmarked | **rewound** to before the boundary (keeps the earlier commits) | optional (the POST body's `feedback`, the planner's) | The plan is wrong from one micro-commit on: back to planning, keeping the good commits before it. |
 | **reject** (gate) | kept | current attempt only (`--reset` discards it; otherwise refine in place) | folded gate findings plus optional `-f` | At a review gate: iterate on the current micro-commit or branch feedback. |
 
 reset and replan are the same operation modulo "keep vs regenerate the plan";
 both reset the worktree to the recorded baseline via the shared
 `resetWorktreeToBase` (`server/internal/api/mutations_reset.go`), then return the
-workstream to active.
+workstream to active. A partial replan goes through the same reset but rewinds
+only to the parent of its boundary, so the earlier micro-commits stay in Git.
+
+A full `hashd replan` starts over on the base as it stands: its reset goes to
+the head of the base branch, not the branch's fork point, and that head becomes
+the recorded baseline. In the same replan every question still pending on the
+lane is superseded (`reqs.SupersedeLaneClarifications`), since each is about the
+work it discards; a gate's own record goes with the park's exit first, as on any
+exit. A story-scoped question is not the lane's and stays. `--from-commit`
+rewinds within the branch as before and retires no question. Either form clears
+the lane's rulings (`acknowledged_concerns`) and its directives: after a replan
+only the criteria and the code reach a coder or a reviewer. The replans the
+plan-defect judge's answer and a breakdown refusal's answer make keep their own
+path: a fork-point reset, and the rulings, directives and questions as they
+are.
+
+**A replan returns the story to planning.** The replan verb's replan, either
+form, moves the story to `draft` (story trigger `replan`, from `implementing`,
+or from `approved` before its lane has run again; guard
+`story_has_a_workstream`), in the transaction that records the approved
+replan. From `implementing` the problem text and non-goals of the earlier plan
+are cleared with it: after a replan the criteria are the only binding text, and
+a planner run writes the others afresh. `-f` is the planner's instruction for
+redrafting the criteria: once the replan has landed it is handed to the planner
+as `hashd story edit -f` hands it (`editStory`), and the approved-replan record
+holds no text, so none of it reaches the breakdown. The lane stays `active`
+with its kept code and waits: a lane is held whenever its story stands in a
+state in which no lane may run (`laneHoldingStory`) -- every story state but
+`implementing` and `implemented`, `abandoned` and `closed_by_person`, which a story reaches
+only through its lane's own ending. There every lane verb is refused with the
+way on from that state (`replan.planning.*`; `RequireLaneAction`, and the same
+refusal withholds each row): in planning (`draft`, `draft_failed`,
+`approved`) a replan (again: a full one from `--from-commit` included, and from
+`--from-commit` only one of the commits the lane kept) and the closes are
+admitted; at `pending` the closes, with the story's own next step named; while
+its planner runs or waits (`editing`, `drafting`, `queued`) only an unpause,
+which is admitted everywhere. The criteria are edited there by hand or by the
+planner, and the story is accepted with today's approve, the size verdict and
+split included; an Arc proposal is refused for any story with a lane
+(`ArcProposalEligibilityRefusal`), and the hold covers `arc_proposal` all the
+same. An unfinished prerequisite refuses that
+approve instead of parking the story, since nothing would start its lane again
+from `pending`; an edit or a dependency change that finds one leaves the story
+in `draft` for the same reason. The accepted story's start is its lane's run:
+the run rewrites the plan's story-derived head (title, overview, criteria,
+non-goals) from the accepted story, keeping its micro-commits (`plan.WithStory`),
+fires `start_impl` on the story (`startAcceptedLaneStory`) and the lane runs,
+never a second one; `hashd run <story>` hands that lane back to run. A
+story that was never replanned has no lane before `start_impl` creates it, so
+none of this reaches it, with one exception: a closed lane that `hashd reset`
+reopens while its story stands `approved` (a close unlocks the story there).
+That lane is held like an accepted story's, and its run fires `start_impl`, so
+the story is `implementing` while its lane runs; before, the lane ran with its
+story left at `approved`. The judge's and a breakdown refusal's replans keep
+the story where it is.
+
+Replan is offered from `active`, `implementing`, `awaiting_human_review`,
+`ready_to_merge` and `final_review_with_concerns` and, between PR fix rounds,
+from an idle `pr_open` or `pr_approved`, each behind `worktree_exists` and
+`no_active_work`. `replan` is no pipeline-forward trigger: a `hashd run` never
+fires it, so a state where only a replan applies offers no run. At a PR stage it discards tracked and
+untracked edits like any replan, publishes the reset target to the existing PR
+branch with the lease of the origin head observed before the reset (a requested
+rewrite, see **The rewrite rule**), returns the workstream to `active`, and
+starts nothing: once its story is accepted again, the lane's next `hashd run`
+breaks it down afresh, or after the kept commits of a partial replan.
 
 Ordering, when the workstream is parked at the human gate: **both** close the
 open `run:{project}:{ws}` execution *before* the reset, and refuse with nothing
@@ -1653,8 +1922,242 @@ the same pair: one naming the close, one naming the close and the worktree reset
 after it. Neither retires the parked run row itself: that belongs to the state
 move, and the FSM's own retirement (`fsm.ClearBlockedRunOnExit`) fires on every
 exit from awaiting_human_review. replan additionally re-validates the row after the
-close, and its plan regenerates on the operator's next explicit `hashd run` rather
-than here; reset keeps the plan, so it has nothing to regenerate.
+close, and a full replan's plan regenerates on the operator's next explicit
+`hashd run` rather than here; reset keeps the plan, so it has nothing to
+regenerate, and a partial replan's breakdown plans after its kept commits
+on that same next run (a replan at a PLAN_DEFECT gate still regenerates its
+boundary and every later entry).
+
+**Lifecycle, full and partial replan alike** -- close before reset, replan then run:
+
+```
+POST /workstreams/{id}/replan {feedback?, from_commit?}
+  validate trigger + from_commit selectable      refuse: nothing closed, reset or written
+  close run:{project}:{ws} (confirmed closed)
+  revalidate: status, plan, worktree, trigger,   refuse 409: nothing reset; names the close
+              singleton; from_commit selectable
+  reset worktree: full -> base head (the verb's;  refusals from here name the close
+                  the judge's: fork point)
+                  partial -> parent of boundary  and the reset, with the exact retry
+  plan CAS: full -> story skeleton
+            partial -> plan with boundary.. unmarked
+  discard records, record pending boundary, clear rulings + directives (the verb's),
+  transition, retire the lane's pending questions (the verb's full replan),
+  emit state_changed + plan_changed
+  backup cleanup; end the ready pause it ran under
+  then record the approved replan                  one workstream_guidance row, kind replan:
+                                                   replan_approved_at, replan_from_commit if partial,
+                                                   replan_gate_* if a PLAN_DEFECT gate stood
+then: hashd run   (nothing signals a workflow here)
+  breakdown: full -> the accepted story, numbered past every earlier commit;
+                     planning nothing stops blocked on "no changes to make"
+                     (autonomous: then closes the lane as no changes needed)
+             partial -> the accepted story after the kept commits, known by
+                        number only; one write: new commits behind the kept
+                        prefix, clear boundary, spend feedback (+ supervised
+                        park); planning nothing keeps the prefix as the plan
+             judge's verdict on the input (PLAN_DEFECT gate) -> today's
+                        breakdown: partial regenerates the rejected tail with
+                        feedback + verdict; no numbering, no empty answer
+  answer its check rejects: asked for once more, naming why (below)
+  refused or unusable answer (partial): nothing changes; asks on the boundary
+  failed or timed-out agent run: nothing changes; reports the stage failure;
+                                 the next hashd run breaks it down again
+```
+
+**Invalid breakdown output.** Every entry of the breakdown agent's answer must
+be a usable micro-commit: an object with an id and a title, the id in the
+lane's `COMMIT-<WS>-NNN` form. An entry that is not is rejected, never skipped:
+the answer is refused whole, naming each rejected entry by its place in the
+array and why. A breakdown whose agent numbers two micro-commits with the same
+ID, adjacent or not, or a breakdown after a replan that numbers one below the
+lane's next number, is invalid output the same way. A refused answer is asked for once
+more (`answercheck.Ask`): the same stage call again, its prompt followed by the
+shared `include_answer_redraft` naming why, so the stray-write reset runs
+between the two calls, the stage log records the re-ask and the second call's
+recorded prompt carries the reason. The re-ask is made only while the stage's
+own deadline still fits a call as long as the first; there is no further one. A
+failed or timed-out agent run is not an answer and is never re-asked, and an
+empty list after a replan stays the answer it is (planning nothing). When the
+second answer is refused too, the breakdown checks have run before anything is
+written, so the stored plan, its commit records and any replan guidance stay as
+they were. A full breakdown then fails the run at `breakdown`: for a repeated
+ID with a Diagnostic that names it, says the agent's output was invalid and
+carries a `hashd run <ws> --project <project>` next step; for a rejected entry
+with `Failed to generate micro-commit breakdown` and the rejections. The failure
+is recorded and published like any other breakdown failure (the run_failed row
+and event); no plan review or selection follows. Recovery is the ordinary run:
+the settled failure offers `run` under its normal guards (withheld while a run
+of the workstream is live), and that run breaks the story down again, landing
+valid output with no manual plan edit. A partial breakdown's refused second
+answer keeps its own recovery, the question on the boundary above.
+
+**Breakdown after a replan.** A lane broken down before -- the verb's replan
+and a breakdown-refusal answer's alike, but not a replan at a PLAN_DEFECT gate
+(below) -- is told so by its own records, with nothing stored for it: the breakdown numbers its commits
+past every planned micro-commit the lane ever recorded (the `microcommits`
+rows, current or retired, FIX ids apart; for a partial replan, past every
+commit its plan still names too), so ids continue and never restart at 001. A
+generated commit numbered lower fails the run with
+`stage.breakdown.numbering_restarted` before anything is written, and a lane
+whose next numbers would pass 999 fails with
+`stage.breakdown.numbers_exhausted` before the agent is asked. When the
+lane's worktree differs from its fork point on the target branch
+(`mergeflow.EffectiveBaseForWorkstream`), the breakdown is told that
+change must end up as the minimal implementation of the criteria
+(`include_breakdown_minimal_implementation.md`): it plans the missing work,
+the deletion of code that serves no current criterion and the trimming of
+code that does more than the minimum, each its own micro-commit. A partial
+replan's breakdown is shown the accepted story with no micro-commit texts and
+the kept commits by number only, and no replan feedback or judge verdict.
+A breakdown may plan nothing (an empty JSON array). After a partial replan the
+kept commits are then the whole plan, the boundary is cleared, no plan review
+is parked for, and the lane goes on to its final review. After a full replan
+there are no changes to make: the run stops blocked (the runner cycle's
+`StatusBlocked`, no new kind), writing nothing, and its reason names `hashd
+close <story> --no-changes --reason "..."` and `hashd replan <ws>`.
+Supervised and gatekeeper, the person decides. In autonomous mode
+(`BreakdownOutcome.CloseNoChanges`) the cycle's last step, after its finish
+released the run's claim, closes the story and the lane as that close does
+(`ActivityHost.CloseNoChanges` -> `Server.CloseLaneWithNoChanges`, one
+attempt under the API failsafe bound), with the reason "Closed by hashd: the
+breakdown after the replan found nothing the accepted acceptance criteria
+need.": the abandonment's steps and records through the close's own
+functions, without its kills, terminations, execution closes or attempt
+fence, since the only work on the lane is this run; it takes the close's
+execution admission, so a restart hold or a reservation refuses it, and runs
+only once the cycle's finish confirmed the claim's release. A refusal before
+`begin_abandon` leaves the lane on its blocked stop, recorded as a
+`system_error` timeline row; a failed step after it is the abandonment's own,
+the story left abandoning and the close named that finishes it. A lane's
+first breakdown is
+unchanged, its prompt byte for byte, and planning nothing there is still the
+breakdown's failure.
+
+The judge's verdict on the breakdown's input is what marks a replan at a
+PLAN_DEFECT gate (`PendingReplanVerdict`, from the approved-replan record that
+names the gate); nothing else is stored for it. Such a replan keeps the
+breakdown from before: a full replan's is the first breakdown's with the
+verdict, and a partial replan's regenerates the rejected tail from the
+boundary (`include_breakdown_replan_regeneration.md`) with the plan's
+micro-commit texts, the replan feedback, the verdict and the boundary
+clarification's answer; planning nothing is the breakdown's failure or the
+boundary's question, as before. The kept-commits section
+(`include_breakdown_kept_commits.md`) and the numbering are the other
+replans' only.
+
+**Approved-replan record.** Every replan that completes, through the replan
+route or a CANT_TELL "re-plan the rest" answer, leaves exactly one
+workstream_guidance row of kind replan with replan_approved_at set, and
+replan_from_commit set to its boundary when it was partial (NULL for a full
+replan, including one from the plan's first commit), and the PLAN_DEFECT gate
+it acted on when one stood (see "The PLAN_DEFECT gate"). It is written only once
+the request succeeds, so a retry never adds a second. It holds the replan's
+feedback, or no text when there was none or the same text was already pending;
+a row with no text is never rendered as guidance. It stays an approved-replan
+record after its feedback is consumed or retired. Breakdown-refusal answers
+and hashd reset write none, and rows written
+before this change carry no approval.
+
+**Partial replan.** `POST /workstreams/{id}/replan` takes an optional
+`from_commit`, the micro-commit to replan from. That commit and every later one
+in plan order are discarded; the commits before it are kept. A **selectable**
+commit is any done commit plus the first commit not done, in plan order
+(`plan.ReplanSelectable`); a later pending commit is not one, since rewinding
+to it would keep the in-progress commit before it, which never landed. The server validates the
+selection when the replan runs: an unselectable `from_commit` is refused with
+a Diagnostic listing every selectable id (and a did-you-mean on a near miss),
+before anything is closed, reset or written, and the boundary is never moved
+to another commit. `from_commit` equal to the plan's first commit keeps
+nothing, so it is the full replan. The worktree rewinds to the parent of the
+boundary's earliest landed commit (HEAD when it has landed nothing). The
+history must split there: a kept micro-commit's commit after that point, or a
+discarded one's before it, refuses the rewind (409) before anything moves,
+while a human edit between the boundary's own commits is dropped with them.
+The
+plan keeps every entry with the boundary and each later commit marked not done
+(`plan.UnmarkFrom`). The boundary is recorded as the workstream's pending
+partial replan (`workstreams.replan_from_commit`); a full replan or a reset
+clears it. The next run's breakdown consumes the boundary (**Breakdown after a
+replan**, below): it plans the accepted story after the kept commits, and in
+one write puts those commits in place of the boundary and every later entry
+(parking the plan for review in supervised mode), clears the boundary and
+spends the replan feedback with no consuming run, so no review in that run
+reads it as guidance (only a replan at a PLAN_DEFECT gate shows the feedback
+to its breakdown). A refused or unusable answer changes nothing and asks a
+clarification on the boundary, whose answer the next attempt is shown; a
+failed or timed-out agent run changes nothing and reports the stage failure,
+and the next `hashd run` breaks it down again. A reset, a full replan or a later partial replan retires a
+pending partial replan's feedback the same way, so it is never read as standing
+guidance or delivered to another breakdown.
+
+There is no preview request or confirmation token, and the short race this
+leaves is accepted (operator ruling 2026-11-12): the plan can still move
+between the CLI's last read of it and the replan request -- after the second
+read that follows a terminal confirmation, on the `-y` path, and for an
+unlisted boundary, which can become selectable before the request lands and
+is then rewound from with no prompt. The commit selection the
+CLI shows before the operator confirms (`hashd replan <ws> --from-commit
+<COMMIT-ID>`, STORY-0614) is read from the workstream read it already makes
+(the `GET /workstreams/{id}/snapshot` `hashd show` renders): the rewind
+boundary, the kept micro-commits before it and the discarded ones from it on,
+IDs and whole titles, then a prompt on a terminal -- `-y` confirms without
+prompting and is required without one, and an unlisted boundary skips the
+lists and the prompt for the server's own refusal. Instead of a token, a
+terminal confirmation is followed by a second read of the plan through that
+same read, immediately before sending: if the boundary or either list differs
+from what was shown, nothing is sent, a Diagnostic says the plan changed since
+it was shown, and the lists as they now stand are shown and asked about again
+(with no terminal to ask at, or with the boundary gone from the plan, the CLI
+exits non-zero with that Diagnostic). `-y` waits on no one and acts on the
+plan as it is, with no second read. The TUI's `N` replan dialog and the Web
+replan dialog each pick the boundary from the plan's list, read from the
+workstream read they already make, before the operator confirms, and send it
+as `from_commit`. Safety rests on replan running only on a stopped lane
+(the `replan` trigger's `no_active_work` guard) plus the execution-time
+revalidation above: a status, plan or worktree that moved during the close,
+or a boundary no longer selectable, is a 409 with nothing rewound. Every
+refusal past the close names the exact retry. A partial replan's is
+`hashd replan <ws> --project <p> --from-commit <commit>` (no `-y`: re-running the
+command shows the kept and discarded lists against the plan as it then stands
+and asks again). Its feedback goes through a fresh file written with the exact
+text first (`(f=$(mktemp) && trap 'rm -f "$f"' EXIT && printf %b '<feedback>'
+>"$f" && hashd replan ... --feedback "$f")`, backslashes doubled and NUL bytes
+as `\0000`, which no shell argument can hold): `--feedback` reads any value
+naming an existing client file, a bare name like `.env` included, as that
+file, so only a file repeats the text. The subshell removes the file when the
+command ends, whether it succeeds or fails, and exits with the command's
+status. Blank feedback, which `--feedback` refuses as an empty file, is
+passed inline from a fresh empty directory instead, where it names no file.
+A first-commit replan's retry past its plan write is the same
+`POST /workstreams/{id}/replan` without `from_commit`. The did-you-mean names
+`--from-commit`. The server cannot know an explicit `--server` selection, so the CLI
+rebuilds each replan retry a refusal names from its own request (a full
+replan's backup-cleanup re-run included) and pins the selection onto it, and
+names that server in a last help line for what it leaves whole: a raw POST and
+any other command.
+
+**Replan past a limit.** `hashd replan` reads the workstream snapshot for
+the full form too, through the same read and bound to the workstream it
+returns, as `--from-commit` is. While that read carries the replan convergence (the
+workstream has reached its limit of approved replans, or a not-converged stop
+stands; see "Replan convergence"), both forms print the convergence warning
+before anything is sent: the plan has not converged, another replan may
+discard landed work and fail the same way, and every approved replan oldest
+first, as `hashd show` lists them. No count or limit is named. `--from-commit` prints
+it above its kept and discarded lists and confirms as before; the re-read after
+a terminal confirmation compares the warning with the lists, so approved
+replans that changed while the prompt waited send nothing and are asked about
+afresh. The full form
+then confirms the same way: `-y`/`--yes` proceeds, a terminal asks (default
+no), and without either it sends nothing and exits non-zero with a Diagnostic
+(`replan.confirmation`) naming the exact `-y` command, with any `--feedback`
+as typed and an explicit `--server`. After a terminal confirmation it reads
+the workstream again and sends nothing once a story reference reaches another
+workstream (`workstream.resolve.identity_changed`). Without the convergence the full form
+sends without asking. The route takes no confirmation: a raw
+`POST /workstreams/{id}/replan` runs as it always has, and a confirmed replan
+past a limit runs and is recorded as an approved replan like any other.
 
 Full `hashd reset` and `hashd replan` retire the merge-gate repair record under
 the workstream's story key, even when an earlier workstream owns the record; a workstream
@@ -1667,7 +2170,7 @@ The next gate uses the repo's configured commands and a new failure has one
 automatic FIX available again. Replan retires the repair immediately after
 its successful guarded skeleton write or plan clear; either CAS refusal keeps
 the record. Its receipt names operation `replan` (`reset` for full reset).
-Checkpoint reset retires the record with operation `reset --checkpoint` as
+Checkpoint reset retires the record with operation `reject --reset` as
 specified above. Each retiring verb always archives the whole row, even when
 earlier events contain failure excerpts. Shared attempt disposal for
 requirements approval and the run's own breakdown only detaches the FIX
@@ -1677,7 +2180,8 @@ refusal with `proceed` also keeps binding-only disposal, including when it reuse
 replan preparation to replace the plan.
 
 `resetWorktreeToBase` resets to the branch's live fork point with its base
-branch, not to the recorded baseline: once a merge gate has rebased the branch,
+branch (a full `hashd replan` to the base branch's head itself, which the
+server proves the same way), not to the recorded baseline: once a merge gate has rebased the branch,
 `base_sha` (a provisioning record no rebase advances) no longer marks where it
 forks. The fork point drops exactly the story's own commits and keeps the branch
 on its current base. The server proves a fork point that is not the recorded
@@ -1702,9 +2206,9 @@ So reset/replan work wherever they are offered, a merge-gate rebase included.
 
 | Operation | CLI | TUI | Telegram |
 |-----------|-----|-----|----------|
-| Regenerate plan | `hashd replan [id] [-f ".."]` | `N` | — *(not exposed; the bot has no reset/replan)* |
+| Regenerate plan | `hashd replan [id] [-f ".."] [--from-commit <COMMIT-ID>] [-y]` (past a replan limit: warns, and the full form confirms too) | `N` (replan dialog: pick the rewind commit on the list) | — *(not exposed; the bot has no reset/replan)* |
 | Redo implementation | `hashd reset [id]` | `R` | — *(not exposed)* |
-| Discard stopped implementation attempt, retain completed micro-commits | `hashd reset <id> --checkpoint` | — *(not exposed)* | — *(not exposed)* |
+| Discard stopped or parked implementation attempt, retain completed micro-commits | `hashd reject <id> --reset` | — *(not exposed)* | — *(not exposed)* |
 | Gate reject / approve | `hashd reject [id] [--reset]` / `hashd approve [id]` | `r` / `a` | `/reject` / `/approve` |
 
 The Telegram bot exposes the human-gate verbs (`/approve`, `/reject`), but has
@@ -1750,14 +2254,17 @@ branch's own changes since its common ancestor with `base_sha`
 (`base_sha...<target branch>`), so a target branch that lags the record adds
 nothing.
 
-One path does advance it, deliberately: the baseline-gate clear
-(`api/mutations_dispatch.go`, `tryClearBaselineGate`) rebases a baseline-blocked
-branch onto the target branch once that branch has moved, and then persists the
+Two paths advance it, deliberately, through one refresh
+(`api/mutations_dispatch.go`, `refreshBaselineBase`): the baseline-gate clear
+(`TryClearBaselineGate`) and the unparsed refresh before a plain Go at a
+`baseline_unparsed` provisioning stop. Each rebases a baseline-blocked branch
+onto the target branch once that branch has moved, and then persists the
 advanced value -- a new provisioning record for a branch that was re-provisioned
 onto a new base. The writers are: the create INSERT
 (`api/mutations_story_run.go`), which stores the empty sentinel that the
 readers' unusable-base arm exists to catch; provisioning, which resolves the
-real SHA over that sentinel; the baseline-gate clear above; and
+real SHA over that sentinel; the baseline-gate clear and the unparsed refresh
+above; and
 `PATCH /workstreams/{id}`.
 
 Provisioning (`runflow/provision.go`, the `resolve_base_sha` substage) chooses
@@ -1767,10 +2274,9 @@ that SHA as follows:
   private to the attempt
   (`git fetch --no-tags --refmap= origin +refs/heads/<branch>:refs/hashd/provision/<id>/<token>`,
   bounded by `git.network_timeout`), pins the commit that fetch retrieved, and
-  deletes that ref. It does not update the shared
+  deletes that ref. The fetch itself does not write the shared
   `refs/remotes/origin/<branch>`, which merge prep and the publish path fetch
-  into concurrently, so that ref can stay behind the recorded `base_sha` until
-  one of them moves it. The fetch also leaves the operator's `FETCH_HEAD`
+  into concurrently. The fetch also leaves the operator's `FETCH_HEAD`
   alone and does not fetch submodules or start maintenance.
 - A repository with no remote configured uses its local target branch.
 - It fails closed, as a provisioning failure in `provision_error`, when the
@@ -1780,6 +2286,19 @@ that SHA as follows:
   `HEAD`, a tracking ref, `FETCH_HEAD` or another remote.
 - A `base_sha` already recorded is reused as-is: a re-run of provisioning does
   not fetch or refresh it.
+
+Once the base is settled -- newly chosen, recorded and retrieved because this
+runner lacked the commit, or recorded and already present -- provisioning
+moves the shared `refs/remotes/origin/<branch>` forward to `base_sha` before it
+creates the worktree (`runnerworkspace.AdvanceBaseTrackingRef`), so commands
+run in that worktree do not measure from an older base. It moves the ref only
+when the ref is absent or an ancestor of `base_sha`, and only if the ref still
+holds the value it checked (`git update-ref` with that old value), so it never
+moves the ref backwards or replaces a value a concurrent fetch wrote. A ref at
+or past `base_sha` is left alone, as is one that has diverged from it, which is
+logged. A failed update is logged and never fails provisioning. A repository
+without `origin` gets no tracking ref. The commit is already in the
+repository, so this adds no network step.
 
 It never checks out, resets, stashes, cleans, merges, pulls or rebases in the
 operator's checkout.
@@ -1805,7 +2324,6 @@ own work. The readers that derive are:
 | test-stage fast-check touched-file set (`HASHD_BASE_SHA`) | `mergeflow/touchedfiles.go` (`ComputeTouchedFiles`) |
 | refs loader base | `refs/builtins.go` (`resolveBase`) |
 | branch evidence in the adjudicate, FIX and per-commit review prompts | `mergeflow/branchdiff.go` (`BranchEvidenceRange`) |
-| completed-commit range a requirements edit's planner is shown | `temporal/workflows/edit.go` (`EditAttempt`) |
 
 The helper hands the recorded value straight back whenever it cannot derive a
 point it trusts, so a derived range never starts further back than the recorded
@@ -1894,10 +2412,11 @@ story ownership; the content hash is its whole fence.
 | `hashd answer` | Show help. |
 | `hashd answer list` | List entities with pending clarifications (stories + workstreams). |
 | `hashd answer show <entity>` | Show pending question text for one entity. |
-| `hashd answer <entity> "<text>"` | Submit an entity-level answer. Ordinary question bundles record the answer and dispatch a story edit or workstream run; proposal decisions follow their own apply, reject, or revision path. |
+| `hashd answer <entity> "<text>"` / `hashd answer <entity> -f <file>` | Submit an entity-level answer. A file path given as the answer (positional or `-f/--feedback`) is read on the client machine and its content sent. Ordinary question bundles record the answer and dispatch a story edit or workstream run; proposal decisions follow their own apply, reject, or revision path. |
 
-**State requirements.** Stories must be in `draft` (no linked workstream) for
-`hashd answer`. Workstreams must be in `active`, `implementing`, or `awaiting_human_review`. Other
+**State requirements.** Stories must be in `draft` or `pending` (no linked
+workstream) for `hashd answer`; a pending story's answer edit lands back in
+`pending`. Workstreams must be in `active`, `implementing`, or `awaiting_human_review`. Other
 states return a structured diagnostic that names the right next command.
 
 **Failure semantics.** For an ordinary story bundle, dispatch happens before
@@ -1919,6 +2438,11 @@ Directives are durable standing guidance, included explicitly in the stages
 that produce or judge work. Stage-scoped blocks restrict delivery; malformed
 blocks warn and render rather than silently dropping guidance. Locations,
 authoring syntax and commands are in [Agent management](docs/AGENT_MANAGEMENT.md#directives).
+The project level is read from and saved to the server-side
+`<ops>/projects/<project>/directives.md`; the repository's `directives.md` is
+not a source at any level. Upgrading to this release moves a project's
+repository `directives.md` into that file once, when the file does not exist,
+and the repository file is not read afterwards.
 
 A workstream's directives have two writers: the guidance verb
 (`POST /workstreams/{id}/feedback`), which carries whatever preconditions the
@@ -1930,6 +2454,23 @@ guarded instead by a compare-and-swap token, so a replace built on a stale read
 is refused rather than silently discarding what its author never saw. The
 reasoning and the refusal shape are in
 [Agent management](docs/AGENT_MANAGEMENT.md#two-write-paths-and-what-each-one-guards).
+
+All three levels are revision-checked when a token is sent. `GET /directives`
+returns an `etag` per section, and a PUT whose `base_etag` no longer matches is
+refused with 409 and writes nothing. The workstream editor must send one; the
+global and project saves may omit it and are then last-write-wins.
+
+`hashd directives ai-edit` (with its `project` and `workstream <ws>`
+subcommands) is the AI-assisted editor over the same tokens: it reads the
+level's text and etag, dispatches the pm_edit agent server-side on that
+revision, and shows the proposal as a diff against what it read. The
+instruction comes from `-m/--message`, or a terminal prompt when the flag is
+omitted; the save is written only on explicit confirmation, or `-y/--yes`
+without a terminal -- where both flags are required, since there is nothing to
+prompt or confirm against. An identical proposal saves nothing, and nothing is
+saved on a refusal (a stale dispatch or a stale save), an interrupt, a failed
+run or a declined confirmation; a refused save keeps the confirmed proposal in
+a named temp file.
 
 The guidance verb **appends** one entry to the column (`mutations_workstream.go`,
 the feedback route): the new entry goes after the existing text, separated by a
@@ -1973,12 +2514,15 @@ that grew is named instead of an agent reporting an exhausted context.
 
 No agent reads an instruction file from a folder above its checkout, nor its
 own home's personal file (Claude's `CLAUDE.md`, Codex's `AGENTS.override.md` and `AGENTS.md`, Gemini's
-`.gemini/GEMINI.md`, Qwen's `QWEN.md`), whatever the settings. Each agent
+`.gemini/GEMINI.md`, Qwen's `QWEN.md`, OpenCode's `opencode/AGENTS.md`), whatever the settings. Each agent
 declares in defaults.yaml how it finds such files
 (`agents.<name>.instructions`), and the launch keeps it from the ones the
 settings do not give it: Claude by excluding them by path in its launch
 settings (`claudeMdExcludes`), Codex's checkout files by its
-`project_doc_max_bytes=0`. Its own home's personal file, in a home hashd made for the run (one of the
+`project_doc_max_bytes=0`, and OpenCode from the host user's
+`~/.claude/CLAUDE.md` by `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` on every
+launch, which also turns off its reading of the checkout's `CLAUDE.md` (it
+still reads the checkout's `AGENTS.md` and `CONTEXT.md`). Its own home's personal file, in a home hashd made for the run (one of the
 homes the run's registered credential gave it; an agent's memory feature may
 write it), the launch sets aside when the agent declares no way to keep it
 from it: moved, kept, into `.hashd-set-aside/<path>.<UTC time>` in that home
@@ -1992,7 +2536,7 @@ prompt copy the server reads from that same path: list a copy outside its
 home). Any other home -- one the environment names that no registered
 credential made, or, for a run hashd gave no agent home of its own, the
 agent's default home in the host user's `HOME` (`~/.claude`, `~/.codex`,
-`~/.gemini`, `~/.qwen`) -- is the host's: Claude is kept from the personal
+`~/.gemini`, `~/.qwen`, `~/.config` for OpenCode) -- is the host's: Claude is kept from the personal
 file there by path, and any other agent is refused, naming the file
 (`agents.instructions.own_home_file`, with `hashd agents login <agent>` as the
 next step) -- hashd moves nothing out of a home it does not own. A checkout
@@ -2018,6 +2562,17 @@ next step: a failure for an agent that refuses, a warning for Claude.
 
 ## Workstream State Model
 
+An interrupted AI resolve retains its execution claim when undo cannot confirm preservation,
+abort and the original branch tip. Successful owned undo takes `resolve_failed` to
+`merge_conflicts` and releases only that claim. For a confirmed ended resolve,
+supervised and gatekeeper lanes offer the existing AI Resolve action while their
+original runner is connected and compatible: restore first, then start a fresh resolve.
+Autonomous lanes use their recorded run autonomy (project autonomy when absent);
+housekeeping performs only the undo when that runner is ready. It neither queues
+recovery on an unavailable runner nor starts a conflict agent. Ordinary behavior at
+`merge_conflicts` is unchanged. Workspace identity and ownership are checked under
+the workspace lock; an unrelated or unproven rebase is left untouched.
+
 A workstream's runtime position is described by two orthogonal fields: **stage** (where in the lifecycle) and **status** (what's happening at that stage right now). For stages with internal sequencing, a third field — **substage** — tracks position within the stage.
 
 The macro lifecycle is still stored under legacy `status`/`state` names;
@@ -2033,8 +2588,11 @@ parsed test failure, or that times out, is red, not green: it writes
 and the transcripts row holding the whole capture) and stops provisioning with
 a `baseline_unparsed` standing row ("Baseline failed (output not parsed)" or
 "Baseline timed out"). Its recommended next step is a retry (`hashd run`),
-which re-runs the baseline and clears the record when it reads the result; the
-alternatives are accepting it (`hashd run --run-anyway`) and `hashd close`.
+which first refreshes the target branch as the story owner: when the branch
+has moved it rebases the checkout onto the new head, records it as the base and
+judges the baseline there through provisioning, and when it has not it runs the
+baseline again and replaces the record with the new result; the alternatives
+are accepting it (`hashd run --run-anyway`) and `hashd close`.
 When no build adapter fact and no console parse names a failure, the
 `failing_tests` agent stage reads the output: its names are recorded as the
 baseline's failing tests, "named by model" (`baseline_failures_named_by_model`
@@ -2052,7 +2610,18 @@ environment kind takes no fix round: the cycle parks at the agent-stop landing
 fixed, reject with guidance runs the fix round when the call is wrong), the
 merge gate parks at `merge_test_failed` with no judge, FIX or go-anyway
 (`merge_gate.environment`), and a red baseline's record says "the environment
-(named by model)" with that line.
+(named by model)" with that line. A test-stage command that did not exit
+normally never reaches the reader, the baseline or the environment stop: it
+is no verdict, and fails the run with "the test command ended without a
+result hashd could read" and the next step `hashd run <ws>` (Test-Conflict
+Escalation). The merge gate applies the same rule: a gate test command that
+did not exit normally, other than `test_timeout` (which keeps its time-bound
+park), is not judged and gets no base comparison, reader or FIX. The suite run
+blocks as `test_no_result` under "the test command ended without a result
+hashd could read", stating how the command ended, the command and its
+execution's evidence; a judge-requested re-run that ends that way parks at
+`merge_test_failed` with the same report instead of becoming the failure the
+judge rules on.
 Project config `baseline.on_unparsed_failure: warn` continues instead
 (`fail`, the default, stops). Accepting a red baseline -- parsed failures or
 unparsed, by run-anyway or by `warn` -- writes `baseline_acceptance` (kind,
@@ -2121,13 +2690,15 @@ implementation workstream after it; the workstream is the story's execution
 detail, not a sibling. An Arc never executes and owns none, and each Arc child
 follows the same rule. Lineage an earlier attempt left after its row was
 deleted is attributed history of the single implementation. A closed
-workstream kept after the story's close or abandon keeps its `story_id` with
+workstream kept after the story's close or abandon keeps its story link with
 the story's forward link cleared: it is the story's single ended
-implementation. Temporal executions are unaffected. The claim
-(`LockStoryToWorkstream`), the unique index `idx_workstreams_project_story`,
-the pre-migration refusal (rerun `hashd internal migrate-dbs` once resolved)
-and the archive refusal enforce it; the index's down migration keeps every
-row. Details: [Story workstream ownership](docs/ARCHITECTURE.md#story-workstream-ownership).
+implementation. The link is the story's number within the project
+(`workstreams.story_number`), so every alias of the story names one owner;
+reads still serve the textual `story_id`. Temporal executions are unaffected.
+The claim (`LockStoryToWorkstream`), the unique index
+`idx_workstreams_project_story` on `(project, story_number)`, the
+pre-migration refusal (rerun `hashd internal migrate-dbs` once resolved) and
+the archive refusal enforce it; the index's down migrations keep every row. Details: [Story workstream ownership](docs/ARCHITECTURE.md#story-workstream-ownership).
 
 ### Stage
 
@@ -2154,10 +2725,11 @@ The terminal output of the first A is gone (replaced by the second A's output). 
 ### Status
 
 A **runtime status** is the read-side projection at the workstream's current
-stage. Its eight values combine macro-state, execution and outcome evidence.
+stage. Its values combine macro-state, execution and outcome evidence.
 
 | Status | Meaning | Computed from |
 |---|---|---|
+| `unknown` | Execution liveness could not be determined for this read; neither running nor stopped is established | A required activity probe failed or timed out on the dashboard read. The row carries `running_unknown` and the original `activity_diagnostic`, including its cause. Uncertainty outranks transitions, pause and waiting overlays; activity animation is withheld. Independently recorded failures remain visible. This read state changes no stored stage or run outcome, and a later successful read clears it |
 | `running` | Process attached, work in progress at current stage | `runner_pid`/`runner_run_id` alive AND `last_run` incomplete; OR an outer-leg `runner_stage` stamp (`merge_gate` / `final_review`) confirmed by run-workflow liveness — the tail of a run executes with the claim already deregistered, so the stamp is all it writes, and it outranks a `blocked` run row because the gate's fix-commit exit sets one and keeps working. In an active-operation stage the stamp is ignored: a gate that exits on a conflict preserves `merge_gate` and nothing clears it, so it rides into the `resolving` / `merging` that follows, where that stage's own workflow is the liveness. OR active-operation stage (`resolving`/`merging`/non-failed `provisioning`) with its operation workflow open. At `resolving`/`merging` a live operation workflow outranks a retained `failed`/`blocked` run row — the run is the failure the operation is recovering from, and its failure stays in `current_errors` — unless a blocking clarification is pending; OR an open publish workflow (`pr create` / `pr push`); OR an open automation run (`automation:{project}:{ws}:{action}`), at any stage including `merged` and `closed` (the run can still be acting or recording after the workstream finished), which outranks a retained `failed`/`blocked` run row and leaves `current_errors` as they are, because an automation acts on a standing condition and never retires it; OR a `merged` workstream with an [unfinished archive](#unfinished-archive) whose archive owner is open |
 | `blocked` | Waiting for external input (clarification, human review, conflict resolution, post-rebase merge-test recovery, etc.) | `last_run.status == "blocked"` (at `resolving`/`merging` only when the operation workflow is closed, or a blocking clarification is pending); `merge_test_failed` with latest run failed |
 | `changes_required` | Reviewer requested changes. Internal review-loop exhaustion parks at `awaiting_human_review` (runtime `blocked`). A forge rejection preserves the PR state: reject creates a FIX; merge checks the forge again. Neither approve nor run clears a forge verdict. Never shown for active-operation stages | Latest review verdict is request changes; OR the latest merge stop recorded a forge CHANGES_REQUESTED verdict classified **at-head** ([revision test](#the-head-test-on-a-forge-changes-requested-verdict)) |
@@ -2166,13 +2738,80 @@ stage. Its eight values combine macro-state, execution and outcome evidence.
 | `interrupted` | Runner or operation flow exited without writing a terminal result, unintentionally | `runner_pid`/`runner_run_id` dead AND `last_run` incomplete; OR active-operation stage whose operation workflow is closed. An outer-leg stamp never produces it: a blocked gate exit preserves the stamp deliberately while the run workflow closes (a failed one clears it), so a closed workflow beside one is the ordinary shape of a parked workstream. That evidence falls through to the branches below it — `blocked` off the run row, a review verdict, `idle` |
 | `done` | Terminal entity stage reached and nothing left to finish | Stage in terminal set (`merged`, `closed`, `closed_no_changes`), except a `merged` workstream whose archive is [unfinished](#unfinished-archive) |
 | `paused` | A person paused the workstream; the pause is an admission hold, not an FSM stage, and can stand at any stage | A standing `workstream_pause` (see **Workstream pauses**) over an underlying `running` or `idle`; the hold's readiness (`ready` / `waiting` / `unknown`, the evaluator behind `workstream_pause.state`) is served beside it as `pause_readiness` and displayed `<stage> / paused (<readiness>)`. `done`, `failed`, `interrupted`, `blocked` and `changes_required` keep precedence, and every gate keeps reading the pre-pause value |
-| `waiting` | The workstream's run waits for its runner to come back after a server restart | A workstream placed on a runner that has not reconnected on a compatible version since the server booted (see **Restart holds**, the wait for a runner), over an underlying `running`; the reason is served beside it as `waiting_reason` ("waiting for runner <name> to come back") and displayed `<stage> / waiting (<reason>)`. Applied after `paused`; every other value keeps precedence, and every gate keeps reading the underlying value. A waiting state, never a failure: it has no deadline |
+| `waiting` | The workstream's run waits for its runner to come back after a server restart, or for a slot on its runner | A workstream placed on a runner that has not reconnected on a compatible version since the server booted (see **Restart holds**, the wait for a runner), over an underlying `running`, or waiting in its runner's queue (the wait for a runner slot), over any underlying value but `paused`: queued work has not started whatever the story's own state reads, as for a decision taken at a human gate while the park still reads `blocked`, or a docs update dispatched after a failed run while the story reads `failed`; the reason is served beside it as `waiting_reason` ("waiting for runner <name> to come back", "waiting for runner <name> (<active>/<capacity>)") and displayed `<stage> / waiting (<reason>)`, and a wait for a slot is typed as `capacity_wait`, its runner, on the workstream, snapshot and list reads. Applied after `paused`; every other value keeps precedence, and every gate keeps reading the underlying value. A waiting state, never a failure: it has no deadline |
 
 #### Unfinished archive
 
 A merge lands the code and sets `merged`, then runs the post-merge archive
-(docs update, REQS burn, story completion, worktree cleanup). A `merged`
-workstream's archive is **unfinished** when either holds:
+(docs update, REQS burn, story completion, worktree cleanup; the docs update
+and REQS burn run only in the modes in which `mergeflow.ArchiveAdmission`
+admits them, `repo` and `local`, as [Spec Mode](docs/REQS.md#spec-mode) describes).
+
+In `spec_mode repo` for a PR landing (`MergeMode == pr`, whether hashd-,
+forge-, or person-merged, external merges included), the archive completes the
+landing record before registering destinations and skips any documentation
+artifact the PR already delivered: SPEC is skipped when `landing.SourceCommit`
+is recorded as `merge_doc_update` (including clean rebase replays), and REQS is
+skipped when the requirements destination is the lane's repository and base
+branch and `reqs.RemoveStorySections` extracts the story's text at
+`landing.TargetCommit` and finds none at the landed commit (`MergeSHA`, or
+`SquashCommit` for a squash) in the repository's already-fetched objects,
+recording that extracted text in the existing burn checkpoint instead of
+running `DeleteRequirements` and `AppendDescopedToReqs`. When nothing remains
+to write, archival finishes without committing or pushing to the base branch.
+Any artifact the merge did not deliver, any case where the archive cannot
+establish what merged (no landing, empty `SourceCommit` or `TargetCommit`, or a
+failed read), REQS in another repository or branch, direct merges, and
+`spec_mode` `local`, `external`, and `none` keep the existing post-merge writer
+unchanged.
+
+The archive finishes locally before it delivers any documentation. Under the
+`merge-archive-prepare-first` / `run-archive-prepare-first` version pins
+(`MergeInput.ArchivePrepareFirst` / `WorkstreamRunInput.ArchivePrepareFirst`,
+selected only when `ArchiveChuteFIFO` is chosen), SPEC preparation runs outside
+`mergelock:{project}` and outside the `reqs-lock:{project}` and
+`spec-lock:{project}` artifact locks, before the archive joins
+`mergequeue:{project}`: for a pinned pushing direct merge, `merge_local`
+publishes the checkpointed code merge before releasing `mergelock:{project}`
+(so no intervening direct merge can overtake an unpublished landing while
+preparation runs; a publication failure stops immediately as an unfinished
+archive without running `prepare`). `runMergeArchiveLocked` stamps `finalize`
+first (so the merged workstream reads as an unfinished archive while preparing
+and waiting, never `done`), records the already-merged landed row once before
+preparation, and runs the `prepare` pass (`ArchivePhasePrepare`) while holding
+its runner slot, releasing the runner's shared clone locks on both primary and
+requirements/document-store repositories before launching `pm_docs` (keeping
+only per-workstream workspace exclusions) and returning the runner slot on
+enqueue. An archive whose documentation destination has not completed the
+documentation upgrade (M032, read from the upgrade's ledger) prepares nothing
+outside the lock. A pause at the chute boundary leaves the queue with no
+position, preserves the checkpointed preparation (`SpecPrepared`), and
+re-enqueues at the tail once released. Once admitted, the archive takes
+`mergelock:{project}` and the REQS and SPEC artifact locks and runs the whole
+archive pass (`ArchivePhaseWhole`), as executions without the version pin do:
+it reuses the checkpointed SPEC preparation when valid (and generates SPEC
+itself when none is prepared), burns REQS, commits every documentation
+destination, reconciles each commit with its fetched destination (mechanically
+replaying cleanly onto a moved destination, local or remote), and validates it.
+When a prepared documentation commit conflicts with its destination, the whole
+pass discards it and generates again inside the lock, once for each destination
+in a run, and stops deterministically (`documentationConflictedTwice`) when the
+regenerated commit conflicts too. Then the burn is recorded, the story
+finalized, the implementation worktree removed, the current-workstream state
+cleared and the agent streams retained. Each step is checkpointed, and the
+local completion last. Only then is each SPEC and REQS destination pushed, or
+advanced locally when the archive does not push. A delivery that fails, a
+protected-branch refusal among them, returns its Diagnostic and keeps the local
+completion. Its destination stays unconfirmed, and its prepared worktree,
+commit records and refs stay with it. A re-run delivers what is still owed. It
+repeats no local step and generates no documentation again. Once any local step
+is checkpointed the preparation
+stands: a replay resumes the remaining local steps, and a conflict with a
+destination that moved since keeps the replay's own failure. The archive records
+`completed` only once every destination is delivered, so until then the
+failure stands as the archive's stop.
+
+A `merged` workstream's archive is **unfinished** when either holds:
 
 - it has an archive-failure stop -- a `merge` `operation_result` fault carrying
   `archive_failure_class`, or, recorded before that key existed, titled as an
@@ -2203,7 +2842,8 @@ answers alike. The archive's owner (`fsm.ArchiveActivity`) is
 the merge workflow, or the run workflow when its external-merge reconcile runs
 the archive inline; it is probed even with no stamp, because the merge
 workflow's exit backstop clears the stamp and a re-run from `merged` runs its
-begin step and waits for the archive locks before it stamps `finalize` again.
+begin step before it stamps `finalize` again (ahead of preparation and queue
+admission).
 The merge workflow's admission release writes no generic stop over an archive
 failure, which records its own. Readings:
 
@@ -2254,7 +2894,7 @@ merges, live archive owners and uncertain liveness wait; `merged_unattended`,
 initially admitted archives, completed archives and closed workstreams receive
 no refused-dispatch recovery.
 
-For this family, `dispatchMergeRequest` runs as the workstream owner with the
+For this family, `dispatchMergeRequest` runs as the story owner with the
 original `ForgeMergeID`. Exactly one `archive_rerun_dispatched` receipt naming
 `forge_merge_id` commits through `RecordAdmission`. A pre-admission refusal
 updates the full typed refusal evidence without spending the attempt or
@@ -2300,18 +2940,30 @@ Workstream controls read the server's `available_actions`: a row's availability,
 label and note govern both the displayed control and its keyboard acceptance.
 Missing or unrefreshed rows do not offer mutations. State and runtime fields
 remain display facts; clients do not use them to invent additional action gates.
+Replan is withheld at a merge-gate stop once every micro-commit is complete.
 
 Go uses the `run` row and dispatches `hashd run`, including at
 `merge_test_failed`, where it re-runs final review and then the merge gate.
-Go anyway uses the separate `run_anyway` row. Merge conflict resolution is offered
+Go anyway uses the separate `run_anyway` row, offered only at `provisioning`
+with recorded baseline failures or an unparsed baseline, or at `merge_test_failed`
+with an all-baseline test failure. It requires the Go prerequisites, including a
+pipeline-forward action. At a merge-gate stop that cannot be overridden, its
+unavailable row explains the refusal. Merge conflict resolution is offered
 only for `merge_conflicts`; rebase conflicts have their own resolution row.
+At `ready_to_merge`, `pr_open` and `pr_approved` with no pipeline-forward
+action, Go is still offered while a FIX bound to the story's merge-gate record
+is undone and a judge CANT_TELL question blocking that FIX is answered with a
+`hashd run` pick (Merge-gate recovery); without such an answer it reads the
+no-pipeline-forward refusal.
+Go and Go anyway are withheld while a pending blocking question would stop the
+run at its clarification check. Answer is the way forward; after the question
+is answered, availability is evaluated from the resulting state.
 Append-only guidance uses `feedback`; it stays available
 while execution is held, subject to ownership. Editing a microcommit remains a
 separate action. Labels and action notes come from the server on CLI, TUI and Web.
-Skip microcommit and Record oscillation resolution have native controls on both
+Skip microcommit has a native control on both
 interactive surfaces. Close abandons the linked story; it does not return that
-story to the accepted queue. A requirements-edit hold still permits ending a
-human pause, without releasing the requirements hold.
+story to the approved queue.
 
 At `final_review_with_concerns`, the two proceed decisions are **Merge anyway**
 (the existing merge, despite the concerns, only with a current final review and
@@ -2335,33 +2987,83 @@ planner declined, a plan split that failed -- records an `operation_result`
 event, and the workstream reads surface what still stands. Read by
 `server/internal/api/current_errors.go` for both `hashd show` and `hashd list`.
 
-**Which surface.** The row's `outcome` decides, nothing else:
+**Which surface.** The row's `outcome` decides, nothing else -- apart from a
+story rebase's landing, which its payload makes a notice:
 
 | outcome | surface | operator meaning |
 |---|---|---|
 | `failed`, `declined` | `current_errors` | a fault: red, counted in the dashboard `[!N]` |
 | `blocked` | `current_notices` | work-in-progress (waiting on a review or CI, another operation holding a lock): visible, never red, never counted |
-| `succeeded` | neither | the marker that retires older rows |
+| `succeeded` | neither, except a `story_rebase` row carrying its landing, which is a `current_notices` row (`operation_landed`; see **Rebase**) | the marker that retires older rows |
 | `code_change` | neither | a declaration that the branch moved, and nothing else (below) |
 
-**How long a record stands.** Four rules, each a strictly-newer comparison on
+**The attention total.** `current_error_count` stays the count of
+`current_errors`. The lane reads (the dashboard rows, `GET /workstreams`,
+`GET /workstreams/{id}` and the snapshot) also serve `attention_count`: those
+errors, counted whole before any presentation bound, plus the unresolved
+review-thread roots of the workstream's current PR as the PR watch's latest
+successful read recorded them, each root once by its forge id. A thread counts
+whatever its body, outdatedness, author or readiness judgment, but not one
+whose status the forge reports unknown (Azure's `unknown`); a snapshot whose
+read cannot express resolution (Gitea's current read) contributes nothing, a
+failed poll leaves the last count standing, and a PR the server has since
+recorded merged or closed counts none, as its PR panel reconciles it. The threads add no
+standing record and change neither the stage nor `runtime_status`. A poll that
+moves a thread records `pr_threads_changed`, the refresh that carries a new
+count.
+
+While those threads count and reject is available, the reject row carries
+`include_forge`: the rejection starts with the PR's forge findings selected,
+and `hashd show` offers `hashd reject <story> --include-forge` beside any
+offered merge, without a second reject among its next steps: each recorded
+reject keeps its guidance and reason and gains `--include-forge`, and a
+state-derived reject gives way to them. A hold, an ownership refusal
+or work in flight that withholds reject withholds the default with it, and a
+gate whose reject takes no forge findings (a merge-gate stop) gets none. The
+count is of unresolved roots; the findings a reject selects keep their own
+eligibility, so an outdated or empty thread counts in the badge and is not
+offered as a finding. A root its adapter exempts from readiness
+(`ReadinessExempt`) is the badge's alone: no findings list, findings ledger,
+PR panel recommendation or reject selection sees it.
+
+**How long a record stands.** Five rules, each a strictly-newer comparison on
 `created_at` -- no timer, no recency window, no run-id match:
 
 - **Latest per operation.** Only a later row of the SAME operation replaces
-  one. A merge stop and an add-commit decline are independent.
+  one. A merge stop and an add-commit decline are independent. A publication's
+  confirmation replaces no story rebase landing (see **Rebase**).
 - **A newer declared code change** retires a row that classed itself
   `invalidated_by: code_change` (below) -- and nothing else does. Such a row is
   an answer about one specific commit, so only the branch moving can have
-  changed the answer; the two rules below deliberately do not reach it.
+  changed the answer; the rules below deliberately do not reach it.
 - **A newer `plan_changed`** retires an older row of the one operation that
   modifies the plan and lands a workstream-scoped row -- `add_commit` -- and no
-  others. `hashd workstream add-commit` succeeds without a byte of the branch
+  others. `hashd story add-commit` succeeds without a byte of the branch
   moving, so it is no answer about a forge verdict, a rejected push, a failed
   rebase or a PR closed without merging; it is a self-transition at
   `ready_to_merge`, which is exactly where a merge stopped on a closed PR parks
   the workstream. The rule is an allowlist because that is the fail-safe
   direction: an operation added later stands until something that speaks for it
   lands.
+- **The story read's planning retire.** On the story read alone, a failed or
+  declined row of one of the story's four planning operations -- `planning`,
+  `edit`, `plan_split` and `size_offer` -- stops standing once the story has a
+  workstream created after the row was recorded, compared as instants rather
+  than text. Implementation beginning is the fact that speaks for a planning
+  outcome: the story has moved on without running that operation again (a
+  locked story cannot even follow a stale `plan_split` failure's own help,
+  since the split route refuses it), and no later row of the operation is
+  needed. The cutoff is the workstream's creation rather than the story's
+  current stage, so an edit recorded in planning after a replan, its lane
+  parked, still stands. A story the story FSM has finished with (`implemented`, `abandoned`,
+  `closed_by_person` -- the same fact that withdraws its pending decisions)
+  retires the four planning operations' outcomes outright, workstream or no
+  workstream and regardless of when the row was recorded: it will not run them
+  again. The rule is an allowlist for the same fail-safe reason
+  `plan_changed`'s is: every other story operation -- `ac_amendment`,
+  `criterion_return`, `tracker_link`, and any added later -- keeps its outcome
+  standing until something that speaks for it lands. The workstream read never
+  applies it.
 - **A landed `succeeded`** retires older FAULTS across operations -- the only
   clearing path for operations that emit no success of their own, and what
   clears "PR #7 was closed without merging" when the `hashd pr create` its own
@@ -2402,11 +3104,17 @@ to prevent.
 The runner's push is the one that has to declare: it is the most frequent
 head-mover there is, and it is the run a changes-requested record's own help
 prescribes, so a stop it stales must drop on it rather than wait for the next
-merge attempt. It fires only in autonomous mode (`runflow.AutoPushForPR`) -- in
-gatekeeper and supervised that run commits without publishing, so it moves no
-remote head, and the operator's own `hashd pr push` is what drops the record.
+merge attempt. Every completed micro-commit publishes in every autonomy mode
+when origin is configured, before the plan step is marked done. A project
+without origin completes locally and records that it is not published.
+Publication makes completed progress survive runner loss or a move: the new
+runner rebuilds from the last published micro-commit instead of moving local
+state (operator rulings, 2026-10-20 and 2026-11-06). Every push scans outgoing
+history for secrets. A fix to an existing PR uses the `hashd pr push` sequence:
+rebase onto the base first, scan, then push with a lease, subject to the same
+human-review rewrite decision. Pre-PR checkpoint publication does not rebase.
 A run whose merge-ready reconcile finds its open PR not carrying the branch
-(see "PR-state reject fold publish" below) publishes, in autonomous mode only,
+(see "PR-state reject fold publish" below) publishes in every autonomy mode
 through the `pr push` verb's own path, and declares on that verb's row.
 Its row carries the declaration and nothing else. It is recorded with outcome
 `code_change`, not `succeeded`, and where the push moves nothing it is not
@@ -2416,6 +3124,11 @@ answer; this leg is not, and it fires once per micro-commit, so a `succeeded`
 row here would be a cross-operation fault broom over stops a push cannot
 answer. "PR #7 was closed without merging" stays true however many times the
 branch is pushed to.
+A FIX publication that conflicts with base stops at `merge_conflicts` and offers
+`hashd merge <story> --ai-resolve`. Successful resolution publishes the retained
+work and resumes the ordinary run to finish the same FIX, without implementing
+it again. Failed resolution leaves AI resolve available for retry.
+
 
 The merge flow's own pushes (the publish leg, the `pr_open` rebase, the
 pre-merge rebase and the approved-path force-push) stay silent, and the cost is
@@ -2436,8 +3149,8 @@ state is left where it is then), it leaves the workstream at
 `ready_to_merge` -- or, already in a PR state (a merge gate rebase moved its
 tip), where it is -- with the push `PublishAdvice` names
 (plain `hashd pr push <ws>` when the branch is only ahead or holds the PR head's commits rebased, `--sync` otherwise)
-on the state change's reason. Publishing then follows the existing mode
-rules. In autonomous mode the run publishes through that push's own path
+on the state change's reason. In every autonomy mode the run publishes
+through that push's own path
 between the reconcile and final review (`mergeflow.RunPRPush`: base sync, lease-guarded push,
 the `pr_push` operation_result with its `code_change` declaration when the
 head moved, the approval reconcile and the publication record), as its own
@@ -2475,11 +3188,13 @@ PR head at that decision and compares it with the local branch tip
 (`mergeflow.ComparePublishedHead`): the merge-ready reconcile, the `hashd pr
 push` up-to-date short-circuit and the `hashd pr create` publish leg for a
 workstream that already holds a PR. These reads run in the publish workflows,
-never in the request: the `pr push` endpoint always dispatches, and the
-`hashd pr create` endpoint answers "PR already exists" and, for a workstream
+never in the request: a plain `pr push` whose watched PR head equals the local
+tip is refused at the endpoint from the PR watch's stored head with no forge
+read, while `--sync` and an absent or unverified watched head still dispatch;
+the `hashd pr create` endpoint answers "PR already exists" and, for a workstream
 holding that PR outside a PR state, dispatches the create workflow's publish
 leg alone, which pushes nothing; while it runs the workstream reads `running`
-and `create_pr` is withheld (`no_active_publish`), and it records a `pr_create`
+and `create_pr` is withheld (`no_active_work`), and it records a `pr_create`
 success only when the branch is on the PR, so a standing `pr_push` failure is
 not swept over unpublished work. A push's own `create_pr` landing is never
 refused by that create. Either advance lands only from the status the
@@ -2517,6 +3232,30 @@ Withdrawal removes visible and held copies, without dismissing alerts or
 acknowledging history. A later occurrence announces again; reconnects and
 rereads never replay announcements. Desktop and Telegram have no withdrawal.
 
+#### Stored-reference notice
+
+Once per run, hashd checks each stored reference the lane reads -- the newest
+capture of each live link of the story -- against the item's current change
+value, and records what it found as one `stored_references_checked` event,
+linked to the workstream, story and run. A run that already has the record
+(an activity retry, continue-as-new or resume) records nothing more. The
+record carries every reported reference whole: its canonical reference, title,
+outcome (changed since it was captured, no access, or could not be checked),
+the recorded and current values when known, and the reason. A changed Figma
+reference says the file changed, not necessarily the frame.
+
+The check is advisory. The stored copy stays the story's record and is what
+the lane keeps reading, whatever the check finds; taking up a change means
+capturing the story again.
+
+The lane's `stored_references_reported` notice is derived on read from the
+workstream's newest record, on the detail, snapshot, list and dashboard reads,
+and cites its event. It stands only while that record reports something: a
+later run's report replaces it, and a later clean check (a history-only record
+with nothing to report) clears it. It is never in `current_errors`, never
+counted, never decides `runtime_status` or a stop line, and withholds no verb
+from `available_actions`.
+
 #### Alert tiers
 
 Every standing row -- error or notice -- carries a `tier`, one of three alert
@@ -2527,8 +3266,8 @@ server.
 
 | tier | display duration | kinds |
 |---|---|---|
-| `ordinary` | 20 s | `clarification`, `arc_decision`, `review_blocker`, `required_change`, `unknown_target_repo`, `target_repo_disagrees` |
-| `bigger` | 60 s | every other kind: `run_failed`, `run_blocked`, `interrupted`, `provision_error`, `baseline_failure`, `discovery_failed`, every event-row kind, every `operation_<outcome>` (`operation_blocked` included, which only reaches notices) |
+| `ordinary` | 20 s | `clarification`, `arc_decision`, `review_blocker`, `required_change`, `unknown_target_repo`, `target_repo_disagrees`, `operation_continuing`, `operation_cancelled`, `operation_discarded`, `operation_landed`, `stored_references_reported` |
+| `bigger` | 60 s | every other kind: `run_failed`, `run_blocked`, `interrupted`, `provision_error`, `baseline_failure`, `discovery_failed`, every event-row kind, every other `operation_<outcome>` (`operation_blocked` included, which only reaches notices) |
 | `sticky` | none: stays until dismissed | none: no standing kind is sticky now |
 
 A kind the table has no entry for is served as `bigger`, and the server logs a
@@ -2548,15 +3287,27 @@ hands every committed frame to one mapping (`eventbus/alerts.go`), which
 raises or clears an alert, and the server writes one row per recipient in the
 system database (`api/alerts.go`).
 
-**Key.** `kind:STORY-x` for a story alert, a workstream's frame naming its
-story; `kind:subject` for a system alert. Message text is never part of it.
-One row is active per recipient, project and key: a raise while it is active
-merges into it (time, text, count + 1); after a dismissal, a clear or expiry
-the next raise inserts a new row.
+**Source.** Every alert records what raised it: a story (a workstream's frame
+naming its story), a conversation, an account, a tracker watch, or the server
+itself (`system`), with that source's id. Every surface names the alert by
+it: the subject is the source's label, composed when it is read, so a retitle
+or a rename reads current. A story reads `<label> · <title>`; a conversation
+`<project> · Chat: <title>`, or `<project> · Chat <id>` while it has none; the
+server `hashd server`. Where the source has a page the Web opens it from the
+toast and the Notification Center row: a conversation opens on its story, or
+the dashboard for a project chat, with the dock on it.
+
+**Key.** `kind:<source id>`. Message text is never part of it. One row is
+active per recipient, project and key: a raise while it is active merges into
+it (time, text, count + 1); after a dismissal, a clear or expiry the next
+raise inserts a new row.
 
 **Recipients.** In team mode a story alert goes to the story's owner only (no
-owner, no row) and a system alert to every active owner and admin. In solo
-mode both go to the solo user.
+owner, no row), a conversation's to whoever reads it (its target's owner, or
+its creator for a project chat; no one recorded, no row), and a system alert
+to every active owner and admin. In solo mode all go to the solo user. A
+watch alert goes to the watch's owner within its project, subject to project
+visibility in team mode, and to the solo user in solo mode.
 
 **Urgency.** `low` and `normal` expire after the `ordinary` (20 s) and
 `bigger` (60 s) display durations above; `critical` stays until dismissed or
@@ -2566,8 +3317,10 @@ so one raised and cleared within that second is never shown.
 | kind | raised by | urgency | cleared by |
 |---|---|---|---|
 | `<operation>` | `operation_result` `failed` or `declined` (`blocked` and `code_change` raise nothing) | normal | a later `succeeded` of the same operation and story |
+| `connector_watch_scan` (`connector_watch_scan:watch:{owner}:"{connector}"`) | a failed scan's `operation_result` | critical | the next scan that ends without failure |
 | `run_failed` | `run_failed` | normal | `run_complete` |
 | `question` | `clarification_changed` to `pending` | critical | any other status, once no question of the story is pending |
+| `chat_reply` (`chat_reply:CHS-x`, a conversation's) | `chat_turn_changed` `finished` in any conversation, a project chat's included, while it is still unread; action `hashd chat session show <session>` | critical | its read mark moving, a send in it, or its deletion |
 | `arc_decision` | `arc_proposal_awaiting_decision` | critical | a `story_changed` the Arc proposal's phase writer records (`arc_proposal_move`): every move of the proposal, a decision included |
 | `forge_merge` | `story_changed` the archive records closing the story `closed_by_person` on a person's merge on the forge (`forge_merge_closure`); once per merge, since the transition lands once; action `hashd show <story>` | normal | nothing; it expires |
 | `review` | `state_changed` into `awaiting_human_review` | critical | `state_changed` out of it |
@@ -2588,14 +3341,59 @@ rows that became visible or were dismissed since then (only active ones for an
 empty since), and an `alert_dismissed` frame to the recipient's streams takes
 toasts down sooner. The TUI and the Web toast each alert until it expires or
 is dismissed; closing a toast dismisses the alert on the server, so it never
-comes back, and a toast that runs out dismisses nothing. Two delivery
+comes back, and a toast that runs out dismisses nothing. Each TUI and Web
+toast, for an alert or an event, shows only the server's one-line `line`: the
+subject's label, what needs attention, and the next command. The full message
+and action stay on the Notification Centers, the history read, Telegram and
+the desktop. The Web
+notification center at `/ui/notifications` (framed by a project the viewer
+can read, chromeless with none, and linked from the project gate) lists the
+viewer's active alerts (newest raise first) and then `GET /alerts?history=true`'s
+retained rows. It covers every project the viewer can read plus their system
+alerts, whatever project is selected, refreshes on the 10 s alert poll tick
+and on `alert_dismissed`, raises no toast and does not move the toast poll
+cursor, and is separate from attention History (`/ui/history/{project}`). It
+offers Dismiss on each active row and Dismiss all on the active section, both
+via `web` and without a confirmation prompt; Dismiss all sends no ids, so the
+server dismisses whatever is active when it runs, rows raised since the
+center's last read included. History rows offer neither. A confirmed dismissal
+rereads the center at once; a refused one shows the server's Diagnostic and
+changes no row. A center left open across a sign-in or sign-out in another
+tab clears its rows and count as soon as the browser's session cookie changes
+(hashd-web keeps a script-readable copy of its scope beside it), never applies
+a read requested for the previous session, and refuses Dismiss all, which
+carries the session it was rendered for. The Web primary nav carries a Notifications entry on every
+page, whatever project is selected, that opens the center and shows the
+viewer's active-alert count from the same active read as the center: hidden
+at zero, marked unavailable (never zero) when the read fails or the session
+changed, and refreshed on the 10 s alert poll tick and `alert_dismissed`
+without moving the toast poll cursor. Two delivery
 channels send a new alert row once and mirror no dismissal: the server host's
-desktop gets each new row of the server owner (the solo user) at its raise,
+desktop gets each new row of the server owner (the solo user) once it shows,
+and none cleared or dismissed before then,
 and the Telegram bot polls the same way under its own credential and sends
 each newly visible row of its project, and each system row, to its configured
 chat. Good news (merged,
 implemented, approved) stays the event toasts above. The housekeeping sweep
 prunes rows dismissed or expired more than 90 days ago.
+
+`GET /alerts?history=true` reads every retained row that has ended, whatever
+its age within that 90-day prune, with how it first ended in `end`: a row
+whose expiry came no later than any dismissal ended `expired` at its expiry
+(the system dismissal a later raise stamps at the expiry, and a dismissal or
+clear after expiry, change nothing); otherwise a clear (`dismissed_via`
+`system`) ended it `cleared`, or a person's dismissal ended it `dismissed`
+with their `by` and `via`. A row whose first end is before it became visible
+is left out, as the poll never served it. Rows come newest end first, then
+highest id, each with its recorded message and action rather than the toast's
+copy, so a failure's reason and a cleared PR closure's facts are kept. The read is authorized as the active read is: the viewer's own
+rows, of projects they can see now, so a lost project grant drops its rows on
+the next read, and a system row is served only to its own recipient. It
+writes nothing, and `end` is null on a poll. A history read cannot carry a
+since: one is refused (`alerts.history_since`). The since polling the TUI, the
+Web and Telegram use is unchanged.
+
+**TUI Notification Center.** `f2`, or the palette's `notifications` command, opens it from every screen, apart from attention History (`ctrl+y`). It lists the viewer's active alerts, newest raise first and then highest id, followed by their retained history in the server's order, across every project they can see now and their system alerts, whatever project is selected. It reads `GET /alerts` with an empty since and `GET /alerts?history=true`, and rereads both every 10 s, on each `alert_dismissed` frame and on each stream connect; a row in both reads is shown once, in history. Opening, browsing and rereading write nothing and leave the toast poll's cursor and toasts alone. `x` dismisses the selected active alert and `X` all of the viewer's, with `via` `tui`; history offers no dismissal. Every footer shows the viewer's active-alert count beside `f2`, shows nothing at zero, and says the count is unknown when its last read failed.
 
 #### Status is derived
 
@@ -2651,7 +3449,7 @@ A placed run's release and outcome carry its execution chain (workflow ID and fi
 | Gate re-entry child returning `stop_human_gate`, mapped to a blocked run (version `blocked-exit-outcome`) | `RunnerEmitBlocked`, the child's failed stage, the stop's title (its body when untitled) | `blocked` |
 | Gate re-entry child returning `all_complete` -- the operator skipped the parked micro-commit, the last undone one, before approving (version `gate-reentry-all-complete-leg`) | the all-complete leg, as for a cycle returning `all_complete`: the merge gate and final review rows here; a history before that version returned `all_complete` with no outcome and replays that way | per that leg's row |
 | External merge (PR already merged) | `RunnerEmitRunComplete`, status `merged` | `run_complete` |
-| Final review approve | `RunnerEmitRunComplete`, status `ready_to_merge` | `run_complete` |
+| Final review approve | `RunnerEmitRunComplete`, status `ready_to_merge`; from version `review-before-merge-gate-verify`, only after the merge gate's verify phase passed and the approval is current for the verified branch; from version `final-review-before-merge-gate`, only after the gate's prepare and verify phases, both run after the approval, passed and the approval is current | `run_complete` |
 | `--once` stop after a passed cycle (version `once-stop-run-complete`) | `RunnerEmitRunComplete`, status `--once: stopped after one micro-commit cycle` | `run_complete` |
 | `--once` stop after a passed gate re-entry, auto-continue or approve (version `once-stop-run-complete`) | `RunnerEmitRunComplete`, status `--once: stopped after one micro-commit cycle` | `run_complete` |
 | `--once` stop after merge-gate fixes (version `once-stop-run-complete`) | `RunnerEmitRunComplete`, status `--once: stopped after one micro-commit cycle`, after the run row is patched `passed` and the `merge_gate` stamp is cleared (a looping run keeps both for its next cycle) | `run_complete` |
@@ -2676,7 +3474,11 @@ From version `agent-stage-waits-for-cancel` the agent-stage legs are waited for 
 
 `POST /flow-runs/{id}/cancel` with `{"force": true}` on `run:{project}:{ws}` cancels the run and then sends it `force-cancel`, as for a merge or resolve. From the same version the signal ends those waits: the outer workflow forwards it to the cycle child it is waiting on, by that exact execution, and waits only for the child to close; a cycle waiting on an agent stage, or the outer workflow waiting on final review, takes the forced exit above and closes at once. The run closes, and a new run can be dispatched, while the stage's body may keep running, and writing, until its next heartbeat delivers the cancel. The forced exit runs no release, so the runner claim and stamp are left for the housekeeping sweep. A force that reaches the run anywhere else -- a stage that does not wait for its cancellation, the commit, the merge gate, a gate park -- changes nothing, and the run stops as on a plain cancel. A history recorded before that version ignores the signal. `TestRunForcedCancellationClosesWithoutTheAgentStage` pins the implement case on the real server.
 
-The wait reaches `hashd close`, `hashd workstream remove`, replan and reset, which cancel the run and do nothing destructive until it is confirmed closed. A run inside its merge gate or a waited agent stage closes only once that activity has heard of the cancellation at a heartbeat and stopped, so those commands wait for it within the `dispatch_rpc` bound (130s). The CLI's mutations wait longer than that; a client that gives up first (the Python and web clients, at 120s) ends the wait with the request. Either way an unconfirmed close changes nothing -- workstream, records and worktree stay as they were -- and the refusal reports only what the handler observed, naming the command to re-run with its id, `--project` and the flags that shaped the request -- a close's `--keep-branch`, and `--no-changes` or a story close's `--ref` (shell-quoted) with its shell-quoted `--reason`; a replan's shell-quoted `--feedback` -- never adding a confirmation the operator did not give. A run still stopping means a read-back after the cancel answered that the run was running: the cancellation is already requested and the same command succeeds once the run has stopped. A read-back that failed or never answered, a cancel request that ended before temporal answered it (so a cancel may already be pending), and a cancel that never reached the run all point at the sidecar check first.
+The wait reaches `hashd close`, `hashd workstream remove`, replan and reset, which cancel the run and do nothing destructive until it is confirmed closed. A run inside its merge gate or a waited agent stage closes only once that activity has heard of the cancellation at a heartbeat and stopped, so those commands wait for it within the `dispatch_rpc` bound (130s). The CLI's mutations wait longer than that; a client that gives up first (the Python and web clients, at 120s) ends the wait with the request. Either way an unconfirmed close changes nothing -- workstream, records and worktree stay as they were -- and the refusal reports only what the handler observed, naming the command to re-run with its id, `--project` and the flags that shaped the request -- a close's `--keep-branch`, its `--no-changes` or a story close's `--ref` (shell-quoted), and its shell-quoted `--reason`, an abandonment's included; a replan's shell-quoted `--feedback` -- never adding a confirmation the operator did not give. A run still stopping means a read-back after the cancel answered that the run was running: the cancellation is already requested and the same command succeeds once the run has stopped. A read-back that failed or never answered, a cancel request that ended before temporal answered it (so a cancel may already be pending), and a cancel that never reached the run all point at the sidecar check first.
+
+**Abandoning a story.** An abandonment through the existing close (`hashd close <story>`, with or without its options) first runs the close's checks that change nothing: FSM eligibility, an Arc's refusal, the mid-merge refusal, the dirty-checkout confirmation and the confirmation a rebase that cannot be undone asks for (both answered with `-y`/`--force`). A close refused there leaves the story as it was. An admitted abandonment moves the story to `abandoning` (`begin_abandon`) before anything else, and from there: it terminates the story's and its workstream's workflows (planning, plan split, criterion return; run, merge, resolve, add-commit, story rebase), kills their in-process stages on the server and kill-stops every started runner attempt on its runner (`kill: true` on the runner stop request), all at once and with no grace or timer; deletes the terminated runs' hold acknowledgements; closes the workstream as a close does, discarding its checkout's unfinished work, its implementer session, implementation checkpoint and runner claim, and its stage inputs on the runner that holds the checkout; removes every active agent registration of the story and its workstream; discards the story's delivery inputs on the server (STORY-0749's `inputs/` in its planning and run directories); and only then moves the story `abandoning` -> `abandoned` and announces it. Transcripts, usage, requirements, decisions, lifecycle evidence and stored references stay. A step that fails -- a kill, a termination, an unreachable runner, a checkout the teardown keeps, a registration removal or a discard -- leaves the story `abandoning`, records the failure on its timeline and answers with that step's Diagnostic; re-running the same close finishes the remaining steps, without repeating the checks it passed. An unconfirmed workflow closure is no longer a refusal before the close: termination is a step of the abandonment. While a story is `abandoning` or `abandoned`, the story FSM admits no transition but `abandon`, and the workstream refuses every transition but its close, every execution admission but the close's and every agent registration; the only verb offered is the close. A cancel or an edit-gate abandonment keeps its direct edge to `abandoned`.
+
+**Process containment.** Where `systemd-run --user --scope` works (probed once at startup on the server and on each runner: Linux, `XDG_RUNTIME_DIR` set), every stage launch runs in its own transient scope unit, `hashd-<digest>-<pid>-<n>.scope`, the digest a fixed-length sha256 of the ops root and the launch's owner: the story or workstream on the server, the attempt on a runner. The kernel cgroup holds the agent and every process it starts, including ones that leave its process group or session. Abandonment kills an owner by first killing each of its live launches' process groups and then all of its scopes with one `systemctl --user kill --signal=SIGKILL hashd-<digest>-*.scope`; in that order a launch either never ran its command or left every child in its scope, since `systemd-run` registers the scope before it runs the command. A pattern that matches nothing succeeds, and scopes run with `--collect`, so nothing stays loaded. Without a user systemd manager, launches keep their own process group (`AttrDieWithParent`) and the group kill is the whole kill. The kill also cancels the owner's stage contexts and refuses its later launches until the story is recorded abandoned; from then the refused registration stops a late launch. The shared hashd process is never signalled. hashd's own git, hook and scanner calls inside an attempt are not contained one by one: cancelling the attempt's context ends them.
 
 The two `blocked-exit-outcome` rows closed with no outcome on a history recorded before that version, and replay that way. Surfaces that notify on `blocked`, such as the Telegram bot's push, now notify for them.
 
@@ -2696,17 +3498,36 @@ Boundary: exits before the run's first claim (provision failure, baseline block,
 
 Execution identity: a run's `run_started` row records, in its `data`, the engine identity of the outer `WorkstreamRunWorkflow` it executes in -- `workflow_id` (`run:{project}:{ws}`) and `first_execution_run_id`, the chain's first execution ID (`workflow.GetInfo(ctx).FirstRunID`), which the engine keeps across continue-as-new. The outer workflow reads both and hands them to every cycle child it starts, which forwards them to `RunnerBeginRun`; a cycle child's or activity's own identity is never recorded. The identity is written only in the claim transaction that records the start, and only when both values are present. A start recorded without it, by an earlier build or an execution scheduled before the fields, keeps `data` NULL: no identity is added after the fact. `TestOuterCyclesBeginWithTheOuterExecutionIdentity` and `TestRunnerBeginRunRecordsExecutionIdentity` pin this.
 
-External-closure reconciliation: every housekeeping sweep, after the active-agent-invocation reap and before the substage-timeout failsafe, runs `reconcileExternallyClosedRuns` (`server/internal/api/run_close_reconcile.go`). Its candidates are the project's `run_started` rows that recorded both identity values, whose workstream row still exists, and whose run holds no closing outcome, newest start first. For each it reads the engine's account of the recorded chain. The holder of the recorded workflow ID is the chain's latest link only when it reports the recorded first execution ID; otherwise the walk describes the recorded first execution and follows each link's close event -- a ContinuedAsNew successor, or a TimedOut one when the engine names it -- to the link with no successor. Only a latest link the engine closed `Terminated` or `TimedOut` is evidence: the pass records `run_closed_externally` in one `BEGIN IMMEDIATE` transaction through the predicate in backstop mode, with the terminate reason and identity from the close event, as a label only the newest runner substage (`runflow.IsRunnerSubstage`) recorded after the run's start and before the workstream's next one -- merge-flow, provisioning, resolve-progress and other stage rows in that window never name it -- and publishes after `COMMIT`. The holder's run claim (`runner_run_id`), `runtime_status`, runs rows, `engine_cleanup` rows and the age of any row or stamp are never evidence.
+External-closure reconciliation: every housekeeping sweep, after the active-agent-invocation reap and before the substage-timeout failsafe, runs `reconcileExternallyClosedRuns` (`server/internal/api/run_close_reconcile.go`). Its candidates are the project's `run_started` rows that recorded both identity values, whose workstream row still exists and is not linked to a story that is `closed_by_person` or `abandoned`, and whose run holds no closing outcome, newest start first. A workstream with no linked story keeps its runs as candidates. The runs of a `closed_by_person` or `abandoned` story are left alone: their chains are not read and no `run_closed_externally` is recorded for them. For each candidate it reads the engine's account of the recorded chain. The holder of the recorded workflow ID is the chain's latest link only when it reports the recorded first execution ID; otherwise the walk describes the recorded first execution and follows each link's close event -- a ContinuedAsNew successor, or a TimedOut one when the engine names it -- to the link with no successor. Only a latest link the engine closed `Terminated` or `TimedOut` is evidence: the pass records `run_closed_externally` in one `BEGIN IMMEDIATE` transaction through the predicate in backstop mode, with the terminate reason and identity from the close event, as a label only the newest runner substage (`runflow.IsRunnerSubstage`) recorded after the run's start and before the workstream's next one -- merge-flow, provisioning, resolve-progress and other stage rows in that window never name it -- and publishes after `COMMIT`. That window is read from the run's own events: its start by the run's id, the next start and the rows between by the workstream's story number, or by the workstream for a storyless workstream, so the read under the write lock grows with the run, never with the project's stage history. The holder's run claim (`runner_run_id`), `runtime_status`, runs rows, `engine_cleanup` rows and the age of any row or stamp are never evidence.
 
 The evaluation fails alive. A running chain, a `Completed`, `Failed` or `Canceled` latest link, a ContinuedAsNew link whose successor is not visible, a NotFound anywhere in the walk, a lookup error, an inconsistent chain and the sweep's own bound running out all record nothing and leave the run as it was. Each evaluation has one verdict -- recorded, already closed (the predicate refused the write), not external, not found, or inconclusive -- and only an inconclusive one is logged and counted in the sweep's `errors`. One run's failure -- an unusable answer, an error the engine returns about that run's own execution, a failed write -- does not stop the others, but an unreachable engine (`Unavailable`, `DeadlineExceeded`, `ResourceExhausted` or `Canceled`, the errors the next run's lookup would meet too) or the sweep's bound running out stops the pass: the remaining runs wait for the next pass as one count, and the failsafe after the pass keeps the rest of the sweep's budget. A refused or failed write publishes nothing, and a later pass retries a failed one. The pass has no expiry, age or attempt limit and no tick of its own. It never deletes or rewrites rows, and makes no Git, agent, dispatch, signal, cancel or terminate call, no FSM transition, no claim or stamp change and no runs patch; a run it closes then refuses the failsafe's `run_failed` in the same sweep, leaving one closing account.
 
 Close-time run-dir prune: a story closing to `implemented` or `abandoned` takes its workstreams' run directories with it, through the same pruner the sweep below calls (`pruneStoryRunDirs`). It runs after the closing transition has committed and the closing operation is done with the directories. An abandon through the close route prunes after `closeWorkstreamFully` has torn the workstream down and the route has released the project lifecycle lock. A cancel that abandons a queued story or its first draft prunes after releasing the lock and its admission, since a workstream can be linked to such a story. The generic story-transition route prunes beside its other post-commit effects. A merge closes its story inside the archive (`markStoryImplemented`), which still reads the directories, so `runMergeArchiveLocked` prunes after the archive succeeds, in one activity of its own (`MergePruneStoryRunDirs`, single attempt, short schedule-to-close bound, so an activity no worker picks up cannot hold the workflow open). That covers every merge route and the run workflow's external-merge leg. It names the calling execution by workflow ID and run ID, so that execution alone does not hold the directories: a replacement started under the same workflow ID still does. It is best-effort: a failure, a timeout or a skip for another workflow in flight is logged and never fails, undoes or delays the transition or the merge. The sweep below finishes what it leaves. A busy archive lock runs no archive and prunes nothing.
 
+Scheduled housekeeping sign-in refresh: after the restart-hold check and before
+MCP cleanup or project discovery, the tick runs the server-owned refresh action
+once, even when the projects directory is missing. Each participant owns its
+credential enumeration and renewal; Entra renews only expired cached access
+tokens, rechecking expiry under the owner lock and retaining account, tenant
+and resource scope. Account refusals reuse the account-wide refusal and alert
+path. Infrastructure failures and incomplete sweeps report independent sign-in
+refresh health, rather than a Temporal outage. The activity shares
+`housekeepingSweepActivityOptions` and `timeouts.workflow.cleanup`, with
+`MaximumAttempts: 1`; the next scheduled tick supplies the next attempt.
+Refresh failure never prevents cleanup, discovery or later project sweeps.
+The result's `sign_in_refresh` contains only fresh/refused/infrastructure-failure
+counts and complete/skipped status. Infrastructure failures contribute to
+`errors`, as does an incomplete attempt; a cancelled, timed-out or failed
+health-delivery attempt cannot claim completion. A restart hold, unbound host,
+or pre-change replay skips refresh without claiming completion. Detailed
+credential evidence remains server-side; workflow warnings contain only safe
+status and counts.
+
 Closed-story run-dir sweep: every housekeeping sweep, after the substage-timeout failsafe, retires the run directories (`ops_dir/runs/<project>/<run_id>`) the close path left. Its candidates are the workstreams with `runs` rows of the project's `implemented` and `abandoned` stories (`ListClosedStoryWorkstreamsWithRuns`), stories that closed before run-dir pruning shipped included. One sweep visits at most `runDirSweepWorkstreams` (20) of them, oldest first, continuing after the last one the previous sweep visited and wrapping around (`runDirSweepWindow`); each goes to the same pruner the close paths call (`pruneStoryRunDirs`, `server/internal/api/run_dir_prune.go`), limited to that workstream, with no caller workflow. The rest wait for later sweeps. It decides by story state alone: no age, timestamp, setting or switch, and no workflow, timer or schedule of its own. Per run directory the pruner deletes every file but a transcript blob whose database row is shortened, the only full copy, which stays at its `blob_path`; it writes the run's `run_logs_retired` record before the first removal, so every read of the run reports the logs as no longer kept. It never touches a story still open, a closed story's workstream with a workflow in flight (or whose liveness cannot be read, which counts as in flight and as an error), a story-less workstream's runs, or a directory under `runs/<project>` that no run names (`planning`, `editing`, `skipped`). A directory already pruned holds nothing to remove, so a later sweep deletes and records nothing. The sweep reports `run_dirs_deleted` and `run_dir_errors`; the errors are counted in its `errors` too, and the tick (`HousekeepingResult`) sums both across projects.
 
 #### Milestone rows
 
-Beside each run's start and close, the timeline records what happened to each micro-commit and to the branch, written by the producer that holds the fact. A row about a micro-commit opens with its recorded id and a colon, and carries the same id in its `microcommit_id` column. Only `commit_landed` says a micro-commit was committed: a plan entry marked done by a skip records `microcommit_skipped`, and a refused attempt its `run_failed`. A stage the operator cancels closes its run with `run_cancelled`, which names no micro-commit; its run id is shared by every cycle of that run, so the cancelled attempt is the one the run's latest implement start row before it names. Apart from the FSM's transition into `merged` written beside it, only `merge_landed` says the branch landed: an approving final review and a PR publication say what they did, and the archive records its own rows. A replayed outcome records nothing twice -- the commit stage's recovery leg finds its row by micro-commit and SHA, and a workstream already merged or archived records no second landing or archive. Rows written before these shipped keep their stored content (`Stage implement: started`, `Run interrupted`, `pre_merge_tests_skipped: unknown`); nothing rewrites them. A row with no bus type of its own wakes a client holding the timeline open with the `timeline_entry` frame, and the client re-reads the events REST read.
+Beside each run's start and close, the timeline records what happened to each micro-commit and to the branch, written by the producer that holds the fact. A row about a micro-commit opens with its recorded id and a colon, and carries the same id in its `microcommit_id` column. Only `commit_landed` says a micro-commit was committed: a plan entry marked done by a skip records `microcommit_skipped`, and a refused attempt its `run_failed`. A stage the operator cancels closes its run with `run_cancelled`, which names no micro-commit; its run id is shared by every cycle of that run, so the cancelled attempt is the one the run's latest implement start row before it names. Apart from the FSM's transition into `merged`, only `merge_landed` says the branch landed: an approving final review and a PR publication say what they did. For forge merges, the transition precedes archive; `merge_landed` follows `Archive: started` and the credentialed target fetch. A replayed outcome records nothing twice -- the commit stage's recovery leg finds its row by micro-commit and SHA, and a workstream already merged or archived records no second landing or archive. Rows written before these shipped keep their stored content (`Stage implement: started`, `Run interrupted`, `pre_merge_tests_skipped: unknown`); nothing rewrites them. A row with no bus type of its own wakes a client holding the timeline open with the `timeline_entry` frame, and the client re-reads the events REST read.
 
 | Row | Producer | Identity carried | Live frame |
 |-----|----------|------------------|------------|
@@ -2720,10 +3541,10 @@ Beside each run's start and close, the timeline records what happened to each mi
 | `final_review_outcome` | `server/internal/stages/review/final_review.go` | verdict, decision, finding count, whether a human decides; for a measured delta round, prompt mode, size and limit, and its content says when the touched files were listed rather than embedded | `timeline_entry` |
 | `pr_publication` | `server/internal/mergeflow/pr_create.go`, `server/internal/mergeflow/pr_push.go` | operation, branch, base, PR, landed head, outcome; on a push stopped before git push ran, the base rebase result | `timeline_entry` |
 | `merge_started` | `server/internal/mergeflow/begin.go`, `server/internal/mergeflow/pr_workflow.go` | branch, target branch, merge mode | `timeline_entry` |
-| `merge_landed` | `server/internal/mergeflow/reconcile.go`, `server/internal/mergeflow/begin.go`, `server/internal/mergeflow/pr_workflow.go` | branch, target branch, merge mode, PR, merge commit, merge message; the landed change hash (or why it was not computed), the final review compared with and its recorded hash, and the outcome: `match`, `differ`, `no_reviewed_hash` or `landed_not_computed`. A record only: a mismatch blocks nothing | `timeline_entry` |
+| `merge_landed` | local merges: `server/internal/mergeflow/reconcile.go`; forge merges: `archiveState.completeLanding` in `server/internal/mergeflow/archive_workspace.go`, through `stageApprovedLanding` | branch, target branch, merge mode, PR, merge commit, merge message; the landed change hash (or why it was not computed), the final review compared with and its recorded hash, and the outcome: `match`, `differ`, `no_reviewed_hash` or `landed_not_computed`. A record only: a mismatch blocks nothing | `timeline_entry` |
 | `archive` | `server/internal/mergeflow/archive.go` | started or completed | `timeline_entry` |
 
-A worked example, one PR-mode workstream: PARSER-002 found already done; PARSER-003 cancelled mid-implement, retried by the next run, refused by the pre-commit hook and skipped by the operator; the final review rejecting, then the operator's `hashd reject` appending the FIX. `TestMilestoneSequenceReachesEveryRead` (`server/internal/e2e/milestone_e2e_test.go`) drives the real producers over exactly this sequence and reads it back through the events reads, `hashd log`, the SSE frame and the web feeds; `TestMilestoneRowsDocMatchesTheSequence` holds this section to it.
+A worked example, one PR-mode workstream: PARSER-002 found already done; PARSER-003 cancelled mid-implement, retried by the next run, refused by the pre-commit hook and skipped by the operator; the final review rejecting, then the operator's `hashd reject` appending the FIX. `TestMilestoneSequenceReachesEveryRead` (`server/internal/e2e/milestone_e2e_test.go`) drives the real producers over exactly this sequence and reads it back through the events reads, `hashd log`, the SSE frame and the web feeds.
 
 ```
 stage_changed         COMMIT-PARSER-001: Parse the input -- Stage implement: started
@@ -2744,14 +3565,14 @@ final_review_started  Final review started
 final_review_outcome  Final review approved: 0 findings
 pr_publication        PR create: PR #7 created (parser -> main, https://forge.example/acme/demo/pull/7, head facade01)
 merge_started         Merge started: parser -> main (PR merge)
-merge_landed          Merge landed: parser -> main (PR merge, https://forge.example/acme/demo/pull/7, commit decaf001)
 archive               Archive: started
+merge_landed          Merge landed: parser -> main (PR merge, https://forge.example/acme/demo/pull/7, commit decaf001)
 archive               Archive: completed
 ```
 
 ### The busy guard (structural-verb lock)
 
-A workstream is **busy** when durable evidence says a live worker stands on it: a stamped `runner_stage` or a non-empty `runner_run_id`, confirmed by liveness. A claim's liveness is asked of the cycle workflow its `runner_claim_token` names (`run-cycle:<project>:<ws>:<parentRun8>:<tag>`), and of the run workflow (`run:<project>:<ws>`) when there is no token; a stamp with no claim asks the run workflow. The claim covers the window between a run claiming the workstream and entering its first substage, where no stamp exists yet. Both halves are required — the stamp or claim alone may be a crashed leg's leak (housekeeping's orphan sweep is the expiry for a leaked stamp), and workflow-openness alone would deadlock the human gates, where workflows stay open for hours parked. Liveness fails **alive**: when it cannot be determined, the workstream reads busy — a spurious refusal costs the operator a retry, a spurious pass is a clobbered plan. A residual `starting` / `stopped` stamp is a retired value, not a stamp (`fsm.RetiredRunnerStages`): only a claim beside it counts. With neither a stamp nor a claim, liveness is not consulted.
+A workstream is **busy** when durable evidence says a live worker stands on it: a stamped `runner_stage` or a non-empty `runner_run_id`, confirmed by liveness. A claim's liveness is asked of the cycle workflow its `runner_claim_token` names (`run-cycle:<project>:<ws>:<parentRun8>:<tag>`), and of the run workflow (`run:<project>:<ws>`) when there is no token; a stamp with no claim asks the run workflow. The claim covers the window between a run claiming the workstream and entering its first substage, where no stamp exists yet. Both halves are required — the stamp or claim alone may be a crashed leg's leak (housekeeping's orphan sweep is the expiry for a leaked stamp), and workflow-openness alone would deadlock the human gates, where workflows stay open for hours parked. Liveness never fails open: when it cannot be determined, admission refuses on the unknown answer with the lookup failure as its cause — a spurious refusal costs the operator a retry, a spurious pass is a clobbered plan. A residual `starting` / `stopped` stamp is a retired value, not a stamp (`fsm.RetiredRunnerStages`): only a claim beside it counts. With neither a stamp nor a claim, liveness is not consulted.
 
 A claim is two columns. `runner_run_id` is the run id, minted once at dispatch and shared by every cycle and continue-as-new link of the run. `runner_claim_token` is per cycle: the cycle's own child workflow ID, which does not carry the run id. A cycle's claim (`runflow.RegisterRunner`) lands only on an empty row or on the writer's own claim -- its token, or an untokened claim of its run (a startup-resume pre-claim, a gate continuation's re-claim, a claim written before the token column). An untokened claim of another run is replaced without a probe: every claim writer runs inside its own run's workflow, and `run:<project>:<ws>` is one per workstream, so another run's untokened claim is presumed stale; the takeover records an informational `runner_claim_takeover` row naming the replaced run, which never lists among the taking-over run's current errors. A tokened claim of another cycle is replaced only after the liveness probe confirms its cycle closed, asked of the row as read and fail-alive; a refused claim writes nothing on the row, records a `system_error` naming both claims, and its cycle stands down. Every exit clears the token alongside `runner_run_id`, and a release carrying a token lands only on that token or an untokened claim of its run, so a cycle's late release cannot clear a later cycle's claim or stamp in the same run; the outer leg's tokenless release lands on any claim of its own run, so it clears a cycle claim its run leaked, and never on another run's tokened claim; a tokenless cycle release (a pre-token activity) never clears a tokened claim.
 
@@ -2764,11 +3585,13 @@ select work: structural edits are refused from signal submission through
 runner ownership. Reset/replan may cancel this handoff; neither bypasses an
 actual live runner stamp. The handoff uses the existing transitional columns.
 
-The lock is not a new primitive. It is the `no_active_runner` FSM guard evaluated over existing columns (`server/internal/fsm/guards_runner.go`), attached to the structural commands' contract edges, surfaced through `available_actions` like every other guard.
+The lock is not a new primitive. It is the runner half of `no_active_work` (`server/internal/fsm/guards_activity.go`), the one activity guard on every operator edge that must not interleave with running work, surfaced through `available_actions` like every other guard and deduplicated on each edge. It asks each owner that can be executing on the workstream, by its execution evidence through the shared activity providers and request-scoped probes: the runner's process (`runner_pid`) and its claim or stamp as above, the stage's operation owner (`merging`, `resolving`, `rebasing`, `provisioning`), the merge workflow at every stage (a PR-mode merge runs at `pr_open` / `pr_approved`), the PR push whenever the workstream holds a PR, the PR create where one can run (a pre-PR publish state), and agent work (live `active_agent_invocations` rows, the PR reopen and recovery-answer workflows). It never reads a stage, `runtime_status` or the dashboard spinner as proof of inactivity, and skips no probe for display precedence: a push at a PR state, or beside a failed run the display shows instead, refuses. The first owner found running refuses with a reason naming the work and saying it must finish first; with none running, an owner that could not be asked refuses as unknown, its lookup failure carried as `GuardResult.Err` and through the refusal's Diagnostic cause. A run held at a ready pause passes its runner half (see **Close, replan and reset under a pause**); a start_merge re-admitting its own merge does not ask about that merge; and the engine's own transitions (internal transitions, publication landings) evaluate no guards, so running work completes itself.
 
 The busy guard is not the only precondition a structural verb can carry. `skip` also carries `has_undone_commit` (`server/internal/fsm/guards_plan.go`) on every one of its edges: there has to be a micro-commit left to skip, which is the 409 the endpoint already answered without one. So `skip` is unavailable at `ready_to_merge`, `pr_open` and `pr_approved` — where every micro-commit is `Done` — with nothing busy at all, and on a plan that is missing or malformed. It rides the trigger rather than any one client's state list so the CLI, the TUI and the web withhold it from the same availability read.
 
 `add-commit` also carries `no_pending_recovery_question` (`server/internal/fsm/guards_recovery.go`) on every `add_commit` and `add_fix_commit` edge, and every `all_commits_done` edge carries `no_run_past_recovery_question`. While a merge-gate recovery question is pending on the workstream, answering it is the one repair-direction path. The add-commit endpoint refuses with a Diagnostic naming the question and `hashd answer`, before anything is dispatched or changed, and the add-commit activity asks again before its planner runs and at the write. A run over a plan with no undone micro-commit goes from select straight to the merge gate, past the clarification check, so in any state the run endpoint refuses it the same way (`--run-anyway` included) and its `all_commits_done` row is refused. A run with work left is not refused: its clarification check stops it on the blocking question. Both guards lift once the question is no longer pending.
+
+`hashd story add-commit` fires `add_commit` and takes its destination from the contract: from `ready_to_merge` and `merge_test_failed` it returns the workstream to `active` in the same write as the append; from `active`, `implementing`, `awaiting_human_review` and `merge_conflicts` it stays, with the row's guards evaluated at the write. Add-commit is not offered at `pr_open` or `pr_approved`; work is added to a PR-state workstream with `hashd reject`.
 
 **Unlocked at the parks** — the states that exist to wait for a human, all evidenced by cleared run markers: `awaiting_human_review`, a CLQ-blocked run, and the `merge_test_failed`-class failure states. The claim does not lock them, because every cycle and outer-leg exit releases its own claim: a release keyed to a run and cycle whose claim another run, or a later cycle of the run, has since taken changes nothing and stands down. On a workstream that holds no runner claim, the outer leg's release clears `runner_stage` only when it holds `merge_gate` or `final_review`; any other stamp, such as a merging substage, is left as found and the release stands down. The cycle's release clears only the cycle's own substage stamps there, the case of a cycle whose best-effort claim never landed.
 
@@ -2776,10 +3599,10 @@ A command is **structural** when it can rewrite what a live worker stands on —
 
 | Class | Verbs | Rule |
 |---|---|---|
-| Structural | `replan`, `reset`, `edit-commit`, `add-commit`, `skip`, `resolve-oscillation`, plan-carrying `PATCH` | Refused while busy (the shared guard); refused by contract from flow-owned states (`merging`, `resolving`). `skip` additionally carries `has_undone_commit`, so it is withheld wherever the plan has nothing left to skip, busy or not; `add-commit` additionally carries `no_pending_recovery_question`, so it is withheld while a merge-gate recovery question is pending |
+| Structural | `replan`, `reset`, `edit-commit`, `add-commit`, `skip`, plan-carrying `PATCH` | Refused while busy (the shared guard); refused by contract from flow-owned states (`merging`, `resolving`). `skip` additionally carries `has_undone_commit`, so it is withheld wherever the plan has nothing left to skip, busy or not; `add-commit` additionally carries `no_pending_recovery_question`, so it is withheld while a merge-gate recovery question is pending |
 | Append | `feedback`/guidance | Always allowed — append-only by design, nothing a worker stands on is rewritten |
-| Capability | `pr push`, story `update-criteria` | No FSM transition, so no contract edge gates them; offered through an availability capability row that mirrors the endpoint's own preconditions (for `pr push`: an open PR, a branch, no publish already in flight, and no merge workflow open -- refused with the `no_active_merge` guard's reason). The busy guard does not apply — a plain push rewrites nothing a worker stands on — except to `--sync`, which rebases and so takes it explicitly |
-| Park | `approve`, `reject`, `answer` | Allowed exactly at their parks — the states those verbs exist for |
+| Capability | `pr push`, story `update-criteria` | No FSM transition, so no contract edge gates them; offered through an availability capability row that mirrors the endpoint's own preconditions (for `pr push`: an open PR, a branch, no publish already in flight, and no merge workflow open -- refused with `no_active_work`'s merge reason). The busy guard does not apply — a plain push rewrites nothing a worker stands on — except to `--sync`, which rebases and so takes it explicitly |
+| Park | `approve`, `reject`, `answer` | Allowed exactly at their parks — the states those verbs exist for. `reject` also takes `no_active_work` in every state it runs in: on its `awaiting_human_review` edge, on the edge each extended reject performs (`add_fix_commit` at `ready_to_merge`, `address_concerns` at `final_review_with_concerns`, `pr_changes_requested` at `pr_open` / `pr_approved`), and asked directly at `active`, where a finished plan's reject performs no edge while the final review or the merge gate runs. Running work refuses it at once, without cancelling that work or queueing the reject; an activity check that could not be read refuses as unknown. A pending decision is not activity for reject, which re-delivers it once its runner is gone and is refused while that runner lives |
 | Terminal-intent | `close`, `cancel`, `remove` | Not busy-gated; contract edges still apply. Workstream close confirms workflow closure before changing state or removing the worktree; cancel/remove retain their existing teardown paths |
 
 Machine writers (janitor, housekeeping, runner internals) are a fourth caller class outside the table: liveness-gated with busy-skip — they never queue behind the guard and never fight the operator for it.
@@ -2792,7 +3615,7 @@ flowchart LR
     subgraph parked["PARKED -- run markers cleared"]
         P[awaiting_human_review<br/>CLQ-blocked<br/>merge_test_failed-class]
     end
-    S[Structural commands<br/>replan, reset, edit-commit,<br/>add-commit, skip, resolve-oscillation,<br/>plan PATCH] -- refused (409, guard reason) --> busy
+    S[Structural commands<br/>replan, reset, edit-commit,<br/>add-commit, skip,<br/>plan PATCH] -- refused (409, guard reason) --> busy
     S -- allowed --> parked
     A[Append commands<br/>feedback, guidance] -- not busy-gated --> busy
     A -- not busy-gated --> parked
@@ -2816,9 +3639,11 @@ provisioning currently checks names only. Validation can be skipped on a failed
 prior-state read, and writes have best-effort failure paths. Definition and
 enforcement are not equivalent. The declared sub-FSMs are:
 - **`implementing`** — runner inner loop. **Formalized.** Contract at `server/internal/fsm/implementing_substages.json`, loaded as `fsm.ImplementingSubstages` by `server/internal/fsm/fsm.go`. See **Implementing sub-FSM** below for the transition table.
-- **`merging`** — merge sequence. **Formalized.** Local merge records `acquire_lock → pre_merge_tests → post_rebase_test → checkout → merge_attempt → finalize`; PR merge records `acquire_lock → pre_merge_tests → post_rebase_test → pr_merge → finalize`. The `post_rebase_test` substage runs the merge-gate command in the worktree after rebasing onto fresh main and before any merge lands.
+- **`merging`** — merge sequence. **Formalized.** Local merge records `acquire_lock → pre_merge_tests → post_rebase_test → checkout → merge_attempt → finalize`; PR merge records `acquire_lock → pre_merge_tests → post_rebase_test → pr_merge → finalize`. The `post_rebase_test` substage verifies the rebased tree in the worktree after rebasing onto fresh main and before any merge lands, as the post-rebase check below chooses. When the scope has a `lint_cmd`, the verification runs the lint check first, wherever it is about to run the gate's own command or its fast check (never on a build-only, document-only or no-proof decision), stamped `post_rebase_lint` when the verification runs under `post_rebase_test`, and back to `post_rebase_test` once lint passed. A lint failure is the verification's failure, titled `Post-rebase lint failed`, and the tests do not run. `post_rebase_lint` has no timeout row of its own and is bounded as `post_rebase_test`.
 
-Post-rebase check: the project setting `workflow.post_rebase_test` chooses what verifies a rebased tree. `full`, the default, always runs the full test command. Choose it in Settings > Merge gate or with `hashd project config set workflow.post_rebase_test full` (or `fast`). With `fast`, after a rebase that git completed without a conflict, post-rebase verification on the landing path, the PR path, the merge gate's auto-rebase leg and the resolve legs runs the configured build and then the scope's fast check (`fast_test_cmd`, the target repo's on a multi-repo project), handed the files touched between the new merge base and the rebased tree, instead of the full test command. It does so only when the test verdict store holds a pass of the full command for the tree the branch held immediately before the rebase. The full command runs instead, and the reason is recorded, when `workflow.post_rebase_test` is not `fast`, when that proof is missing, when the rebase had conflicts or needed union, regeneration or AI resolution, when no fast check is configured, when `gates.commit_check` is `full`, or when the touched-file list cannot be handed over; a rebase that was not needed is verified as before. A fast check that fails is followed by the full command on the same tree, always run rather than answered from a recorded pass, and the full command's verdict is the one reported, recorded and recovered; a fast failure the full command contradicts is recorded as a disagreement, and one followed by a full-command timeout stays on the blocked record beside it. The build, the fast check and that full command share one `test_timeout` deadline, as the test stage's phases do; a full-only verification gives each command its own. A fast pass never retires recorded post-rebase failures, and on the auto-rebase leg the merge gate still runs its full suite on the rebased tree before admitting the branch. Each verification after a rebase records a `post_rebase_check` timeline row naming the check that ran, its touched-file count and the full-command pass it relied on.
+Post-rebase check: In the approved-PR chute (`RunMergeApprovedLocked`), a clean rebase selects only the configured build, or no ordinary proof when the build is unconfigured or explicitly skipped. This local execution policy precedes file selection, migration-triggered full-proof rules and ordinary fast/full settings. Migration preparation and review stops still run, and the existing document-only exemption keeps its eligibility and omits the build too. Successful chute AI conflict resolution selects the configured build followed by the target repository’s `fast_test_cmd`, falling back to the existing full merge-gate command when no fast command is configured. This selection needs neither a fresh pre-rebase full-command receipt nor permission from ordinary fast/full settings. It reuses the both-sides touched-file handoff, fast verdict keys; a narrowed fast pass cannot discharge an unrestricted required command, even with identical argv. Resolution provenance is recorded only after the selected verification succeeds. Standalone recovery, earlier merge-gate verification, resolution eligibility and attempt counts remain unchanged; paths outside the chute keep their existing behavior. Further clean preparations in the same hold retain the earlier full-test proof as evidence without requiring a full-command receipt for each rebased tree. A preparation that needed no rebase reuses a recorded pass of the merge-gate test command for exactly the content the branch holds. With none recorded, it is checked as a clean rebase is (build only) when a full pass of that command is recorded on a tree that recorded clean sync rebases alone carried to the branch head (`ReadCleanRebases`, every commit replayed unchanged); a resolved conflict, an AI resolve or a commit since then on the way runs the command. A command that runs there still validates its exit tree, so a pass on content the command changed is not recorded for reuse. The build uses the existing regeneration handling. Required commands remain independent: each preparation refreshes durable obligations, executes unpaid commands through the shared required-check loop and discharges only the commands actually paid. A build-only pass neither claims a full-command verdict nor retires unrelated failures. The `post_rebase_check` timeline and attempt evidence name the selected build or no-proof policy and the actual command executions, without manufacturing a full-test pass. Outside this clean chute case, the project setting `workflow.post_rebase_test` chooses what verifies a rebased tree. `full`, the default, runs the full test command, except for the approved-PR chute rules above. Choose it in Settings > Merge gate or with `hashd project config set workflow.post_rebase_test full` (or `fast`). With `fast`, after a rebase that git completed without a conflict, post-rebase verification on the landing path, the PR path, the merge gate's auto-rebase leg and the resolve legs runs the configured build and then the scope's fast check (`fast_test_cmd`, the target repo's on a multi-repo project) instead of the full test command. Every such fast check -- the landing path's, the PR path's, the auto-rebase leg's and the resolve legs' alike -- is handed one deduplicated, sorted list holding two sets of paths: every path the rebased tree differs in from the new merge base (the branch's set), and every path the base changed between the merge base the pre-rebase tip sat on and the merge base the rebased tree sits on now (the base's set; `--no-renames` lists both paths of a rename, and deletes are listed). The run log line and the recorded touched-file record say how many paths came from each side, each side's own count before the union; the combined count is what `HASHD_TOUCHED_FILES_COUNT` carries and the list's sha256 that keys the fast verdict covers. It does so only when the test verdict store holds a pass of the full command for the tree the branch held immediately before the rebase, or -- when the fast check is selected -- the full+fast pair for the plan's last micro-commit: that micro-commit's recorded passing test-stage run of the merge gate's own command paired with its later passing test-stage fast-check run keyed to exactly the tree the rebase judges, whose commit the chain records as that micro-commit's (see Test verdict cache). The fast-check run names the judged commit's parent as its tested commit, and the full run names the same commit or a branch head the workstream's recorded clean sync rebases alone carried to it, the pass the test stage's carried release stands on (see Fast check in the test stage); across such rebases the fast-check run pairs only if it was handed both sides' paths from the full run's tested commit. Any other rebase between the two passes, or one over the recorded commit, breaks the pairing. The full command runs instead, and the reason is recorded, when `workflow.post_rebase_test` is not `fast`, when neither form of that proof holds, when the rebase had conflicts or needed union, regeneration or AI resolution, when no fast check is configured, when `gates.commit_check` is `full`, or when the touched-file list cannot be handed over -- that includes either side failing to be taken (a git failure, a pre-rebase tip that could not be read, a merge base either side of the rebase that cannot be derived as the fork point its tip sits on -- the workstream's recorded base never stands in for either -- or a touched path containing a newline from either side), all recorded on the fast check's fallback route as the reason the full test command ran instead of `fast_test_cmd`; a rebase that was not needed is verified as before. Outside the approved-PR chute, a fast check that fails is followed by the full command on the same tree, always run rather than answered from a recorded pass, and the full command's verdict is the one reported, recorded and recovered; a fast failure the full command contradicts is recorded as a disagreement, and one followed by a full-command timeout stays on the blocked record beside it. The build, the fast check and that full command share one `test_timeout` deadline, as the test stage's phases do; a full-only verification gives each command its own. A fast pass never retires recorded post-rebase failures, and on the auto-rebase leg a passing fast check after a clean rebase stands for the gate's suite on the rebased tree, on the pre-rebase full pass it names: the gate runs its other checks there -- the trailing-whitespace fix and the up-to-date, diff and conflict-marker checks -- without running its suite again, and their pass finishes the merge gate -- the FIX's required verification, the secret scan, Ready. A commit those checks make over the head the fast check verified, a whitespace normalisation's, is judged by the gate's suite as at entry, and a pass of it is the gate's own; the gate's acceptance is recorded by a `test_verdict_reused` row naming that full pass and the fast pass that rests on it, and a row that cannot be recorded accepts nothing, so the full command runs on the same tree. Each verification after a rebase records a `post_rebase_check` timeline row naming the check that ran, its touched-file count and the full-command pass it relied on; one that narrows on the full+fast pair also records a `test_verdict_reused` row naming both of the pair's passes and, when clean sync rebases carried its full pass, the rebase range they carried it across. The per-commit test stage takes the same decision, on the same both-sides list, for the plan's last undone micro-commit whose full pass the workstream's recorded clean sync rebases alone carried to the head it runs on: that pass is its pre-rebase proof, and a passing fast check on the head is the head's full evidence (see Fast check in the test stage). It records no `post_rebase_check` row; its `test_verdict_reused` row, naming the carried pass and the range it was carried across, and its `check_reason` record the narrowing. Document-only target advance: in the approved-PR chute alone, when the preparation inside the merge lock rebased the branch without a conflict and either form of the pre-rebase proof holds, and every path the target changed between the target revision the proven pre-rebase tip sat on (its fork point, derived strictly from the workstream's recorded base, as the fast check's base side is) and the target the branch was rebased onto is a workflow-owned REQS/SPEC file, the rebase is not verified: no build, fast check, full test command or review runs because of it, whatever `workflow.post_rebase_test`, `gates.commit_check` or `fast_test_cmd` say. The range is one tree diff, so every target commit in it counts, an earlier one as much as the latest; no commit message and none of the branch's own paths are read. REQS.md and SPEC.md are workflow-owned only in the `repo` and `none` spec modes -- the same rule the managed-file sweep and the implementer artifact guard use -- so in `local` and `external` modes they are ordinary files and earn no exemption, and no other file (DAS_PLAN.md included) ever does. A git failure, a fork point that cannot be derived or an empty diff is not eligible, and the rebase uses the clean chute build-only policy. Recovery verification and a conflicted rebase still verify in full; a migration trigger or renumber prevents the document-only exemption but a clean chute rebase still selects build-only proof; recorded repair checks still run. The exemption records no verdict and reuses none, keeps the verification's tests not skipped by policy, and like a fast pass never retires recorded post-rebase failures, unless a recorded repair check that is the gate's own test command runs and passes, which makes it a full pass. Its `post_rebase_check` row has gate `document_only`, no gate outcome and no command, names the pre-rebase pass it retained (for the full+fast pair, both legs and the clean rebases that carried the full one), the covered and new target revisions and the changed paths, and says the decision omitted the build gate and the gate test command because every target change in that range is in workflow-owned REQS/SPEC, with any required check's result reported beside it; the merge attempt's preparation record carries the same facts. Publication and the forge merge then proceed on the rebased branch as after any passing verification. The exemption also covers every later preparation in the same hold of the merge lock, when the target advances again outside hashd -- the stale-base guard refuses the push, or the base re-read before the forge merge finds it moved: the head an exempted preparation left has no recorded pass of its own, so when no fresh proof holds for the next preparation's pre-rebase tip and that tip is still the head the exempted preparation left, the original proof is retained and the range keeps measuring from the target revision that proof covered to the new target, judged by the same rule, so any change outside workflow-owned REQS/SPEC since that revision uses the clean chute build-only policy. A fresh proof is used with its own covered revision instead. A preparation verified another way ends document-only retention; clean build-only preparations may retain the earlier full-test evidence without extending document-only eligibility. A fast pass establishes no new full proof. The retention lives only in the hold: an activity retry starts again from the first preparation's lookup. Each exempted preparation's row and preparation record name the retained proof and the whole compared range. The landing path, the merge gate, the resolve legs and the per-commit test stage never take it. The exemption is pinned per merge attempt: an approved-PR attempt started before the upgrade that introduced it never takes it, through replay, activity retries and every further target advance in its hold, and keeps its original proof rules; attempts started after the upgrade take it.
+
+In-hold dropped documentation rewrite: inside the approved-PR merge hold (`RunMergeApprovedLocked`), if the hold's rebase drops a conflicting `merge_doc_update` tip, once that preparation's existing verification passes hashd writes the documentation on the rebased code before publishing and asking the forge to merge (through `WriteLaneDocs`). The rewrite keeps the existing merge lock without re-entering the queue, adds no extra test or proof beyond what the hold's rebase already required, and displays only the existing `pre_merge_tests` substage and the `pm_docs` agent invocation (never a waiting-for-approval state). In `spec_mode repo`, the limits of `merge_gate` and `pre_merge_tests` each add `stages.pm_docs.timeout` (when configured as a positive budget; an unlimited `stages.pm_docs.timeout` or any other `spec_mode` keeps the existing limit) across the stage deadline, housekeeping sweep, and deadline descriptions.
 
 - **`provisioning`** — **Defined; names validated, transitions not enforced.** `resolve_base_sha → worktree_create → setup_hook → baseline_tests → plan_generate`, with explicit failure exits and `plan_generate_complete` returning to the parent flow. Contract: `server/internal/fsm/provisioning_substages.json`.
 
@@ -2830,11 +3655,13 @@ with the story. Merge-time tests remain in place.
 
 #### Implementing sub-FSM
 
-States: `preflight`, `select`, `clarification_check`, `concern_triage`, `implement`, `test`, `adjudicate`, `adjudicate_test`, `adjudicate_build`, `rerun_test`, `rerun_build`, `review`, `adjudicate_review`, `qa_gate`, `commit`. (`breakdown` runs before `select` but is not a tracked sub-FSM state — like the initial breakdown, the escalation partial breakdown sets `runner_stage="breakdown"` without an FSM transition.)
+States: `preflight`, `select`, `clarification_check`, `concern_triage`, `implement`, `lint`, `test`, `adjudicate`, `adjudicate_test`, `adjudicate_build`, `rerun_test`, `rerun_build`, `review`, `adjudicate_review`, `qa_gate`, `commit`. (`breakdown` runs before `select` but is not a tracked sub-FSM state — like the initial breakdown, the escalation partial breakdown sets `runner_stage="breakdown"` without an FSM transition.)
 
 Each implement-loop judge stamps its own substage, so the status read's `(<runner_stage>)` names the judge that is running: `adjudicate_test` (test-conflict judge), `adjudicate_build` (build-conflict judge), `adjudicate_review` (review-conflict judge). All three keep the adjudicate stage's bounds -- `stages.adjudicate.timeout` for the agent call and the `runner_stages.adjudicate` row for the housekeeping sweep (`stagetimeout.RunnerStageBound`) -- and record their run-row stage as `adjudicate`. The shared `adjudicate` state and its transitions remain so a stamp written before the per-judge stamps still validates and is still swept.
 
 A re-run of the failing command that the test or build judge asks for stamps its own substage, so the status read names it while it runs: `rerun_test` (requested by the test judge), `rerun_build` (requested by the build judge). A re-run is the test stage's command run again: it leaves its judge's stamp, reaches every destination the `test` stamp can reach, and can return to its judge. Both stamps keep the test stage's bounds -- `test_timeout` and the `runner_stages.test` row with its sweep margin (`stagetimeout.RunnerStageBound`) -- and add no setting. The runner cycle stamps them when a judge's retry is honored (Test-Conflict Escalation, "The judge-requested re-run").
+
+When the scope has a `lint_cmd`, the lint stage stamps `lint` between `implement` and `test`: the test stage's own one-check run with the lint command as its check, its full command (no fast check), no build and no pre-commit hook (the test stage runs both), and an empty baseline. It takes the hold boundary before the pair and the `test` stamp after it takes none, so no edit lands between a passing lint and the tests it lets run. A lint failure goes straight back to `implement` with the lint output and the note that the tests did not run, under the same attempts and with no judge; a lint timeout or a lint command that did not exit normally ends the run failed at `lint`. Its timeline rows are `Lint PASSED` and `Lint FAILED`, and its loop events name the trigger `lint_failure`. It runs only where the tests run, so not with `tests_skipped`; in a review-first end game it goes with the tests: deferred to the merge gate with them when `workflow.final_commit_test` is `none`, and run before the final commit's test when it is `fast` or `full`. A lint stage never runs the last micro-commit's merge-gate command or an automatic FIX's required verification, which are the tests'. A run started before the lint stage existed never runs it.
 
 Transitions:
 
@@ -2845,6 +3672,9 @@ Transitions:
 | `clarification_clean` | `clarification_check` → `concern_triage` |
 | `triage_complete` | `concern_triage` → `implement` |
 | `implement_pass` | `implement` → `test` |
+| `implement_pass_lint` | `implement` → `lint` (the scope has a lint_cmd) |
+| `lint_pass` | `lint` → `test` |
+| `lint_fail` | `lint` → `implement` (lint failure: straight back to implement with its output, no judge) |
 | `test_pass` | `test` → `review` |
 | `test_fail` | `test` → `implement` (build failure: straight back to implement) |
 | `test_conflict` | `test` → `adjudicate` (the shared judge stamp written before the per-judge stamps) |
@@ -2867,7 +3697,8 @@ Transitions:
 | `rerun_build_judge_build` | `rerun_build` → `adjudicate_build` (the re-run failed: back to its judge) |
 | `review_approve` | `review` → `qa_gate` |
 | `review_request_changes` | `review` → `implement` |
-| `judge_review` | `review` → `adjudicate_review` (the blocker set repeats — deadlock; see Review-Conflict Escalation) |
+| `judge_review` | `review` → `adjudicate_review` (the blocker set repeats — deadlock — or a finding tagged `against: plan` first appears; see Review-Conflict Escalation) |
+| `implement_judge_review` | `implement` → `adjudicate_review` (the implementer stopped with a validated review objection against a current finding; see Review-Conflict Escalation) |
 | `adjudicate_review_resolve` | `adjudicate_review` → `implement` (CARRY verdict: one directed retry against the closed list) |
 | `resume_judge_test` | `clarification_check` → `adjudicate_test` (a run resuming at the test judge from a recorded stop; see Judge-failure stop) |
 | `resume_judge_build` | `clarification_check` → `adjudicate_build` (a run resuming at the build judge from a recorded stop) |
@@ -2895,6 +3726,8 @@ themselves prove that parent notification, persistence or continuation work
 has finished. The parent must record its own working or waiting position.
 
 #### Provisioning sub-FSM
+
+Each lane gets a private worktree under hashd's exclusive control. Only hashd and the agents it assigns modify that checkout, from provisioning through cleanup. The same rule applies on local and remote runners. A runner's accepted record of a hashd operation is evidence of that operation. Shared upstream branches such as `dev` and `main` can advance independently, and hashd accounts for that movement when it rebases or merges the lane.
 
 The provisioning attempt owns setup through the following progression. A
 failure returns to the parent with failure evidence; it does not create a
@@ -2985,6 +3818,12 @@ uncommitted plan tail (Tier 2), then a human (Tier 3). Budget: **judge×1 →
 partial-breakdown×1 (per failing-test signature) → human** — no unbounded looping.
 
 ```text
+test command did not exit normally (a signal, named or exit -1; cancelled;
+no exit status, including never started)
+   ─► failed: "the test command ended without a result hashd could read"
+      (next step `hashd run <ws>`; no reading, no judge, no fix round)
+test command stopped by test_timeout ─► test_timeout outcome, time-bound park
+
 test red ─► adjudicate (judge, Tier 1)
               │
    verdict ──┼─ REGRESSION / OBSOLETE ─► implementer fix, 1 try ─► test ─► green ─► review
@@ -2997,6 +3836,7 @@ test red ─► adjudicate (judge, Tier 1)
               ├─ CANT_TELL with retry, honored ─► rerun_test: the failing command once more
               │     ├ passes ─► review
               │     ├ times out ─► the test stage's timeout case
+              │     ├ ends without a result ─► the no-result stop (no FAILED re-run verdict)
               │     └ fails ─► the same judge on the re-run's output (no offer: spent)
               │
               └─ CANT_TELL (final, or a refused retry), every mode
@@ -3022,6 +3862,31 @@ failure with a NEW error signature goes straight back to implement (the code
 simply doesn't compile, and the loop is the right tool for a moving target);
 one that REPEATS with an identical signature escalates through the
 build-conflict ladder below.
+
+**A test command that did not exit normally is not a test verdict.** Before any
+failure reading, the test stage reads the execution's recorded outcome
+(`mergeflow.ExecutionProcessOutcome.ExitedNormally`): a command ended by a
+signal (named, or exit -1 with no name recorded), stopped by `test_timeout`,
+cancelled, or with no exit status (including one that never started) gave no
+result. Such a run gets no failure parsing, no failing-test reader, no
+baseline exclusion, no unresolvable-command skip, no verdict reuse, no test
+judge and no fix round. This holds for the configured test command, a
+judge-requested re-run and an automatic FIX's required verification alike.
+It covers the pre-commit hook leg too: a hook that did not exit normally takes
+the same stop, naming the hook (`git hook run --ignore-missing pre-commit`) as
+its command, and is never reported as refusing the change (no
+`pre_commit_hook: REFUSED` row, no refusal `test.log` for the judge); only a
+hook that exited normally with a non-zero status refuses it.
+`test_timeout` keeps its own `test_timeout` outcome and the time-bound park.
+Every other such ending fails the run at `test` with the title "the test
+command ended without a result hashd could read" (`test.no_result`): its
+`run_failed` row carries the Diagnostic, stating how the command ended in the
+words of `test.log`'s ENDED block, the command and the execution's stored
+evidence, with the next step `hashd run <ws>`. It parks nothing, so the
+workstream stays `implementing` with Run offered. A judge-requested re-run that
+did not exit normally records no FAILED re-run verdict (a timed-out one stays
+TIMED_OUT), so it never returns to its judge as a failure. An operator's cancel
+of the cycle takes the cancelled exit instead.
 
 Verdicts (`server/internal/fsm/implementing_substages.json`; judge prompt in
 `prompts/adjudicate.md`):
@@ -3049,9 +3914,7 @@ mode: no clarification, no partial breakdown, no human gate. Its `run_failed`
 record is titled `The test judge could not run: <reason>` (`build` and `review`
 for the other two judges) and carries the call's catalogue `failure_code`, a
 kill's deadline keys (bound, setting, explanation, next steps) and an
-`output_transcript_id` linking the judge's recorded output. A `usage_limit`
-failure carries the usage-limit keys, so the run takes the same scheduled
-retry an implement failure does. The failure reaches the workflow as an
+`output_transcript_id` linking the judge's recorded output. The failure reaches the workflow as an
 activity outcome, so no Temporal retry re-runs it; `hashd run` retries it
 explicitly. A judge that ran and ruled `CANT_TELL` routes as the table says.
 
@@ -3164,30 +4027,27 @@ implement runs, so neither way on is taken unexplained. A branch section that ca
 a worktree that could not be read.
 
 **Who resumes, and when Go says so.** Only a plain Go (`hashd run`, the
-`run` capability row's press) and a fired usage-limit retry dispatch a resume,
+`run` capability row's press) and a triggered run retry dispatch a resume,
 and both through the same run dispatch. A Go carrying feedback, a
 clarification answer, a triage waiver or approve-post-exhaustion never
-resumes, and neither do the continuations of a plan split, a requirements
-edit, an AC amendment or a reject, which change the plan, the requirements or
+resumes, and neither do the continuations of a plan split, an AC amendment or a reject, which change the plan, the requirements or
 the guidance the record was taken under. The resume is dispatched when the
 workstream's latest run failed at `adjudicate`, its `run_failed` row names the
 test, build or review judge, it holds a complete record of that stopped call, and
 the stop is still current: it is the latest run and failed, the stage is not
 terminal and does not supersede run failures, and no later dispatch was
-recorded over it. The usage-limit retry already fires only for a current stop
-by that same rule, so a retry that fires at such a stop resumes, and one a
-later run superseded keeps its `superseded` outcome and dispatches nothing.
+recorded over it.
 The `run` row's note says "Go retries the <judge> judge if the branch is
 unchanged since the stop." exactly when Go would dispatch the resume, and it
 is derived from server records alone: reading availability never runs git.
 The branch comparison is the resumed run's own check above, which runs the
-normal cycle on a mismatch. A reset (full or `--checkpoint`), a replan, a
-reject or a requirements edit supersedes the attempt the judge was handed
+normal cycle on a mismatch. A reset, a `reject --reset`, a replan or a
+reject supersedes the attempt the judge was handed
 yet leaves the failed run latest and current. Each advances the workstream's
 `command_generation` in its own write, and the record holds the generation
 its call was handed under, so a later generation retires the stop. A plan
-edit that advances no generation (editing or skipping the micro-commit, an
-oscillation resolution, a replan that keeps the work) retires it through the
+edit that advances no generation (editing or skipping the micro-commit, a
+replan that keeps the work) retires it through the
 plan itself: the micro-commit must still be pending in the plan with the
 title and description the judge was handed. A retired stop is no longer
 noted or resumed, and the stopped run's record is kept as the evidence of
@@ -3207,7 +4067,7 @@ carries the CANT_TELL unblocked, and they replay that way.
 **Two CANT_TELL forms: final, and with retry.** The implement loop's test and
 build judges have two CANT_TELL forms. The final CANT_TELL asks a person.
 CANT_TELL with retry is the same complete ruling plus a `retry` object whose
-`quote` is copied verbatim from the failing output the judge was shown: the
+`quote` is copied verbatim from the failing output hashd captured: the
 text that shows the same command may pass when it runs again. The prompt
 renders the retry form (`retry_offered`) only when the call offers it, and a
 call offers it only when all of these hold: it is the implement loop's test or
@@ -3225,14 +4085,16 @@ none, and its CANT_TELL reaches the base-red stop or a repair-directed recovery
 clarification (Merge-Gate Recovery Decision).
 
 **The verbatim-quote check.** hashd checks only that the quote is present in
-the failing output exactly as the judge's prompt showed it
+the failing output hashd captured, whole: the output the prompt shows whole
+within the prompt section ceiling, or beyond it the capture its excerpt names
+for the judge to search, never the framing the excerpt adds
 (`adjudicate.EvaluateRetryRequest`): the quote is trimmed of surrounding
 whitespace and the rest must appear as is, with no case folding and no
 whitespace or line-ending normalization. hashd never interprets the quote or
 classifies the failure. It refuses a request for one of four reasons: no
 re-run was offered on this call; the request carries no quote; the quote is
-empty once trimmed; the quote does not appear verbatim in the output the judge
-was shown. A refused request is the final CANT_TELL: the question opens and
+empty once trimmed; the quote does not appear verbatim in the captured
+output. A refused request is the final CANT_TELL: the question opens and
 says why, with the judge's quote verbatim when it gave one. A request honored
 while another ruling claimed the same allowance first is refused the same way.
 
@@ -3261,10 +4123,10 @@ ruling and the re-run -- the cycle stamps `rerun_test` or `rerun_build` and
 runs the failing command once more under the test stage's activity bound
 (`test_timeout`). It repeats the failed run exactly: the same argv (the fast
 check's or the full check's, an automatic FIX's required verification, or the
-build's), the fast check's touched-file list, the same `exec.env`, at the same
-head. No fetch, rebase, implement call, edit or staging runs before it, and a
+build's), the fast check's touched-file list, the same project environment, at
+the same head. No fetch, rebase, implement call, edit or staging runs before it, and a
 test re-run runs no build or pre-commit hook; a moved head or a changed
-`exec.env` refuses it. The re-run's whole output is kept as its own
+project environment refuses it. The re-run's whole output is kept as its own
 `test_output` record and its result as a `gate_rerun_result` timeline row
 (`PASSED`, `FAILED` or `TIMED_OUT`, with the head and a link to that record);
 the first run's record stays as it was. The result routes as the command's own:
@@ -3377,7 +4239,7 @@ call failed is the failed stop the test-conflict section describes, titled
 The build judge has the same two CANT_TELL forms as the test judge, under the
 same offer rule, verbatim-quote check and refusals, with the `build` gate's
 own allowance per branch head; its claim failure, re-run (`rerun_build`, the
-build's argv and `exec.env` at the same head), timeline rows and routing are
+build's argv and project environment at the same head), timeline rows and routing are
 the test-conflict section's. A failed build re-run goes straight back to this
 judge, past the signature guard: `FIXABLE` takes the one directed retry, and
 `CANT_TELL` opens the question with both outputs.
@@ -3438,8 +4300,22 @@ requirements. Two mechanisms hold that boundary:
 
 Divergent findings across rounds — the reviewer finding NEW things — are
 the loop's own convergence space: they run the full `max_review_attempts`
-budget and park at the human gate on exhaustion. No judge is summoned for
-novelty.
+budget and park at the human gate on exhaustion. The exception is a finding
+the reviewer tags `against: plan`: the code does what the description says
+and the description is wrong, so retrying the implementer cannot converge.
+A rejecting review carrying one goes to the review judge on that finding's
+first appearance, before the implementer is retried, while the micro-commit's
+intervention is unspent, whether or not its blocker set repeats the previous
+reject (a plan-tagged nit can ride a repeated set). At the attempt ceiling
+the call reserves one more attempt, as the implementer-objection call does,
+so the judge's directed retry still runs. The call records the attempts it
+left its verdict, so a run resuming at that judge continues as the original
+would have. The judge sees each finding's tags as evidence; its verdict
+routes as for a repeated blocker set. Once the intervention is spent
+the reject takes the spent park below. A sub-threshold (soft-retry) approve
+carrying the tag keeps its improvement round and asks no judge. The trigger
+lives only in this per-commit loop: plan-tagged findings from the
+whole-branch final review still land at `final_review_with_concerns`.
 
 #### Review-Conflict Escalation (deadlock → adjudicate → human)
 
@@ -3470,15 +4346,27 @@ deadlock comparison.
 ```text
 review reject
      │
-     ├─ findings DIFFER from the previous reject ─► the loop's own convergence space:
-     │        retry with feedback until max_review_attempts, then human gate
-     │        (no judge for novelty; after a judged retry, any reject is terminal
-     │         at the human gate)
+     ├─ judge already spent on this micro-commit (its durable intervention,
+     │  in this run or an earlier one) ─► human gate naming the story, the
+     │  micro-commit and every blocking finding still unresolved, new or repeated
      │
-     └─ blocking finding set REPEATS the previous reject (deadlock)
-              │
-              ├─ judge already spent (reviewJudged), or no budget left
-              │        ─► human gate ("unresolved blocker set repeated")
+     ├─ a finding tagged `against: plan` (its first appearance, repeated set
+     │  or not; at the attempt ceiling too, reserving
+     │  the directed retry) ────────────────────────────────────► [one intervention]
+     │
+     ├─ blocking finding set REPEATS the previous reject (deadlock)
+     │        ├─ no budget left ─► human gate ("unresolved blocker set repeated")
+     │        └─ budget left ──────────────────────────────────► [one intervention]
+     │
+     └─ findings DIFFER, none tagged `against: plan` ─► the loop's own convergence
+              space: retry with feedback until max_review_attempts, then human gate
+
+implement stop declaring review_decline (implementer objection, judge unspent;
+at the attempt ceiling too, reserving the directed retry) ───────► [one intervention]
+
+[one intervention]: the micro-commit's single durable review-judge intervention
+(review_judge_interventions), shared by all three triggers -- whichever reaches
+the judge first spends it for the other two
               │
               └─► adjudicate (review kind, read-only judge)
                     │
@@ -3495,15 +4383,31 @@ review reject
                     │
                     ├─ CANT_TELL, every mode ─► judge CANT_TELL question (human)
                     │
+                    ├─ REQUIREMENTS_CONFLICT | ARCHITECTURAL_DECISION ─► escalation question
+                    │    (see "Requirements / architectural escalation" below)
+                    │
+                    ├─ PLAN_DEFECT ─► verdict gate at the agent-stop landing offering
+                    │    only re-plan from the rewind commit and reject (see "Verdict gates")
+                    │    ├─ an approved replan already acted on this micro-commit's
+                    │    │  gate of this kind ─► replan.not_converged (no replan offered)
+                    │    └─ the workstream's three approved replans taken
+                    │       ─► replan.convergence_warning (no replan offered)
+                    │
+                    ├─ AC_CONFLICT | RULING_DEFECT | RULING_CONFLICT
+                    │    ─► verdict gate at the agent-stop landing (see "Verdict gates")
+                    │
                     └─ other activity error ──► human gate (fail closed: a judge
                                                 we can't run can't bless a retry)
 ```
 
 The review judge (`prompts/review_adjudicate.md`, verdicts `CARRY` /
-`CANT_TELL` / `REQUIREMENTS_CONFLICT` / `ARCHITECTURAL_DECISION` — the
-last two covered under "Requirements / architectural escalation" below)
+`CANT_TELL` / `REQUIREMENTS_CONFLICT` / `ARCHITECTURAL_DECISION` — those
+two covered under "Requirements / architectural escalation" below — and
+the verdict gates `PLAN_DEFECT` / `AC_CONFLICT` / `RULING_DEFECT` /
+`RULING_CONFLICT`, covered under "Verdict gates")
 reads the per-round finding history (each round's verdict,
-confidence, and findings with severities) plus the current branch diff and
+confidence, and findings with severities and the reviewer's `against` and
+`class` tags) plus the current branch diff and
 the story requirement, and rules which findings a competent reviewer would
 genuinely insist on versus which are churn. `CARRY` returns that closed
 list in `reason`; `CANT_TELL` (same literal as the other spaces, so the
@@ -3524,11 +4428,37 @@ narrow: (a) whether each carried finding was resolved, and (b) breakage
 this round's own diff introduced — never a fresh audit. That reframe is
 why it is a distinct prompt rather than the resume round: the deadlocked
 session already failed to converge, so the judged retry gets a bounded
-rubric instead. The one-shot budget is a `reviewJudged` bool on the cycle
-state (reviews carry no signature to key on, unlike the build ladder);
-once it is set, a reject OR a sub-threshold (soft-retry) approve on the
-judged round is terminal at the human gate rather than buying more
-rounds.
+rubric instead.
+
+The one-shot budget is one durable intervention per workstream and
+micro-commit (`review_judge_interventions`), not cycle state: reviews
+carry no signature to key on, unlike the build ladder. A judge ruling
+spends it: a `CARRY`, or a `CANT_TELL` or escalation question. A failed
+judge call, a deadline, an activity retry, and the judge-failure resume
+completing the same call do not. Nothing restores it: not a retry, resume
+or regenerate of the micro-commit, a new run, answering the judge's
+question, an operator reject with guidance, a full or partial replan, or a
+reset. Only deleting the workstream removes it. The select stage reads it
+for the micro-commit it picks, and a partial breakdown for the micro-commit
+it re-selects, so every cycle and run sees it, and each micro-commit has its
+own. A `CARRY`, or the question that spent it, is recorded with it: an
+activity retry of the ruling call whose completion was lost, or the
+judge-failure resume of that stopped call, continues that verdict or waits on
+that question without asking the judge again. The continuing call keeps the
+holding call's judge-input record on its run (a resume records the stopped
+one as its own), so a stop before its completion lands resumes the same
+ruling.
+
+Once it is spent the judge is not asked again on that micro-commit. A
+reject, whether its blockers repeat or are new, parks at the review gate,
+where approve ships the current diff and reject re-implements with the
+operator's guidance. The reason's first line, which `gate_reason` keeps,
+leads with the story id and names the micro-commit; every blocking finding
+of the rejecting review follows whole on the park's blocked event and the
+review stage note. A sub-threshold (soft-retry) approve parks at the human
+gate rather than buying more rounds. An implementer objection takes the implement stop
+without a judge call, and an auto-skipped implement still goes through
+test and review.
 
 A review judge whose agent call failed is the failed stop the test-conflict
 section describes, titled `The review judge could not run: <reason>`. It never
@@ -3559,11 +4489,13 @@ Decision contract, in order (`prompts/review_adjudicate.md`):
 2. First attempt one honest reading that satisfies every standing finding
    → **`CARRY`**: the judge resolves technical conflicts itself; it does
    not escalate a disagreement it can settle.
-3. If none exists → an escalation verdict, **proof required**: quote both
-   colliding constraints verbatim and name each source (AC text, commit
-   instruction, template copy, prior ruling). A verdict whose proof is
-   incomplete (fewer than two sourced constraints, fewer than two options,
-   or no question) is downgraded to `CANT_TELL` — the fail-closed net.
+3. If none exists → walk up the authority hierarchy (see "Verdict gates")
+   and rule an escalation or verdict-gate verdict, **proof required**:
+   quote both colliding constraints verbatim and name each source (AC
+   text, commit instruction, template copy, prior ruling, or `code`, a
+   worktree path). A verdict whose proof is incomplete (fewer than two
+   sourced constraints, fewer than two options, or no question) is
+   downgraded to `CANT_TELL` — the fail-closed net.
 
 On either escalation verdict the run **parks immediately at the human
 gate in every autonomy mode** (no further FIX rounds), via the existing
@@ -3591,6 +4523,325 @@ escalation verdict (REQUIREMENTS_CONFLICT | ARCHITECTURAL_DECISION)
           └─► open blocking clarification (plain-language question + evidence),
               park at the human gate — ALL autonomy modes, no rounds 4/5
 ```
+
+##### Verdict gates: the judge names the level that is wrong
+
+Seen from the code, every defect reads as "the code contradicts the
+description". The review judge walks up the authority hierarchy (code →
+micro-commit description → acceptance criterion → prior operator ruling)
+and, when the code holds, names the level that does not. Each such verdict
+is a **verdict gate**: a hard stop at the agent-stop landing (`landStop`,
+`StatusStopHumanGate`), in every autonomy mode, never a blocked
+clarification. The ruling spends the micro-commit's one intervention like
+any other.
+
+```text
+review judge verdict       record row kind          route
+──────────────────────     ─────────────────────    ──────────────────────────────────────────────
+PLAN_DEFECT            ──► plan_defect          ──► adjudicate.plan_defect     ──► agent-stop landing
+                                                    (or a convergence stop, see "Replan convergence")
+AC_CONFLICT            ──► ac_conflict          ──► adjudicate.ac_conflict     ──► agent-stop landing
+RULING_DEFECT          ──► ruling_defect        ──► adjudicate.ruling_defect   ──► agent-stop landing
+RULING_CONFLICT        ──► ruling_conflict      ──► adjudicate.ruling_conflict ──► agent-stop landing
+
+REQUIREMENTS_CONFLICT  ──► requirements_conflict ─► blocked clarification ──► answer ──► AC amendment
+ARCHITECTURAL_DECISION ──► question             ──► blocked clarification ──► answer ──► guidance
+```
+
+The judge walks in a fixed order, comparing siblings at each level, and
+names the lowest level that contradicts while its parent holds; a level
+that faithfully follows a wrong parent holds:
+
+```text
+code         the diff against this micro-commit's description
+  │
+description  against the code, itself, the criteria its `Criteria:` line names,
+  │          and the sibling micro-commits' descriptions
+  │
+criterion    each criterion against the code, its sibling criteria, and its
+  │          parent ruling through derived-from (`criterion_rulings`)
+  │
+ruling       each ruling against the code, itself and its sibling rulings;
+             a criterion with no provenance has no ruling above it
+
+lowest level wrong                        verdict
+────────────────────────────────────      ─────────────────────
+a description (any of its four errors) ─► PLAN_DEFECT
+one criterion                          ─► AC_CONFLICT
+two criteria against each other        ─► REQUIREMENTS_CONFLICT
+one ruling                             ─► RULING_DEFECT
+two rulings against each other         ─► RULING_CONFLICT
+```
+
+A verdict gate carries the escalation proof and its **walk record**: one
+step per check, `{"level", "reference", "finding", "note"}`, the level one
+of `code` / `description` / `criterion` / `ruling`, the reference the
+micro-commit, criterion or ruling id checked, the finding `holds` or
+`contradicts`. A `PLAN_DEFECT` also names `defective_microcommit_id` and
+`defective_criterion_ids` (possibly empty). The stage admits it
+(`reviewAdjudicationResult`, `server/internal/stages/adjudicate`) only
+when, reading the judge's structured output alone -- never the worktree,
+never the quoted text:
+
+```text
+verdict gate
+     │
+     ├─ proof incomplete (reason, question, ≥2 options, ≥2 sourced
+     │  constraints) ────────────────────────────────────────────────────┐
+     ├─ walk missing, out of order, or skipping a level ─────────────────┤
+     ├─ named level not contradicting (two rulings for RULING_CONFLICT;  │
+     │  the named micro-commit for PLAN_DEFECT) ─────────────────────────┤
+     ├─ a level below it not holding ────────────────────────────────────┼─► CANT_TELL
+     ├─ its parent unchecked or contradicting (for a contradicted        │   (fail-closed net)
+     │  criterion: any ruling it derives from; for a PLAN_DEFECT: any    │
+     │  criterion it names) ─────────────────────────────────────────────┤
+     ├─ a `no ruling above` ruling step for a criterion that has         │
+     │  derived-from rulings, or for no criterion of the chain ──────────┤
+     ├─ PLAN_DEFECT naming a micro-commit not in the live plan, or a     │
+     │  criterion not among the live criteria ───────────────────────────┘
+     │
+     └─ admitted ─► question fenced like an escalation's (one re-author, then
+                    a generic question naming the level, offered with the
+                    gate's two verbs as its options) ─► the driver below
+```
+
+A contradicted criterion's parent is its own: every ruling it derives from
+is checked and holds; a holding ruling of another criterion does not count.
+Likewise every criterion a PLAN_DEFECT names is checked and holds, at the
+stage and again where the gate's record is written.
+For a criterion no ruling derives from, the parent check is met by a
+ruling step that names the criterion as its reference, holds, and carries
+the note `no ruling above`.
+
+The driver keeps the verdict → kind → code table beside it
+(`runflow/adjudicatedriver.go`) and writes a gate only for a run whose
+pinned stop routing lands one (`AgentStopLanding`); a run pinned before it
+asks a person as a CANT_TELL instead. A record is admitted only with the
+escalation proof (a question, two or more options, two or more sourced
+constraints) and a walk showing the named level is the lowest one wrong:
+every level below it checked and holding, the level itself contradicting,
+and the level above it checked and holding (a ruling has none above). What the workflow lands is the
+server's own reading of the record holding the micro-commit's intervention
+(`runflow.HeldVerdictGate`), never the stage's report of it, and it routes
+on that stop's failure code, its class and retry policy from the failure
+catalogue: terminal with no retry lands the stop. The record row is
+non-blocking and answered by no one: its question and options are the
+judge's, and its data keeps the judge's verdict, reason and lean, the
+constraints quoted verbatim with their sources, the walk it took (each
+level, the reference checked, holds or contradicts, a note), and for
+`PLAN_DEFECT` the micro-commit and the criteria it names, credentials
+redacted, as is the judge reply it links. The clarification reads serve it
+and show the evidence rendered from the typed record. It stands while the
+workstream is parked at its gate, the parked stop naming it: no answer is taken on the workstream
+then, no question attention or question alert is raised for the record,
+and it holds no question alert standing (the park's own state change is
+the gate's), and every surface says the gate resolves it. Every exit from
+the gate -- approve, reject, replan, reset or close, with the run parked
+or its workflow gone -- supersedes the record the park stood on (the one
+its stop Diagnostic names) in the exit transition itself, beside the
+park's run row, with the record's event, published only once that
+transaction commits; so the continued run's own questions are answerable.
+The gate's verbs that leave the workstream parked (skip, edit commit, add
+commit, feedback; a PLAN_DEFECT gate withholds them, see "The PLAN_DEFECT
+gate" below) are acting at the gate too: each supersedes the same record
+in its own write, beside its CAS, with the record's event published once it
+commits. The record keeps the operator's gate action, the verb's trigger, as
+`superseded_by_gate`.
+Leaving any other gate resolves no verdict record: an owed record of
+another micro-commit stays owed. A live approve or reject commits the
+run row's reopen in that same transaction. A refused orphan continuation
+restores the gate, its record and the park's run row in one transaction.
+
+A record whose gate never formed -- the park failed, or the run stopped
+after the record was written -- is **owed**, not retired: it holds the
+micro-commit's spent intervention, so retiring it would let the next
+rejection park as an ordinary review gate whose approve ships the diff.
+The micro-commit's next run lands the owed gate from the record at select,
+before any work. Until then the record takes no answer of its own and
+holds no other question. A reset leaves it too: it is of the requirements,
+not the discarded work, and a reset from the gate retires it in the exit
+transition, so a reset that fails before the move leaves the gate whole.
+
+The stop's Diagnostic is titled with the level found wrong and its
+reference (the micro-commit, the criterion id, the ruling id); its
+explanation is the contradiction the judge found. At an `AC_CONFLICT`,
+`RULING_DEFECT` or `RULING_CONFLICT` gate the actions are the agent-stop
+verbs: approve re-runs the micro-commit once a person has changed that
+level, reject re-runs it with guidance. A `PLAN_DEFECT` gate offers only its
+two actions (below). The park's reason leads with the story's current
+label. Nothing rewrites a criterion or ruling, and nothing starts a
+derivation or replan by itself. An activity retry whose completion was lost
+lands the same gate again from the held row.
+
+While a `plan_defect` record stands at its gate, the workstream detail read
+and the snapshot serve its **rewind point** as `plan_defect_gate`
+(`plan.PlanDefectRewind`, read from the current plan's `Criteria:` lines and
+the record's micro-commit and criteria); an owed record serves none:
+
+```text
+rewind commit   the earliest commit in plan order whose `Criteria:` names a
+                criterion the judge named, or the defective commit if that
+                comes earlier; with no criteria named, the defective commit
+full replan     the rewind commit is the plan's first selectable commit
+discarded       the rewind commit and every later one, id and whole title,
+                by the partial replan's own rule (`plan.Rewound`)
+
+limitation      criteria named, and a commit up to and including the
+                defective one has no `Criteria:` line ─┐
+                the defective commit's line is         ├─► no rewind commit,
+                `Criteria: none (<reason>)` ───────────┘   no fallback: a
+                                                            sentence naming
+                                                            that commit
+```
+
+The asymmetry is deliberate: a `REQUIREMENTS_CONFLICT` answer enters the
+acceptance-criteria amendment workflow below, while an `AC_CONFLICT` is a
+hard stop with no amendment path. The criterion is changed by a person,
+outside the run, before approve.
+
+###### The PLAN_DEFECT gate: re-plan or retry
+
+While a `plan_defect` record stands at its gate, the gate offers exactly two
+actions (a convergence stop offers no replan, see "Replan convergence" below), on the existing replan and reject routes, and withholds the verbs
+that would carry the work on against the description the judge found wrong.
+One predicate (`reqs.ParkedPlanDefect`) decides both the rows in
+`available_actions` and the endpoints' refusals:
+
+```text
+PLAN_DEFECT gate (awaiting_human_review, its plan_defect record standing)
+     │
+     ├─ replan ── "Re-plan from COMMIT-xxx" (not at a convergence stop)
+     │              ──► partial replan from the rewind
+     │              commit, discarding it and every later commit
+     │              (the rewind commit is the plan's first ─► the note says it
+     │              is a full replan)
+     │              (limitation ─► "Re-plan from a commit you choose", the
+     │              limitation sentence as the row's note)
+     │
+     ├─ reject ── "Judge is wrong – retry with guidance" ──► re-run the
+     │              micro-commit with the guidance
+     │
+     ├─ withheld: approve, skip, edit commit, add commit, feedback
+     │              row: unavailable, its reason naming the two actions
+     │              endpoint: 409 `verdict_gate.plan_defect`, nothing changed;
+     │              skip, edit commit, add commit and feedback refuse again
+     │              inside their own write transaction
+     │
+     └─ unchanged: close, reset, pause, the clarification rows
+```
+
+The ordinary stop's next steps, and those of an answer refused at the gate,
+are the same two actions (`runflow.PlanDefectNextSteps`, from the rewind the landing
+derives from the plan): `hashd replan <ws> --project <project> --from-commit
+<rewind commit>`, which lists what it discards and asks to confirm, and
+reject with guidance. Under the limitation the replan names a `<COMMIT-ID>`
+placeholder and the explanation adds the limitation sentence and that the
+operator chooses the commit.
+
+A replan run while the record stands, from any commit, records the gate it
+acted on on its approved-replan record (see "Approved-replan record"):
+`replan_gate_microcommit_id`, the micro-commit the record names by plan ID,
+and `replan_gate_kind` `plan_defect`. The row's `microcommit_id` stays NULL,
+so its feedback stays workstream-wide guidance. The exit transition that
+supersedes the record (`replan`) also sets the two facts as the workstream's
+pending replan gate, in the same transaction, and the approved-replan record
+takes and clears them. A replan whose record fails after that exit therefore
+still names the gate when its re-run, no longer at the gate, writes the
+record. Any other exit from the gate, a reset or a run dispatch clears it:
+each supersedes that re-run, so a later replan acting on no gate never
+inherits it. A run whose start the engine refuses ran nothing, and its
+rollback puts the pending gate back. A replan with no gate standing, including one where the record is
+only owed, records neither, and records written before this change read NULL.
+
+The verdict record reaches the regenerating breakdown. The run dispatch
+reads the pending approved-replan record's gate and loads the workstream's
+newest `plan_defect` record naming that micro-commit and resolved by
+`replan`. The run carries the record to the breakdown, a full one and a
+partial replan's regeneration alike. The breakdown shows it whole: the
+judge's reason, its lean, the constraints quoted with their sources, the walk
+and the criteria the record names. It appears in its own section labelled as
+the review judge's verdict (`include_breakdown_judge_verdict.md`), apart from
+the operator's REPLAN GUIDANCE or regeneration feedback. The operator's
+feedback row keeps exactly their text. The verdict is spent with the replan
+it rode on: a retired replan's breakdown runs without it. A newer replan
+acting on no gate also carries none. Nothing cuts the record. The agent's
+declared prompt input limit (`prompt_input_limit_chars`) is measured on the
+whole prompt before launch, so an oversized one is refused with the
+`agent.prompt_too_large` Diagnostic rather than sent in part.
+
+The gate waits for a person. It has no leave-parked action: every verb that
+would act while staying parked is withheld, so the workstream stays at
+`awaiting_human_review` until someone re-plans, rejects, resets or closes.
+Nothing acts at it automatically in any autonomy mode: the agent-stop
+landing parks in every mode without consulting the gate decision, and no
+autonomy path approves a stop.
+
+###### Replan convergence: two limits on approved replans
+
+Approved replans can loop: the regenerated plan fails the same way, the
+judge proposes again, and each round discards landed work. Two limits bound
+it (CLQ-129..132). Both are derived on read from the workstream's
+approved-replan records (`runflow.LoadReplanConvergence`, see
+"Approved-replan record"); nothing else is stored, no setting changes them,
+and rows from before approved replans were recorded count toward neither.
+Both are independent of the merge gate's one automatic FIX per story: that
+allowance counts neither, and neither counts it.
+
+```text
+limit            counts                                     keyed on
+───────────────  ─────────────────────────────────────────  ──────────────────────────────
+per micro-commit approved replans that acted on a gate      the defective micro-commit the
+                 (replan_gate_microcommit_id + _kind)       record names, by plan ID, and
+                 -- one is allowed                          the gate kind, matched per kind
+workstream-wide  every approved replan, of any origin or    the workstream
+                 gate kind -- three are allowed
+```
+
+The per-commit limit is keyed on the micro-commit the plan_defect record
+names, not on the micro-commit whose judge ruled: a micro-commit's spent
+judge intervention survives a replan, so a repeat proposal comes from a
+later commit's judge naming a commit an earlier approved replan acted on
+(the judge rules COMMIT-3 defective, the operator rewinds from COMMIT-2,
+and after regeneration COMMIT-5's judge names COMMIT-3 again). It matches
+the plan ID, so a regenerated commit reusing the ID matches. A replan that
+acted on no gate counts only toward the workstream limit. Today only
+PLAN_DEFECT gates propose a replan, so `plan_defect` is the one kind the
+per-commit limit sees; it is counted per recorded kind.
+
+The server rebuilds the stop the workflow lands from the record
+(`runflow.HeldVerdictGate`), so both landing paths -- the judge's report and
+an owed record at select -- read the limits there:
+
+```text
+PLAN_DEFECT verdict gate rebuilt from its record
+     │
+     ├─ an approved replan acted on this micro-commit's gate of this kind
+     │    ─► replan.not_converged          (checked first: wins when both hold)
+     ├─ the workstream's approved replans reached the workstream limit
+     │    ─► replan.convergence_warning
+     └─ neither ─► adjudicate.plan_defect (the ordinary gate, unchanged)
+```
+
+Both codes are terminal with no retry, so either stop lands at the
+agent-stop landing (`StatusStopHumanGate`) in every autonomy mode: it never
+retries, abandons or continues the run. The plan_defect record still
+stands, so the gate withholds the same verbs, and the micro-commit's spent
+judge intervention is untouched. The stop's title leads with the
+workstream's story ID and says to reject the micro-commit with guidance
+instead of replanning. Its explanation says the plan has not converged,
+naming the micro-commit the judge found defective again (or after the
+approved replans), and adds every approved replan, oldest first: the
+micro-commit it rewound from, or a full replan, and when it was approved.
+Neither names a count, limit or allowance as its reason. Its next steps are
+the workstream read and reject with guidance; it offers no `--from-commit` replan.
+
+This partial replan always needs a person, while the test-conflict partial
+breakdown may apply unattended in gatekeeper and autonomous modes. The
+partial breakdown only rewrites the uncommitted tail's tasks against
+requirements it cannot reach, and never touches committed work. The
+PLAN_DEFECT rewind can discard landed commits, and rests on the judge's claim
+that a description is wrong. Accepting that claim, or overruling it with
+reject, is the decision the gate exists for.
 
 ##### The answer amends the acceptance criteria (REQUIREMENTS_CONFLICT only)
 
@@ -3650,18 +4901,6 @@ endpoint, so no new command and no new REST surface:
 
 Only story acceptance criteria change; SPEC.md and REQS.md are untouched.
 
-While the amendment decision is open -- the ruling awaited, the deriver
-working out the change, the `ac_edit_proposal` awaiting approve or decline,
-or the confirmed amendment's apply in flight -- a requirements edit of the
-story is withheld: the workstream's `start_requirements_edit`, and with it the
-story's `start_edit`, fail `no_open_question_for_requirements_edit` naming
-what is open and how it settles, and are offered again once it settles. The
-edit and the amendment would otherwise change the same criteria at once, and
-the edit's landing would close the confirmed amendment as superseded. The
-amendment is never superseded or cancelled to make room for the edit.
-`add_commit` and `add_fix_commit` are not gated by it (see **Requirements
-edit of an implementing story**).
-
 ```text
 answer requirements_conflict clarification (the ruling)
      │
@@ -3712,6 +4951,10 @@ The build and review fallback lists omit the test-only choice. Historical
 pending questions retain exactly their stored command choices; any saved
 judge suggestions are unnumbered context, labelled as such by the server.
 CLI, TUI and Web number the same stored list used to resolve the answer.
+A `hashd run` pick saved on a question blocking a FIX bound undone to the
+story's merge-gate record keeps a plain `hashd run` offered from a merge-ready
+or PR state while that FIX stays undone, so a hand-off the answered run's
+select refused can be run again in place (Merge-gate recovery).
 
 **What the question shows.** The headline names the test, build or review
 failure. The body (`runflow.EscalationEvidence`) carries:
@@ -3765,7 +5008,7 @@ hashd answer <ws> "<pick>[: note]"  or  answer by clarification id
 
 The workstream answer and the answer by clarification id (CLI, TUI, Web, bot)
 both take it this way: the by-id route takes the project lifecycle lock,
-admission and the workstream's owner guard, then runs the same pick and
+admission and the linked story's owner guard, then runs the same pick and
 command. Neither saves the answer without its command, and a command's own
 guards and refusals apply as when it is run by hand. A run that resumes a
 held run instead of starting one does not carry the answer: it is not saved,
@@ -3825,8 +5068,9 @@ stage's time-bound kills land here:
   human-decision route. Judge failures remain failures, not rulings.
   A declared stop with neither a question nor a valid decline receives one
   automatic continuation: continue the same work or ask in the question
-  format. Workflow replay and activity retries do not replenish it. Another
-  such stop parks, leading with the implementer's own reason and retaining
+  format. Workflow replay and activity retries do not replenish it, and it is
+  the cycle's only one: a turn that made no changes (below) spends the same
+  continuation. Another such stop parks, leading with the implementer's own reason and retaining
   the full explanation in record details. Existing park actions re-run the
   same micro-commit, optionally with guidance; they do not commit stopped work.
 - **The exhausted implement ladder** — the session resume missed, the
@@ -3856,7 +5100,7 @@ stage's time-bound kills land here:
   including a micro-commit the next cycle selects because the stopped
   one was skipped at the park. The waiver crosses continue-as-new and
   orphan recovery (the run row's `stop_origin` and `microcommit_id`,
-  below); `hashd run --override-oscillation` is unchanged. Histories recorded before this
+  below). Histories recorded before this
   landing replay their old blocked exit.
 - **The build judge's three human-gate exits** — the same compiler
   failure repeated and the build-conflict judge was called in:
@@ -3922,7 +5166,8 @@ stage's time-bound kills land here:
   (the all-complete leg, not the cycle) stopped on what an agent itself
   produced:
   - the story's one automatic FIX failed: generation errored, did not
-    produce exactly one valid FIX, or produced one the bind admission
+    produce exactly one valid FIX (an answer its parse rejects is asked
+    for once more, as the breakdown's is, before it counts), or produced one the bind admission
     refused (`Merge-gate automatic FIX generation failed`, `... did not
     produce one valid FIX`, `Merge-gate automatic FIX was not bound`).
     The body opens with one line naming the verdict, what failed and
@@ -3955,7 +5200,7 @@ stage's time-bound kills land here:
   gate announces no blocked of its own for these (the park is the one
   announcement), still writes its `merge_gate_result` and
   `fix_generation_result` rows, clears the `merge_gate` stamp so the
-  `no_active_runner` verbs pass, applies no merge-gate exit state, and
+  `no_active_work` verbs pass, applies no merge-gate exit state, and
   hands the stop back to the run loop, which parks it with `stop_origin =
   merge_gate`. Every micro-commit is done there, so **approve re-runs the
   merge gate unchanged**: a plain continue, whose next cycle implements a
@@ -4059,7 +5304,7 @@ errors, interrupts and recognized network/provider failures remain failures.
 Transcript-wide token matching can conservatively classify a quoted error as
 a fault and miss this park; see [classification details and limitations](docs/AGENT_MANAGEMENT.md#agent-stop-classification).
 
-The FSM's `no_active_runner` verbs do survive all of those exits — each
+The FSM's `no_active_work` verbs do survive all of those exits — each
 clears `runner_stage` — but the two things the stop calls for do not: the
 gate verbs that answer it, and a durable record of why it stopped beyond
 the agent's own free text in a log.
@@ -4085,7 +5330,7 @@ same decision, and **not** the same approve:
   emits and patches the run row. The deregister is the cycle's own exit
   (`finishPreserving` with `preserveStage=false` → `DeregisterRunner`),
   the same thing the exit this landing replaced did. It stays
-  load-bearing: `runner_stage` is what the FSM's `no_active_runner`
+  load-bearing: `runner_stage` is what the FSM's `no_active_work`
   guard reads, so preserving it here would withhold `skip` /
   `edit_commit` / `add_commit` (self-transitions at
   `awaiting_human_review`) at the very stop that needs them.
@@ -4114,6 +5359,18 @@ back empty — so it never reaches the classification arm, never sets
 `StopAtHumanGate`, and ends the run `failed` at `implementing` with a
 `FailureHelp` naming `hashd reject`, which `available_actions` does not
 offer there. This is a current mismatch between recorded advice and admitted actions.
+Before it ends the run, such a turn takes the cycle's one automatic
+continuation, the questionless stop's (above): the stage reports the outcome as
+`MadeNoChanges`, never by its title, and the workflow resumes the same session
+once with `include_implement_no_change_continuation.md`: the turn ended before
+the change was made, finish the task, and do not end the turn while a command
+it started is still running. The stage boundary between the two turns is
+unchanged: its settle waits for commands the first turn left running and ends
+none, and if they outlast the stage's deadline that failure stands and nothing
+continues. The second turn runs under the stage's own deadline. Unchanged
+again, the run fails as above. Nothing about the agent's name or words decides
+it, and the paths that send an unchanged tree on to verification (ruled
+repairs, commit repairs, CARRY) never reach it.
 
 The park writes the record in the one write that blocks the run row, and
 it has three parts, plus a fourth on the concern-triage stop:
@@ -4201,7 +5458,7 @@ an unavailable sidecar cannot establish that an execution is orphaned.
 | Approve | Signal the parked run to implement the next undone commit; do not approve the stopped diff for commit | Dispatch implementation with the stop-kind semantics; restore the gate and blocked run only if dispatch was definitely refused |
 | Reject with feedback | Signal feedback to implementation and persist it for the same commit's reviewer | Forward feedback in the new run input and persist it for that commit's reviewer; restore the gate and blocked run only on a definite dispatch refusal |
 | Reject with explicit reset | Discard staged, unstaged and untracked changes back to HEAD before resuming; retain committed work | Validate and perform the same reset before recording the decision or changing state; refuse an unavailable worktree or in-progress merge/rebase before mutation |
-| Approve / reject at a merge-gate stop | Approve signals the parked run to re-run the merge gate unchanged. Reject appends one FIX carrying the feedback, even after add-commit, then signals; refuse findings selection (`--findings-file`, `--include-forge`), `--reset` and empty feedback before mutation; write no guidance row, the FIX carries it | Approve dispatches a plain run that re-runs the gate. Reject appends the same one FIX, then dispatches a plain run; the same refusals; no guidance row |
+| Approve / reject at a merge-gate stop | Approve signals the parked run to re-run the merge gate unchanged. Reject appends one FIX carrying the feedback, even after add-commit, then signals; refuse findings selection (`--findings-file`, `--include-forge`, `--no-local-findings`, `--no-forge-findings`, `--exclude-finding`), `--reset` and empty feedback before mutation; write no guidance row, the FIX carries it | Approve dispatches a plain run that re-runs the gate. Reject appends the same one FIX, then dispatches a plain run; the same refusals; no guidance row |
 | Skip / edit-commit / add-commit | Preserve the gate and worktree; the subsequent decision selects the next undone commit from the amended plan | Same plan semantics; the subsequent decision dispatches a new workflow |
 | Reset | Confirm closure, re-validate, reset to baseline and retain the reset plan; await explicit run | Confirm absence, then the same reset |
 | Replan | Confirm closure, re-validate, reset to baseline and story skeleton; await explicit run | Confirm absence, then the same preparation |
@@ -4270,15 +5527,21 @@ gate signal at all — the signal carries only the approve/reject
 synchronously: cancel `run:{project}:{ws}`, wait until Temporal reports
 that exact run closed, re-validate the row, reset the worktree to the
 baseline, write the story skeleton over the plan, and delete the
-discarded plan's reviews. The parked run row is retired by the move back
+discarded plan's reviews. A partial replan (`from_commit` past the plan's
+first micro-commit) instead rewinds to before its boundary, keeps the plan
+with the boundary and every later commit unmarked, and deletes the
+rewound commits' reviews and every whole-branch final verdict (those with no
+micro-commit id); the kept commits' reviews survive. The parked run row is retired by the move back
 to `active` rather than by the verb (see below) — that row is a
 `blocked` record of a run nothing can resume now, and left standing it
 would keep `hashd show` reading `active / blocked` with the discarded
 plan's `gate_reason`. The plan itself is
-**not** regenerated there; it regenerates when the operator runs the
+**not** regenerated there; a full replan's regenerates when the operator runs the
 `hashd run` the endpoint's reply asks for, which picks the replan
 guidance up as `replan_feedback`. That two-command shape is the
-contract, not a shortfall.
+contract, not a shortfall. A partial replan's tail regenerates on that same
+run: its breakdown re-derives the boundary and every later entry behind the
+kept prefix, with the replan feedback, before anything is implemented.
 
 Two things end at a replan and they are not the same thing: the
 workstream's **stage** moves to `active` (an FSM transition), and the
@@ -4304,8 +5567,8 @@ requests already accepted may still take effect.
 and `gate_reason`. `fsm.ClearBlockedRunOnExit` retires it on every exit from
 `awaiting_human_review`, including reset, replan and close, and on reopening a
 workstream closed while parked. New verbs inherit retirement through their
-transition. Self-transitions (`skip`, `edit_commit`, `add_commit`,
-`resolve_oscillation`) never call it because the gate remains open.
+transition. Self-transitions (`skip`, `edit_commit`, `add_commit`) never call it
+because the gate remains open.
 
 Approve/reject safely reach it through either recovery path. Signal-based
 recovery resumes the same run; `reopenRunAfterGateResume` has already
@@ -4330,7 +5593,10 @@ is therefore a refusal, not a shrug — a cancel the sidecar rejects, or
 one it accepts but nothing honours, fails with the run still open and
 the worktree, plan, session, runner state, status and guidance
 untouched, and says which of the two happened, because an accepted
-cancel stays pending on that run. Retry the same `hashd replan`.
+cancel stays pending on that run. Retry the same `hashd replan`; a partial
+replan re-runs `hashd replan <ws> --project <p> --from-commit <commit>` (its feedback
+read from a file holding the exact text), as the refusal names, since a plain
+`hashd replan` would discard the prefix it keeps.
 
 A server with **no sidecar connection at all must refuse recovery**.
 Unavailable Temporal is not confirmed workflow closure: executions
@@ -4352,8 +5618,12 @@ Revalidation does not read the branch's live fork point.
 `resetWorktreeToBase` owns that read and shares it with `/reset`, so its
 refusal cannot name a run; the caller adds the same closed-run note.
 
-A failure after reset reports that the worktree is already at baseline and
-points to an idempotent retry. Guidance is the only append-only step; retries
+A failure after reset reports where the worktree now stands and points to an
+idempotent retry: a full replan's is already at baseline; a partial replan's is
+already rewound to just before its boundary, with the earlier micro-commits'
+code kept, and its retry is `hashd replan <ws> --project <p> --from-commit <commit>`
+(its feedback read from a file holding the exact text; the raw `POST` only for
+an ops-root request, which the command cannot repeat). Guidance is the only append-only step; retries
 skip text already pending rather than adding a duplicate for later breakdown.
 
 Cycle exit `stop_human_gate`, park core `runflow.ParkStopForHumanReview`,
@@ -4368,6 +5638,7 @@ stateDiagram-v2
     PARKED --> IMPLEMENTING : approve (re-implement, commits nothing)
     PARKED --> IMPLEMENTING : reject (re-implement with the ruling)
     PARKED --> ACTIVE : replan (closes the run, resets to baseline; plan regenerates on the next hashd run)
+    PARKED --> ACTIVE : partial replan (closes the run, rewinds to before from_commit; plan kept, tail unmarked)
     PARKED --> ACTIVE : reset (closes the run, resets to baseline; plan kept)
     PARKED --> PARKED_RUN_CLOSED : run workflow closes (cancel / unrecognized action)
     PARKED_RUN_CLOSED --> IMPLEMENTING : approve, no workflow to signal (park_kind decides)
@@ -4496,7 +5767,7 @@ Stages without sub-FSM (light operator-decision stages):
 - `active`, `awaiting_human_review`, `ready_to_merge`, `final_review_with_concerns`, `merge_test_failed`, `pr_open`, `pr_approved`
 - Terminal: `merged`, `closed`, `closed_no_changes`
 
-`drafting`, `draft`, `editing`, and `accepted` are story-lifecycle stages, not workstream stages, so they are intentionally outside the workstream model here.
+`drafting`, `draft`, `editing`, and `approved` are story-lifecycle stages, not workstream stages, so they are intentionally outside the workstream model here.
 
 Sub-FSM transitions are **code-driven**, not operator-driven. Macro FSM transitions are operator-driven (or auto-fire on macro-stage completion). Both layers have validated transitions.
 
@@ -4514,11 +5785,13 @@ ready_to_merge / idle                  — approved, waiting for operator merge
 merged / done                          — terminal
 ```
 
+`hashd list`, the TUI and the Web name the running sub-stage in parentheses the same way while a lane runs -- `Implementing / Running (lint)`, `Implementing / Running (test)` -- and a pause, a wait or an unexpired transitional status takes its place. `merge_test_failed` reads "Merge Gate Failed": a lint failure and a test failure at the merge gate both land there, and the failure's title names which (`Merge gate lint failed`, `Merge gate tests failed`).
+
 #### Timeouts
 
 The bounds below are the substage slice of the whole set; **Deadline inventory** under the Execution Model enumerates every bound that stops work while it runs or holds a failure back before it is reported, with the setting that moves each one.
 
-Substage timeouts have one effective settings source. Stages with an in-process primary timeout use `stages.<name>.timeout`, resolved by `defaults.yaml < system config < project config`; housekeeping derives their failsafe threshold as the effective `stages.<name>.timeout` plus `stagetimeout.OrphanReapMarginSeconds` (one housekeeping sweep interval). Runner-only substages live in `runner_stages.<name>.timeout`, resolved by the same `defaults.yaml < system config < project config` layers. Those keys are absent from the settings schema, so the config-set and settings path refuses them; they are set by editing the system or project config.yaml (see **Commit supervision** below). Each runner-only entry is one of:
+Substage timeouts have one effective settings source. Stages with an in-process primary timeout use `stages.<name>.timeout`, resolved by `defaults.yaml < system config < project config`; housekeeping derives their failsafe threshold as the effective `stages.<name>.timeout` plus `stagetimeout.OrphanReapMarginSeconds` (one housekeeping sweep interval). Runner-only substages live in `runner_stages.<name>.timeout`, resolved by the same `defaults.yaml < system config < project config` layers. Like `stages.<name>.timeout`, the timeout of each substage the shipped table declares is set with `hashd project config set runner_stages.<name>.timeout <value>` (or `hashd config set` for the system layer) and cleared with the matching `reset`; the write accepts seconds or a duration (stored as whole seconds, rounded up), 0 or `NA` (stored as 0), or `config`, and refuses anything else. A value already written in either config.yaml reads and resets the same way. Each runner-only entry is one of:
 
 - A duration string: `"300s"`, `"10m"`, `"1h"` — see `server/internal/duration`.
 - `"NA"` — no timeout (idle / operator-paced / pure-logic substages); housekeeping skips entirely.
@@ -4535,6 +5808,7 @@ Substage timeouts have one effective settings source. Stages with an in-process 
 | `concern_triage` | `stages.concern_triage.timeout + 300s` | derived failsafe; default value is 120s |
 | `implement` | `stages.implement.timeout + 300s` | derived failsafe; default value is 1200s |
 | `test` | config + 300s | `test_timeout` plus failsafe margin |
+| `lint` | the `test` row | the lint stage's stamp has no row of its own and is reaped at the `test` threshold, margin included |
 | `adjudicate` | config | `test_timeout`, no failsafe margin |
 | `adjudicate_test`, `adjudicate_build`, `adjudicate_review` | the `adjudicate` row | each judge's stamp has no row of its own and is reaped at the `adjudicate` threshold |
 | `rerun_test`, `rerun_build` | the `test` row | a judge-requested re-run's stamp has no row of its own and is reaped at the `test` threshold, margin included |
@@ -4544,6 +5818,7 @@ Substage timeouts have one effective settings source. Stages with an in-process 
 | `commit` | `runner_stages.commit.timeout` (default 120s) | one budget for staging, commit hooks, bookkeeping and optional publication |
 | `merge_gate` | config + 300s | `test_timeout` plus failsafe margin |
 | `merge_gate_rerun` | the `merge_gate` row | a judge-requested re-run of a merge-gate verification has no row of its own and is reaped at the `merge_gate` threshold, margin included |
+| `merge_gate_lint` | the `merge_gate` row | the merge gate's lint check has no row of its own and is reaped at the `merge_gate` threshold, margin included |
 | `final_review` | `max(stages.final_review.timeout, ReviewFloorSeconds) + 300s` | stage default 1200s; the 3600s review floor makes the default failsafe 3900s |
 
 **Commit supervision.** Each new cycle snapshots
@@ -4561,9 +5836,11 @@ bound and housekeeping skips the substage. Commit has no unbounded fallback:
 without an in-process budget it still stops at the fixed 180s activity limit,
 reported against the cycle's options rather than a setting the operator can
 raise. `ResolveCommitStageTimeout` rejects `NA`, empty and non-positive
-values with a Diagnostic naming the key. It is the only reader and validation
-point because `runner_stages.*` is absent from the settings schema and must
-be set by editing config.yaml. Unlimited-duration supervision is unsupported.
+values with a Diagnostic naming the key. The key is set with
+`hashd project config set runner_stages.commit.timeout <value>` (or
+`hashd config set`) and cleared with the matching `reset`; that write accepts a
+duration, 0 or `NA`, or `config`, the grammar every `runner_stages` row
+takes. Unlimited-duration supervision is unsupported.
 
 Git commands run in their own process group. Cancellation sends SIGTERM; the existing five-second pipe/shutdown allowance bounds waiting, and remaining group members receive SIGKILL on exit. This preserves hooks and user files; no lock is removed. Captured commit-failure output is redacted and retained in the existing story/run transcript before cancellation is propagated. These are ordinary cancellation and process-group cleanup guarantees, not proof of complete cleanup after server death or of ownership of deliberately detached children. Interrupted attribution recovery remains a separate contract.
 
@@ -4663,8 +5940,10 @@ namespace retention the outer bound. A run the OPEN pass terminated gets the
 ordinary `run_closed_externally` outcome, its reason the engine's terminate
 event's (`engine janitor: pending cancel was never honored`), never the
 `engine_cleanup` row's, recorded quietly when the workstream is `merged`,
-`closed` or `closed_no_changes`. Absent workstreams have no candidates and
-other families are not evaluated; their deletes are unchanged. For
+`closed` or `closed_no_changes`. Absent workstreams, and workstreams whose
+story is `closed_by_person` or `abandoned`, have no candidates: their `run:`
+deletes proceed with no outcome recorded, a run the OPEN pass terminated
+included. Other families are not evaluated; their deletes are unchanged. For
 stories, OPEN covers only `implemented`/`abandoned`; CLOSED also covers
 `draft_failed`. A live `edit:`/`plan:` on a failed draft may be resubmitted
 recovery waiting for the PM slot. Closed edit history can be pruned because its
@@ -4739,10 +6018,11 @@ in one place. The lock covers the re-read and the claim only; Git, model and
 forge work happen outside it.
 
 A guard protecting work in flight belongs on every edge that would disturb that
-work, not only on the edge that starts it. `no_active_publish` therefore sits on
-the edges that leave a publication-open state as well as on `create_pr`, and
-`no_active_merge` protects merge admission and the exits that would disturb an
-existing merge. A newly admitted PR merge enters `merging` before dispatch; its
+work, not only on the edge that starts it. `no_active_work` therefore sits on
+every operator edge that would disturb running work -- the edges that leave a
+publication-open state as well as `create_pr`, merge admission and the exits
+that would disturb an existing merge, and the structural verbs -- once per
+edge. A newly admitted PR merge enters `merging` before dispatch; its
 input preserves the prior PR route, not a second permission to start work.
 
 Work that is dispatched but not yet a state change holds a short-lived claim
@@ -4765,8 +6045,8 @@ or merge is wedged still has a route out.
 | Operation | Current effect and boundary |
 |---|---|
 | Approve / reject | Decide at the human gate. An agent-stop approval retries implementation; it does not approve the stopped diff for commit. Review rejection carries selected findings and authoritative human guidance. |
-| Approve / reject at a merge-gate stop | Approve re-runs the merge gate. Reject always appends one FIX carrying the operator's feedback; findings selection (`--findings-file`, `--include-forge`) and `--reset` are refused, and no guidance row is written. |
-| Reset / replan | Structural operations: respect busy guards, confirm closure of a parked execution, re-validate, then reset to baseline. Reset retains the plan; replan regenerates on the next explicit run. |
+| Approve / reject at a merge-gate stop | Approve re-runs the merge gate. Reject always appends one FIX carrying the operator's feedback; findings selection (`--findings-file`, `--include-forge`, `--no-local-findings`, `--no-forge-findings`, `--exclude-finding`) and `--reset` are refused, and no guidance row is written. |
+| Reset / replan | Structural operations: respect busy guards, confirm closure of a parked execution, re-validate, then reset to baseline. Reset retains the plan; replan regenerates on the next explicit run. A partial replan (`from_commit`) rewinds to before its boundary instead, keeps the earlier commits and the plan with the tail unmarked, and the next explicit run regenerates the boundary and every later entry. |
 | Run / retry | Resume eligible work under its current state and evidence. A human gate requires approve/reject rather than a new run; retry does not bypass a pending decision. |
 | Answer | Record the human ruling and follow the entity's clarification continuation. Answer persistence and dispatch ordering are specified under [Questions and Answers](#questions-and-answers) and [Question & Answer Commands](#question--answer-commands). |
 | Rebase | The rebasing stage: rebase the story's branch onto the base it recorded on a working branch, on its runner, and land it pushed with lease first when origin has it. Offered only while no step runs; at its conflict, AI resolve, Go (from a fix by hand) or cancel; see **Rebase** below. |
@@ -4792,11 +6072,18 @@ story's branch onto the base branch the story recorded when it started --
 `base_branch`, never the project's current default -- on whichever runner
 holds the story; the local runner and a remote one run the same `story_rebase`
 stage. It is its own stage, `rebasing`, entered by `start_rebase` from
-`active`, `implementing`, `ready_to_merge`, `final_review_with_concerns`,
-`merge_test_failed`, `pr_open` and `pr_approved` under `no_active_runner` (so
-an implementing story only while it is blocked, failed or idle),
-`no_active_publish`, `no_active_merge`, `worktree_exists` and
-`has_recorded_base`, and left by the `rebase_return_*` row to the state it was
+`implementing`, `ready_to_merge`, `final_review_with_concerns`,
+`merge_test_failed`, `pr_open` and `pr_approved` under `no_active_work` (so
+an implementing story only while it is blocked, failed or idle, and no
+publish or merge is running), `worktree_exists` and `has_recorded_base`. From `implementing`, `no_unfinished_implementation` also
+requires a boundary between micro-commits: a retained implementation attempt,
+including a restored checkpoint without a commit body, refuses until its plan
+step is done. Reconciliation keeps that attempt marker through verification,
+review and publication. The
+Diagnostic names the attempt and offers Run to finish it, or
+`hashd reject --reset` to discard it: the reset reads the same attempt,
+restored or not, and with none to discard it says so. `active` has no rebase edge.
+The stage is left by the `rebase_return_*` row to the state it was
 admitted from, landed or undone, PR or not -- to `pr_open` instead only when
 it landed on an approved PR (`pr_approved`), whose approval the rebased head
 makes stale, as a pr push withdraws it. Every other state is refused with
@@ -4807,22 +6094,30 @@ forge_autocomplete PR's auto-merge is withdrawn before the stage is entered.
 
 - The rebase runs on the story branch in its existing runner-owned checkout,
   preserving setup artifacts and its code-index identity. Before changing
-  anything it saves the original tip and staged/whole trees under
-  `refs/hashd-rebase/<workstream>/`. Staged changes and remaining nonignored
-  work are carried as up to two hashd-made commits marked `Hashd-Carried-Work:`.
-  These use plumbing (no commit hooks), are never published, and are kept
-  through replay with `--empty=keep --reapply-cherry-picks`. Unsupported sparse,
-  submodule, filter and lossy conversion cases are refused before carrying;
-  ignored paths that the fetched base would overwrite are protected before
-  replay. Symlinks, file modes and staged/unstaged distinctions are preserved.
-  Git replay and accepted conflict resolutions decide carried content. Path
-  differences never refuse landing: the outcome lists all added, dropped and
-  changed paths in each carried layer. When anything differs, original trees
-  stay in a uniquely named `snapshots/` ref group until story closure, with a
-  concrete `git restore` command for recoverable original files. Otherwise the
-  refs are forgotten after the server acknowledges landing. Retained snapshots
-  do not count as an unfinished rebase.
-- A conflict with build-owned paths only is healed: with carried work, each
+  anything it records the original tip under `refs/hashd-rebase/<workstream>/`.
+  Uncommitted work -- staged, unstaged and untracked nonignored files -- then
+  becomes one hashd-made WIP commit on the story branch, marked
+  `Hashd-Carried-Work: wip`, recorded as a `carry_uncommitted` commit intent
+  and as the `wip` ref, before replay. It uses plumbing (no commit hooks) and
+  is never pushed. A clean checkout makes no WIP commit. Unsupported sparse,
+  submodule, filter and lossy conversion cases, and a staged change whose
+  file is back at the tip (the WIP commit of the files would lose it), are refused before
+  anything changes; ignored paths that the fetched base would overwrite are protected
+  before replay. The rebase replays commits only, with Git's own defaults: a
+  WIP commit whose content the base already holds is dropped like any other
+  emptied commit. Git replay and accepted conflict resolutions decide the
+  WIP commit's content. The refs are forgotten after the server acknowledges
+  landing.
+- A completed conflict resolution whose push is refused only because the base
+  moved is kept, including carried uncommitted work. Its recorded base follows
+  the landing, and a fresh rebase continues through the same admission and gates.
+  At most ten consecutive refusals continue; the eleventh keeps the work and
+  stops for a person. AI-resolved work uses the existing AI conflict path on the
+  successor; a hand-resolved conflict still waits for a person. A known ordinary
+  push refusal retains the existing undo behavior. An uncertain push keeps its
+  evidence for recovery, which never pushes. The server accepts the landing,
+  return state, continuation ordinal and notice together before active refs go.
+- A conflict with build-owned paths only is healed: with a WIP commit, each
   takes the base's copy and nothing is regenerated -- the next commit
   regenerates them, behind the merge gate's drift check; without, as a
   publish heals. Any other conflict stops the stage, waiting: git's rebase is
@@ -4831,24 +6126,48 @@ forge_autocomplete PR's auto-merge is withdrawn before the stage is entered.
   TUI `G`, Web "go": `rebase_continue`) -- refused, naming them, while a
   conflicted path is unmerged or holds a conflict marker -- or resolve it with
   the conflict agent (`hashd rebase <story> --ai-resolve`, TUI `i`, Web "AI
-  resolve": `rebase_resolve`), which works from that stop, is told which
-  commits carry uncommitted work and must keep them as they are, and
-  regenerates nothing. A later commit that conflicts stops again. A resolution
-  that does not keep every carried commit, in order, at the tip is refused,
-  and so is one that committed conflict markers -- however the rebase was
-  continued, by hashd, by the agent or by hand -- which puts the rebase back
-  at its first conflict.
-- Landing saves the rebased carry tip, pushes only its committed parent with
-  the original remote lease, then atomically moves the local branch and records
-  that move. It restores the rebased staged index while keeping the files Git
-  replayed, returning the carry to uncommitted work. The discard is recorded as
-  `carry_uncommitted_unwind`. Landing refuses later external edits rather than
-  overwriting them. Durable checkpoints let retries finish an interrupted
-  landing, and a `landed` ref survives until the workflow records the new base
-  and acknowledges the outcome.
+  resolve": `rebase_resolve`). The agent resolves cross-file integration changes, stages the work, and
+  continues the rebase to completion. With uncommitted work it keeps the WIP
+  commit as the last commit, alone, and leaves regeneration to the next normal
+  commit. Failed or interrupted AI resolutions abort the rebase. An AI retry
+  replays the rebase's input tip (the WIP commit, or the original tip) onto the
+  recorded base instead of restoring an intermediate stop; failed attempt edits
+  are discarded. The recovery refs keep the story's original committed and
+  uncommitted work.
+  A later commit that conflicts stops again. Conflict markers are refused, and
+  landing refuses a WIP commit the resolution did not keep at the tip.
+  Manual continuation remains supported and its resulting history is verified
+  before landing.
+  A rebase hashd starts itself to continue an AI resolve whose push the base
+  moved under (see the resolve's publication-failure exit) does not wait on a
+  conflict: each one is recorded and taken to the conflict agent at once, as
+  `rebase_resolve` would, after the same hold boundary ("before resolving a
+  rebase conflict"). A resolution that cannot complete, or leaves conflicts
+  standing, waits for the operator as above.
+- Landing finds the WIP commit by its trailer among the rebased commits: at the
+  tip, or absent when replay dropped it -- accepted only when following the
+  replay pairs every rebased commit with an authored pick, through clean picks
+  and stops hashd continued (its own continue or the build-owned heal's,
+  or a stop it went on from with nothing to commit), and either the rebased
+  tip already holds the recorded WIP commit's change or hashd went on from the
+  WIP commit's own stop at the tip with nothing to commit (its accepted
+  resolution, the base's build-owned copies included). A missing trailer
+  alone proves no drop: a commit hook, a reword or a squash also loses it. A trailer commit below the tip, more than
+  one, or an unproven drop refuses the landing without changing anything. Landing pushes
+  only the WIP commit's parent, the rebased branch, with the original remote
+  lease; the WIP commit is never pushed. It then soft-resets the WIP commit:
+  one ref transaction moves the local branch to the rebased tip and records
+  that move, touching neither index nor files, so the work comes back staged
+  with its files unchanged. The soft reset is recorded as
+  `carry_uncommitted_unwind`. Durable checkpoints let retries finish an
+  interrupted landing, and a `landed` ref survives until the workflow records
+  the new base and acknowledges the outcome.
 - Undo (`hashd cancel <story>`, TUI `x`, Web "cancel rebase") aborts the owned
-  Git rebase and restores the original branch tip and both uncommitted layers
-  from refs. After confirmed publication or local landing, undo finishes landing
+  Git rebase and restores the pre-rebase tip with the work uncommitted: the
+  checkout's files and index are put back to the WIP commit's tree (no write
+  when the branch still stands on the WIP commit), and the branch moves back
+  to its original tip, recorded as `carry_uncommitted_unwind` when a WIP commit
+  was made, leaving the work staged. After confirmed publication or local landing, undo finishes landing
   instead; it never reverses the remote branch. An uncertain push keeps all
   recovery refs and stops until origin confirms the old or proposed tip.
   Recovery accepts known restoration checkpoints; unknown later edits are kept
@@ -4858,15 +6177,53 @@ forge_autocomplete PR's auto-merge is withdrawn before the stage is entered.
   detached Git rebase or an interrupted branch movement on the same runner.
   A landing whose new base the server has not recorded still stops other stages
   with `rebase.landing.unrecorded`. Explicit workspace rebuilds remove active
-  operation refs, while closure cleanup releases retained snapshots. Old-format
-  scratch operations must be completed or cancelled with their original version;
-  they are refused without mutation after upgrade.
+  operation refs, while closure cleanup releases retained resolution
+  checkpoints. Old-format operations -- a scratch branch, or the earlier
+  layered carry's records -- must be completed or cancelled with their original
+  version; they are refused without mutation after upgrade.
 - Each rebase records a `story_rebase` transformation (SPEC.md), and a landing
   moves `base_sha` to the commit it rebased onto, only from the value it was
   dispatched with. The final review is not current afterwards, and the tests
   run again on the next run.
 - The ops root's move (M029) and the local runner's storage move (M030) each
   count a story at `rebasing` as open work, its workflow open or gone.
+- A story at `rebasing` is not moved to another runner, nor rebuilt in place by a confirmed move to its own runner, until its rebase is published or cancelled: until it lands, the rebased branch and any conflict resolution exist only in its checkout on its current runner. The move (`hashd story runner set`, TUI `p`, Web `runner…`) is refused `placement.rebase_unpublished` and changes nothing; its help names how to publish (wait for a running rebase to land, `hashd rebase <story> --ai-resolve`, Go after a fix by hand, or the continuing action its standing record names) or cancel (`hashd cancel <story>`).
+- A story not at `rebasing` whose base-moved rebase resolution is kept on its current placement (an outstanding `refused_base_moved` landing with `continue_with: rebase`, not yet `fulfilled` or discarded, recorded on its current runner and placement epoch) is refused `placement.confirm_discard` on an unconfirmed move to another runner (`confirm_discard` / `-y` not set). The refusal is judged under the move's write lock right after the `rebasing` check and changes nothing; its help names "Rebase again" (`hashd rebase <story> -y`) to keep the resolution and continue from it on that runner when connected, or a confirmed move to another runner (`hashd story runner set <story> <runner> --yes`) to discard it. An unconfirmed move to the runner the story is already on stays a no-op; a confirmed move to that same runner is refused `placement.rebase_same_runner` under the same write lock and changes nothing (placement, epoch, checkout, landing record and standing stop stay untouched, and no placement event is recorded), because a move to the runner the story is already on rebuilds nothing and cannot discard the resolution there, with help to keep it via "Rebase again" (`hashd rebase <story> -y`) or discard it by moving to another runner with `--yes`. Only a confirmed move to another runner discards the kept resolution and retires its landing record in the same write transaction, never as a publication, and records a `story_rebase` `discarded` (`operation_discarded`) notice in that transaction (published after commit) that replaces the base-moved stop and names the full resolved commit and the runner it was on, so a later `hashd rebase` starts fresh from the destination's checkout and later publications do not mark the discarded record `fulfilled`.
+
+Story-rebase outcomes on the standing record (`story_rebase` operation
+results, read as **Stopped-operation records** describes):
+
+| Outcome | Stands | Error or notice | Replaced or retired by |
+|---|---|---|---|
+| Landing: `succeeded` carrying the landing's facts (`operation_landed`) | from the landing's acceptance, at the state the story returned to; where the rebase recorded a stop after that acceptance -- its reply lost, or a cancel -- the undo that finishes the landing records it again, declaring no second code change, so the landing stands over that stop | notice, stating the full base commit it landed onto, whether it was pushed, whether its carried uncommitted work was restored, every generated file that kept the base's copy, and the base-moved continuations before it | a newer `story_rebase` row other than a publication's confirmation; a newer declared code change (classed `invalidated_by: code_change`), never its own, recorded with it |
+| Returned refused, failed or unresolved rebase: `failed`, with its refusal's own source where it has one | from the stop, recorded again by the return once the rebase is undone, so it stands at the state the story returned to | error, stating why it stopped, that the story is back at that state with its branch and uncommitted work as they were before the rebase, and `hashd rebase <story> -y` unless its own help names that; every help line, explanation, output tail and Diagnostic it recorded is kept | a newer `story_rebase` row; a newer `succeeded` row of any operation |
+| Returned refused landing: `failed` | from the landing step's refusal, recorded again by the return | as the returned rebase | as the returned rebase |
+| Returned push refused for a reason other than the base moving: `failed` | from the push's refusal, recorded again by the return | as the returned rebase | as the returned rebase |
+| Returned interruption: `failed`, "rebase was interrupted before completing" | from the workflow's ending, recorded again by the return | as the returned rebase, the interruption its explanation | as the returned rebase |
+| Returned cancel: `cancelled` (`operation_cancelled`), "rebase was cancelled before completing" | from the person's cancel -- `hashd cancel <story>`, TUI `x`, Web "cancel rebase", one while the rebase waits on a conflict included, or a close that ends the rebase first -- at `rebasing` while the rebase is undone, then recorded again by the return, so it stands at the state the story returned to; a continuation rebase's cancel leaves the unlanded stop in its place | notice, stating that the rebase was cancelled, that the story is back at that state with its branch and uncommitted work as they were before the rebase, and `hashd rebase <story> -y` | a newer `story_rebase` row; never another operation's success, which sweeps faults only |
+| Discarded on placement move: `discarded` (`operation_discarded`) | from a confirmed placement move to another runner that discarded a kept base-moved rebase resolution, written in the move's transaction and published after commit so it replaces the base-moved stop | notice, stating that the move discarded the resolved rebase and naming the full resolved commit and the runner it was on | a newer `story_rebase` row; never another operation's success, which sweeps faults only |
+| Conflict waiting: `failed`, the conflict's record | while the rebase waits on a conflict for Go or AI resolve, the story at `rebasing` | error, naming the conflict and how to take it on | a newer `story_rebase` row, such as the next conflict's, the landing, or the stop that ends the rebase |
+| Undo failed: `failed`, `rebase.undo.failed` | from an undo that failed on the runner, the story kept at `rebasing` | error, with `hashd cancel <story>`, which runs the undo again | a newer `story_rebase` row: the landing an undo finishes, or, once the story returns, the stop that ended the rebase, recorded again -- or, with none beneath it, a `returned` row, which reaches neither surface; a newer `succeeded` row of any operation |
+| Landing not recorded: `failed`, `rebase.landing.unaccepted` | from a landing the server did not accept, the story kept at `rebasing` | error, with `hashd cancel <story>`, which finishes recording it | as the failed undo |
+| Return refused: `failed`, `rebase.return.refused` | from an undone rebase whose return was refused, the story kept at `rebasing` | error, with `hashd cancel <story>`, which returns it | as the failed undo |
+| Continuing: `continuing` (`operation_continuing`) | from a base-moved refusal of the landing's push, the 10th in a row at most, while hashd continues with a fresh rebase from the kept revision | notice | a newer `story_rebase` row, such as the continuation's landing, its stop or the publication's confirmation; a newer declared code change (classed `invalidated_by: code_change`), such as the continuation's own publication |
+| Limit stop: `failed`, `rebase.push.base_moved_limit` | from the 11th base-moved refusal in a row, once the story has returned, with nothing continuing it | error | a newer `story_rebase` row, such as the "publication was confirmed" row once another operation's publication fulfills the series; a newer `succeeded` row of any operation |
+| Unstarted stop: `failed`, `rebase.push.base_moved_unstarted` | from a continuation recorded and never confirmed started | error | as the limit stop |
+| Unlanded stop: `failed`, `rebase.base_moved_unlanded` | from a continuation rebase that left rebasing without landing -- undone, cancelled or refused -- recorded by the leave in place of the rebase's own returned stop, whose reason it names, so it alone stands at the state the story returned to | error | as the limit stop |
+| Publication confirmed: `succeeded`, "The resolved branch's publication was confirmed", marked `publication_confirmed` | never: it is not an outcome of its own. It is recorded when another operation's publication -- a push, or parity that pushed nothing -- fulfills the series' refusals | neither; it still counts as a success for the sweep | not applicable. It replaces no landing, of its series or another; any other older `story_rebase` row it replaces as a newer row does, which is how a continuing notice retires when the publication declared no code change |
+
+The stop that ends an unlanded rebase stands once the story is back: the
+return records it again, passing over the records about the rebasing stage
+(a failed undo, a landing not recorded, a refused return), so a cancel after
+one of those leaves the rebase's own stop standing, not that record. Where only
+such records stand, the return retires them with a `returned` row, which
+reaches neither surface, so no generic record of the return stands. A
+continuation rebase's own stop gives way to the unlanded stop, which names it.
+
+A landing that publishes fulfills every outstanding refusal in its own write
+without recording a confirmation under `story_rebase`. A landing that publishes
+nothing leaves its series' refusals owed, so a later publication's confirmation
+can follow it; the landing still stands.
 
 Workstream removal deletes its reviews, guidance, events, transcripts, runs,
 usage, commit records, clarifications and conversations with its row; close and
@@ -4899,12 +6256,13 @@ stateDiagram-v2
     [*] --> active
     active --> implementing : hashd run
 
+    implementing --> implementing : start_impl (internal)
     implementing --> awaiting_human_review : await_review
     implementing --> active : impl_complete (all commits done handled separately)
     implementing --> merge_conflicts : rebase_conflict
 
     awaiting_human_review --> active : reject (iterate)
-    awaiting_human_review --> implementing : resume_impl (approve, more commits)
+    awaiting_human_review --> implementing : start_impl (approve, more commits)
     awaiting_human_review --> ready_to_merge : all_commits_done
 
     active --> ready_to_merge : all_commits_done
@@ -4916,6 +6274,7 @@ stateDiagram-v2
     final_review_with_concerns --> active : address_concerns (fix commit)
     final_review_with_concerns --> merge_conflicts : rebase_conflict
 
+    ready_to_merge --> active : add_commit
     ready_to_merge --> merging : hashd merge (local)
     ready_to_merge --> pr_open : hashd pr create (pr mode)
     final_review_with_concerns --> merging : hashd merge
@@ -4943,7 +6302,7 @@ stateDiagram-v2
     pr_open --> merge_test_failed : post_rebase_test_failed
     pr_approved --> merge_test_failed : post_rebase_test_failed
 
-    merge_test_failed --> active : add_fix_commit
+    merge_test_failed --> active : add_fix_commit / add_commit
     merge_test_failed --> merging : hashd merge
     merge_test_failed --> resolving : start_resolve (AI semantic-break fix)
     merge_test_failed --> closed : hashd close
@@ -4970,6 +6329,8 @@ stateDiagram-v2
 ```
 
 **Legend:** [STATE] = FSM macro stage. Substages (implement, test, review, etc.) run within `implementing` and are tracked via the substage / sub-FSM model — they're persisted (via `runner_stage`) and surfaced alongside the macro stage in operator displays. See **Workstream State Model** above.
+
+Select fires `start_impl` every time it hands out a micro-commit, after any bound-FIX hand-off. The contract allows it from `active` and `awaiting_human_review` into `implementing` (with its `state_changed`) and from `implementing` as an internal self-row that records nothing; from any other state the table refuses it, and the run fails at select with a `select_outcome` refusal naming the state, recording no `mc_selected` row and starting no implementer.
 
 **Terminal stages:** `merged` (code landed; archive may still be working),
 `closed` (hashd close), `closed_no_changes` (hashd close --no-changes, from
@@ -5051,126 +6412,142 @@ stateDiagram-v2
 
 ### story
 
-**States:** `abandoned`, `accepted`, `arc_proposal`, `closed_by_person`, `draft`, `draft_failed`, `drafting`, `editing`, `implemented`, `implementing`, `pending`, `queued`, `requirements_edit_draft`, `requirements_editing`
+**States:** `abandoned`, `abandoning`, `approved`, `arc_proposal`, `closed_by_person`, `draft`, `draft_failed`, `drafting`, `editing`, `implemented`, `implementing`, `pending`, `queued`
 
 ```mermaid
 stateDiagram-v2
-    accepted --> abandoned : abandon
-    accepted --> closed_by_person : close_by_person
-    accepted --> implemented : complete_arc
-    accepted --> arc_proposal : request_arc_proposal
-    accepted --> editing : start_edit
-    accepted --> implementing : start_impl
-    accepted --> draft : unapprove
-    arc_proposal --> accepted : approve_arc_proposal
-    arc_proposal --> accepted : cancel_arc_proposal
+    abandoning --> abandoned : abandon
+    approved --> abandoned : abandon
+    approved --> abandoning : begin_abandon
+    approved --> closed_by_person : close_by_person
+    approved --> implemented : complete_arc
+    approved --> draft : replan
+    approved --> arc_proposal : request_arc_proposal
+    approved --> editing : start_edit
+    approved --> implementing : start_impl
+    approved --> draft : unapprove
+    arc_proposal --> approved : approve_arc_proposal
+    arc_proposal --> approved : cancel_arc_proposal
     arc_proposal --> draft : cancel_arc_proposal
     arc_proposal --> arc_proposal : cancel_arc_revision
-    arc_proposal --> accepted : discard_arc_proposal
+    arc_proposal --> approved : discard_arc_proposal
     arc_proposal --> draft : discard_arc_proposal
     arc_proposal --> arc_proposal : resume_arc_proposal
     arc_proposal --> arc_proposal : retry_arc_proposal
     arc_proposal --> arc_proposal : revise_arc_proposal
     draft --> abandoned : abandon
-    draft --> accepted : accept
+    draft --> approved : accept
+    draft --> abandoning : begin_abandon
     draft --> closed_by_person : close_by_person
     draft --> pending : park_for_prerequisites
     draft --> arc_proposal : request_arc_proposal
     draft --> editing : start_edit
     draft_failed --> abandoned : abandon
+    draft_failed --> abandoning : begin_abandon
     draft_failed --> closed_by_person : close_by_person
     draft_failed --> pending : park_for_prerequisites
     draft_failed --> drafting : retry
     draft_failed --> editing : start_edit
     drafting --> abandoned : abandon
+    drafting --> abandoning : begin_abandon
     drafting --> draft_failed : cancel
     drafting --> closed_by_person : close_by_person
     drafting --> draft : draft_complete
     drafting --> draft_failed : draft_fail
     drafting --> pending : wait_for_dependencies
-    editing --> accepted : cancel
+    editing --> approved : cancel
     editing --> draft : cancel
     editing --> draft_failed : cancel
+    editing --> pending : cancel
     editing --> draft_failed : draft_fail
+    editing --> pending : draft_fail
     editing --> draft : edit_complete
+    editing --> pending : edit_complete
     implementing --> abandoned : abandon
+    implementing --> abandoning : begin_abandon
     implementing --> closed_by_person : close_by_person
     implementing --> implemented : impl_complete
-    implementing --> requirements_editing : start_edit
-    implementing --> accepted : unlock
+    implementing --> draft : replan
+    implementing --> approved : unlock
     pending --> abandoned : abandon
+    pending --> abandoning : begin_abandon
     pending --> closed_by_person : close_by_person
-    pending --> accepted : force_accept
+    pending --> approved : force_accept
+    pending --> editing : start_edit
     pending --> queued : unblock
     queued --> abandoned : abandon
+    queued --> abandoning : begin_abandon
     queued --> closed_by_person : close_by_person
     queued --> draft_failed : draft_fail
     queued --> drafting : start_drafting
-    requirements_edit_draft --> implementing : accept
-    requirements_edit_draft --> implementing : decline_edit
-    requirements_edit_draft --> requirements_editing : start_edit
-    requirements_editing --> implementing : draft_fail
-    requirements_editing --> requirements_edit_draft : edit_complete
 ```
 
 | trigger | source -> dest | dispatch |
 |---|---|---|
-| `abandon` | `accepted` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
-| `close_by_person` | `accepted` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
-| `complete_arc` | `accepted` -> `implemented` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `request_arc_proposal` | `accepted` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
-| `start_edit` | `accepted` -> `editing` | system -- internal/reqs/requirements_edit.go |
-| `start_impl` | `accepted` -> `implementing` | operator -- internal/api/mutations_story_run.go, internal/mergeflow/archive.go |
-| `unapprove` | `accepted` -> `draft` | operator -- internal/api/mutations_unapprove.go |
-| `approve_arc_proposal` | `arc_proposal` -> `accepted` | system -- internal/reqs/arc_proposal.go |
-| `cancel_arc_proposal` | `arc_proposal` -> `accepted` | system -- internal/reqs/arc_proposal.go |
+| `abandon` | `abandoning` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `abandon` | `approved` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `approved` -> `abandoning` | operator -- internal/api/abandon.go |
+| `close_by_person` | `approved` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
+| `complete_arc` | `approved` -> `implemented` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `replan` | `approved` -> `draft` | operator -- internal/api/mutations_replan.go |
+| `request_arc_proposal` | `approved` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
+| `start_edit` | `approved` -> `editing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `start_impl` | `approved` -> `implementing` | operator -- internal/api/lane_planning_hold.go, internal/api/mutations_story_run.go, internal/mergeflow/archive.go |
+| `unapprove` | `approved` -> `draft` | operator -- internal/api/mutations_unapprove.go |
+| `approve_arc_proposal` | `arc_proposal` -> `approved` | system -- internal/reqs/arc_proposal.go |
+| `cancel_arc_proposal` | `arc_proposal` -> `approved` | system -- internal/reqs/arc_proposal.go |
 | `cancel_arc_proposal` | `arc_proposal` -> `draft` | system -- internal/reqs/arc_proposal.go |
 | `cancel_arc_revision` | `arc_proposal` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
-| `discard_arc_proposal` | `arc_proposal` -> `accepted` | system -- internal/reqs/arc_proposal.go |
+| `discard_arc_proposal` | `arc_proposal` -> `approved` | system -- internal/reqs/arc_proposal.go |
 | `discard_arc_proposal` | `arc_proposal` -> `draft` | system -- internal/reqs/arc_proposal.go |
 | `resume_arc_proposal` | `arc_proposal` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
 | `retry_arc_proposal` | `arc_proposal` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
 | `revise_arc_proposal` | `arc_proposal` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
 | `abandon` | `draft` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
-| `accept` | `draft` -> `accepted` | operator -- internal/api/mutations_ownership.go, internal/api/story_approve.go, internal/pm/requirements_edit.go |
+| `accept` | `draft` -> `approved` | operator -- internal/api/mutations_ownership.go, internal/api/story_approve.go |
+| `begin_abandon` | `draft` -> `abandoning` | operator -- internal/api/abandon.go |
 | `close_by_person` | `draft` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
 | `park_for_prerequisites` | `draft` -> `pending` | operator -- internal/api/story_approve.go, internal/api/story_dependencies.go |
 | `request_arc_proposal` | `draft` -> `arc_proposal` | system -- internal/reqs/arc_proposal.go |
-| `start_edit` | `draft` -> `editing` | system -- internal/reqs/requirements_edit.go |
+| `start_edit` | `draft` -> `editing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `abandon` | `draft_failed` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `draft_failed` -> `abandoning` | operator -- internal/api/abandon.go |
 | `close_by_person` | `draft_failed` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
 | `park_for_prerequisites` | `draft_failed` -> `pending` | operator -- internal/api/story_approve.go, internal/api/story_dependencies.go |
 | `retry` | `draft_failed` -> `drafting` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_edit` | `draft_failed` -> `editing` | system -- internal/reqs/requirements_edit.go |
+| `start_edit` | `draft_failed` -> `editing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `abandon` | `drafting` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `drafting` -> `abandoning` | operator -- internal/api/abandon.go |
 | `cancel` | `drafting` -> `draft_failed` | system -- internal/reqs/edit_gate.go |
 | `close_by_person` | `drafting` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
 | `draft_complete` | `drafting` -> `draft` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `draft_fail` | `drafting` -> `draft_failed` | operator -- internal/api/housekeeping.go, internal/pm/story_result.go |
+| `draft_fail` | `drafting` -> `draft_failed` | system -- internal/pm/story_result.go |
 | `wait_for_dependencies` | `drafting` -> `pending` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `cancel` | `editing` -> `accepted` | system -- internal/reqs/edit_gate.go |
+| `cancel` | `editing` -> `approved` | system -- internal/reqs/edit_gate.go |
 | `cancel` | `editing` -> `draft` | system -- internal/reqs/edit_gate.go |
 | `cancel` | `editing` -> `draft_failed` | system -- internal/reqs/edit_gate.go |
-| `draft_fail` | `editing` -> `draft_failed` | operator -- internal/api/housekeeping.go, internal/pm/story_result.go |
+| `cancel` | `editing` -> `pending` | system -- internal/reqs/edit_gate.go |
+| `draft_fail` | `editing` -> `draft_failed` | system -- internal/pm/story_result.go |
+| `draft_fail` | `editing` -> `pending` | system -- internal/pm/story_result.go |
 | `edit_complete` | `editing` -> `draft` | operator -- internal/api/housekeeping.go |
+| `edit_complete` | `editing` -> `pending` | operator -- internal/api/housekeeping.go |
 | `abandon` | `implementing` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `implementing` -> `abandoning` | operator -- internal/api/abandon.go |
 | `close_by_person` | `implementing` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
 | `impl_complete` | `implementing` -> `implemented` | system -- internal/mergeflow/archive.go |
-| `start_edit` | `implementing` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `unlock` | `implementing` -> `accepted` | operator -- internal/api/mutations_state.go |
+| `replan` | `implementing` -> `draft` | operator -- internal/api/mutations_replan.go |
+| `unlock` | `implementing` -> `approved` | operator -- internal/api/mutations_state.go |
 | `abandon` | `pending` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `pending` -> `abandoning` | operator -- internal/api/abandon.go |
 | `close_by_person` | `pending` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
-| `force_accept` | `pending` -> `accepted` | operator -- internal/api/mutations_ownership.go |
+| `force_accept` | `pending` -> `approved` | operator -- internal/api/mutations_ownership.go |
+| `start_edit` | `pending` -> `editing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `unblock` | `pending` -> `queued` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `abandon` | `queued` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
+| `begin_abandon` | `queued` -> `abandoning` | operator -- internal/api/abandon.go |
 | `close_by_person` | `queued` -> `closed_by_person` | system -- internal/mergeflow/archive.go |
-| `draft_fail` | `queued` -> `draft_failed` | operator -- internal/api/housekeeping.go, internal/pm/story_result.go |
+| `draft_fail` | `queued` -> `draft_failed` | system -- internal/pm/story_result.go |
 | `start_drafting` | `queued` -> `drafting` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `accept` | `requirements_edit_draft` -> `implementing` | operator -- internal/api/mutations_ownership.go, internal/api/story_approve.go, internal/pm/requirements_edit.go |
-| `decline_edit` | `requirements_edit_draft` -> `implementing` | system -- internal/pm/requirements_edit.go |
-| `start_edit` | `requirements_edit_draft` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `draft_fail` | `requirements_editing` -> `implementing` | operator -- internal/api/housekeeping.go, internal/pm/story_result.go |
-| `edit_complete` | `requirements_editing` -> `requirements_edit_draft` | operator -- internal/api/housekeeping.go |
 
 ### suggestion
 
@@ -5195,7 +6572,7 @@ stateDiagram-v2
 
 ### workstream
 
-**States:** `active`, `awaiting_human_review`, `closed`, `closed_no_changes`, `final_review_with_concerns`, `implementing`, `merge_conflicts`, `merge_test_failed`, `merged`, `merging`, `pr_approved`, `pr_open`, `provisioning`, `ready_to_merge`, `rebasing`, `requirements_editing`, `resolving`
+**States:** `active`, `awaiting_human_review`, `closed`, `closed_no_changes`, `final_review_with_concerns`, `implementing`, `merge_conflicts`, `merge_test_failed`, `merged`, `merging`, `pr_approved`, `pr_open`, `provisioning`, `ready_to_merge`, `rebasing`, `resolving`
 
 ```mermaid
 stateDiagram-v2
@@ -5209,11 +6586,9 @@ stateDiagram-v2
     active --> merge_conflicts : rebase_conflict
     active --> active : replan
     active --> active : reset
-    active --> active : resolve_oscillation
     active --> active : skip
     active --> implementing : start_impl
-    active --> rebasing : start_rebase
-    active --> requirements_editing : start_requirements_edit
+    active --> implementing : start_merge_gate_fix
     awaiting_human_review --> awaiting_human_review : add_commit
     awaiting_human_review --> ready_to_merge : all_commits_done
     awaiting_human_review --> active : approve
@@ -5223,14 +6598,12 @@ stateDiagram-v2
     awaiting_human_review --> active : reject
     awaiting_human_review --> active : replan
     awaiting_human_review --> active : reset
-    awaiting_human_review --> awaiting_human_review : resolve_oscillation
-    awaiting_human_review --> implementing : resume_impl
     awaiting_human_review --> awaiting_human_review : skip
+    awaiting_human_review --> implementing : start_impl
     closed --> active : reopen
     closed --> active : reset
     closed_no_changes --> active : reopen
     closed_no_changes --> active : reset
-    final_review_with_concerns --> final_review_with_concerns : add_commit
     final_review_with_concerns --> active : address_concerns
     final_review_with_concerns --> closed : close
     final_review_with_concerns --> closed_no_changes : close_no_changes
@@ -5239,27 +6612,31 @@ stateDiagram-v2
     final_review_with_concerns --> ready_to_merge : final_review_approve
     final_review_with_concerns --> merge_test_failed : post_rebase_test_failed
     final_review_with_concerns --> merge_conflicts : rebase_conflict
+    final_review_with_concerns --> active : replan
     final_review_with_concerns --> active : reset
-    final_review_with_concerns --> final_review_with_concerns : resolve_oscillation
     final_review_with_concerns --> final_review_with_concerns : skip
     final_review_with_concerns --> merging : start_merge
+    final_review_with_concerns --> implementing : start_merge_gate_fix
     final_review_with_concerns --> rebasing : start_rebase
-    final_review_with_concerns --> requirements_editing : start_requirements_edit
     implementing --> implementing : add_commit
+    implementing --> active : add_fix_commit
     implementing --> ready_to_merge : all_commits_done
     implementing --> awaiting_human_review : await_review
     implementing --> closed : close
     implementing --> closed_no_changes : close_no_changes
     implementing --> implementing : edit_commit
+    implementing --> final_review_with_concerns : final_review_concerns
+    implementing --> merged : github_merged
     implementing --> active : impl_complete
+    implementing --> pr_open : merge_gate_fix_verified
+    implementing --> ready_to_merge : merge_gate_fix_verified
     implementing --> merge_test_failed : post_rebase_test_failed
     implementing --> merge_conflicts : rebase_conflict
     implementing --> active : replan
     implementing --> active : reset
-    implementing --> implementing : resolve_oscillation
     implementing --> implementing : skip
+    implementing --> implementing : start_impl
     implementing --> rebasing : start_rebase
-    implementing --> requirements_editing : start_requirements_edit
     merge_conflicts --> merge_conflicts : add_commit
     merge_conflicts --> ready_to_merge : all_commits_done
     merge_conflicts --> closed : close
@@ -5270,11 +6647,10 @@ stateDiagram-v2
     merge_conflicts --> pr_open : push_for_pr
     merge_conflicts --> active : reset
     merge_conflicts --> active : resolve_conflicts
-    merge_conflicts --> merge_conflicts : resolve_oscillation
     merge_conflicts --> merging : retry_merge
     merge_conflicts --> merge_conflicts : skip
     merge_conflicts --> resolving : start_resolve
-    merge_test_failed --> merge_test_failed : add_commit
+    merge_test_failed --> active : add_commit
     merge_test_failed --> active : add_fix_commit
     merge_test_failed --> ready_to_merge : all_commits_done
     merge_test_failed --> closed : close
@@ -5282,9 +6658,9 @@ stateDiagram-v2
     merge_test_failed --> merge_test_failed : edit_commit
     merge_test_failed --> merge_conflicts : rebase_conflict
     merge_test_failed --> active : reset
-    merge_test_failed --> merge_test_failed : resolve_oscillation
     merge_test_failed --> merge_test_failed : skip
     merge_test_failed --> merging : start_merge
+    merge_test_failed --> implementing : start_merge_gate_fix
     merge_test_failed --> rebasing : start_rebase
     merge_test_failed --> resolving : start_resolve
     merged --> merged : start_merge
@@ -5296,62 +6672,67 @@ stateDiagram-v2
     merging --> merged : merge_success
     merging --> merge_test_failed : post_rebase_test_failed
     merging --> pr_open : push_for_pr
-    pr_approved --> pr_approved : add_commit
+    pr_approved --> active : add_fix_commit
+    pr_approved --> awaiting_human_review : await_review
     pr_approved --> closed : close
     pr_approved --> closed_no_changes : close_no_changes
     pr_approved --> pr_approved : edit_commit
     pr_approved --> merged : github_merged
+    pr_approved --> active : merge_gate_blocked
     pr_approved --> merge_test_failed : post_rebase_test_failed
     pr_approved --> pr_open : pr_approval_withdrawn
     pr_approved --> active : pr_changes_requested
     pr_approved --> awaiting_human_review : pr_closed
     pr_approved --> merge_conflicts : rebase_conflict
+    pr_approved --> active : replan
     pr_approved --> pr_approved : rerun_final_review
     pr_approved --> active : reset
-    pr_approved --> pr_approved : resolve_oscillation
     pr_approved --> pr_approved : skip
     pr_approved --> merging : start_merge
+    pr_approved --> implementing : start_merge_gate_fix
     pr_approved --> rebasing : start_rebase
-    pr_approved --> requirements_editing : start_requirements_edit
-    pr_open --> pr_open : add_commit
     pr_open --> active : add_fix_commit
+    pr_open --> awaiting_human_review : await_review
     pr_open --> closed : close
     pr_open --> closed_no_changes : close_no_changes
     pr_open --> pr_open : edit_commit
     pr_open --> merged : github_merged
+    pr_open --> active : merge_gate_blocked
     pr_open --> merge_test_failed : post_rebase_test_failed
     pr_open --> pr_approved : pr_approved
     pr_open --> active : pr_changes_requested
     pr_open --> awaiting_human_review : pr_closed
     pr_open --> merge_conflicts : rebase_conflict
+    pr_open --> active : replan
     pr_open --> pr_open : rerun_final_review
     pr_open --> active : reset
-    pr_open --> pr_open : resolve_oscillation
     pr_open --> pr_open : skip
     pr_open --> merging : start_merge
+    pr_open --> implementing : start_merge_gate_fix
     pr_open --> rebasing : start_rebase
-    pr_open --> requirements_editing : start_requirements_edit
     provisioning --> closed : close
     provisioning --> closed_no_changes : close_no_changes
     provisioning --> active : override_baseline
     provisioning --> active : provision_complete
     provisioning --> active : reset
-    ready_to_merge --> ready_to_merge : add_commit
+    ready_to_merge --> active : add_commit
     ready_to_merge --> active : add_fix_commit
+    ready_to_merge --> awaiting_human_review : await_review
     ready_to_merge --> closed : close
     ready_to_merge --> closed_no_changes : close_no_changes
     ready_to_merge --> pr_open : create_pr
     ready_to_merge --> ready_to_merge : edit_commit
     ready_to_merge --> final_review_with_concerns : final_review_concerns
+    ready_to_merge --> active : merge_gate_blocked
     ready_to_merge --> merge_test_failed : post_rebase_test_failed
     ready_to_merge --> merge_conflicts : rebase_conflict
+    ready_to_merge --> active : replan
     ready_to_merge --> ready_to_merge : rerun_final_review
     ready_to_merge --> active : reset
-    ready_to_merge --> ready_to_merge : resolve_oscillation
     ready_to_merge --> ready_to_merge : skip
     ready_to_merge --> merging : start_merge
+    ready_to_merge --> implementing : start_merge_gate_fix
     ready_to_merge --> rebasing : start_rebase
-    ready_to_merge --> requirements_editing : start_requirements_edit
     rebasing --> closed : close
     rebasing --> closed_no_changes : close_no_changes
     rebasing --> rebasing : rebase_cancel
@@ -5364,13 +6745,6 @@ stateDiagram-v2
     rebasing --> pr_approved : rebase_return_pr_approved
     rebasing --> pr_open : rebase_return_pr_open
     rebasing --> ready_to_merge : rebase_return_ready_to_merge
-    requirements_editing --> active : requirements_edit_approved
-    requirements_editing --> active : requirements_edit_restore_active
-    requirements_editing --> final_review_with_concerns : requirements_edit_restore_final_review_with_concerns
-    requirements_editing --> implementing : requirements_edit_restore_implementing
-    requirements_editing --> pr_approved : requirements_edit_restore_pr_approved
-    requirements_editing --> pr_open : requirements_edit_restore_pr_open
-    requirements_editing --> ready_to_merge : requirements_edit_restore_ready_to_merge
     resolving --> closed : close
     resolving --> closed_no_changes : close_no_changes
     resolving --> merge_conflicts : resolve_failed
@@ -5382,22 +6756,20 @@ stateDiagram-v2
 
 | trigger | source -> dest | dispatch |
 |---|---|---|
-| `add_commit` | `active` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `add_commit` | `active` -> `active` | system -- internal/reqs/add_commit.go |
 | `all_commits_done` | `active` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `await_review` | `active` -> `awaiting_human_review` | operator -- internal/api/mutations.go, internal/runflow/breakdown_records.go |
 | `close` | `active` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `active` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `edit_commit` | `active` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `post_rebase_test_failed` | `active` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `rebase_conflict` | `active` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
+| `rebase_conflict` | `active` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
 | `replan` | `active` -> `active` | operator -- internal/api/mutations_replan.go |
-| `reset` | `active` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `active` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `active` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `active` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_impl` | `active` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_rebase` | `active` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `active` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `add_commit` | `awaiting_human_review` -> `awaiting_human_review` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `start_impl` | `active` -> `implementing` | system -- internal/runflow/selectstage.go |
+| `start_merge_gate_fix` | `active` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
+| `add_commit` | `awaiting_human_review` -> `awaiting_human_review` | system -- internal/reqs/add_commit.go |
 | `all_commits_done` | `awaiting_human_review` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `approve` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations.go |
 | `close` | `awaiting_human_review` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
@@ -5405,15 +6777,13 @@ stateDiagram-v2
 | `edit_commit` | `awaiting_human_review` -> `awaiting_human_review` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `reject` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations.go |
 | `replan` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations_replan.go |
-| `reset` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `awaiting_human_review` -> `awaiting_human_review` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `resume_impl` | `awaiting_human_review` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `awaiting_human_review` -> `awaiting_human_review` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `start_impl` | `awaiting_human_review` -> `implementing` | system -- internal/runflow/selectstage.go |
 | `reopen` | `closed` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `reset` | `closed` -> `active` | operator -- internal/api/mutations_reset.go |
+| `reset` | `closed` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `reopen` | `closed_no_changes` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `reset` | `closed_no_changes` -> `active` | operator -- internal/api/mutations_reset.go |
-| `add_commit` | `final_review_with_concerns` -> `final_review_with_concerns` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `closed_no_changes` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `address_concerns` | `final_review_with_concerns` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `close` | `final_review_with_concerns` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `final_review_with_concerns` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
@@ -5421,120 +6791,128 @@ stateDiagram-v2
 | `edit_commit` | `final_review_with_concerns` -> `final_review_with_concerns` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `final_review_approve` | `final_review_with_concerns` -> `ready_to_merge` | orphaned -- no dispatcher |
 | `post_rebase_test_failed` | `final_review_with_concerns` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `rebase_conflict` | `final_review_with_concerns` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
-| `reset` | `final_review_with_concerns` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `final_review_with_concerns` -> `final_review_with_concerns` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `rebase_conflict` | `final_review_with_concerns` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
+| `replan` | `final_review_with_concerns` -> `active` | operator -- internal/api/mutations_replan.go |
+| `reset` | `final_review_with_concerns` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `final_review_with_concerns` -> `final_review_with_concerns` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_merge` | `final_review_with_concerns` -> `merging` | system -- internal/mergeflow/approved_stage.go |
+| `start_merge_gate_fix` | `final_review_with_concerns` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
 | `start_rebase` | `final_review_with_concerns` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `final_review_with_concerns` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `add_commit` | `implementing` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `add_commit` | `implementing` -> `implementing` | system -- internal/reqs/add_commit.go |
+| `add_fix_commit` | `implementing` -> `active` | system -- internal/runflow/finalreviewconcerns.go, internal/runflow/recovery_answer.go |
 | `all_commits_done` | `implementing` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `await_review` | `implementing` -> `awaiting_human_review` | operator -- internal/api/mutations.go, internal/runflow/breakdown_records.go |
 | `close` | `implementing` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `implementing` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `edit_commit` | `implementing` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `final_review_concerns` | `implementing` -> `final_review_with_concerns` | system -- internal/runflow/finalreviewconcerns.go |
+| `github_merged` | `implementing` -> `merged` | operator -- internal/api/runners/runner_stage_merge_landing.go |
 | `impl_complete` | `implementing` -> `active` | orphaned -- no dispatcher |
+| `merge_gate_fix_verified` | `implementing` -> `pr_open` | system -- internal/runflow/mergereadyreconcile.go |
+| `merge_gate_fix_verified` | `implementing` -> `ready_to_merge` | system -- internal/runflow/mergereadyreconcile.go |
 | `post_rebase_test_failed` | `implementing` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `rebase_conflict` | `implementing` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
+| `rebase_conflict` | `implementing` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
 | `replan` | `implementing` -> `active` | operator -- internal/api/mutations_replan.go |
-| `reset` | `implementing` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `implementing` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `implementing` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `implementing` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `start_impl` | `implementing` -> `implementing` | system -- internal/runflow/selectstage.go |
 | `start_rebase` | `implementing` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `implementing` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `add_commit` | `merge_conflicts` -> `merge_conflicts` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `add_commit` | `merge_conflicts` -> `merge_conflicts` | system -- internal/reqs/add_commit.go |
 | `all_commits_done` | `merge_conflicts` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `close` | `merge_conflicts` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `merge_conflicts` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `conflicts_resolved_and_merged` | `merge_conflicts` -> `merged` | orphaned -- no dispatcher |
 | `edit_commit` | `merge_conflicts` -> `merge_conflicts` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `post_rebase_test_failed` | `merge_conflicts` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `push_for_pr` | `merge_conflicts` -> `pr_open` | operator -- internal/api/runner_stage_pr_landing.go, internal/mergeflow/push_for_pr_stage.go |
-| `reset` | `merge_conflicts` -> `active` | operator -- internal/api/mutations_reset.go |
+| `push_for_pr` | `merge_conflicts` -> `pr_open` | operator -- internal/api/runners/runner_stage_pr_landing.go, internal/mergeflow/push_for_pr_stage.go |
+| `reset` | `merge_conflicts` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `resolve_conflicts` | `merge_conflicts` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `resolve_oscillation` | `merge_conflicts` -> `merge_conflicts` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `retry_merge` | `merge_conflicts` -> `merging` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `skip` | `merge_conflicts` -> `merge_conflicts` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_resolve` | `merge_conflicts` -> `resolving` | operator -- internal/api/mutations_dispatch.go |
-| `add_commit` | `merge_test_failed` -> `merge_test_failed` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `add_fix_commit` | `merge_test_failed` -> `active` | system -- internal/reqs/add_commit.go, internal/runflow/recovery_answer.go |
+| `start_resolve` | `merge_conflicts` -> `resolving` | operator -- internal/api/mutations_dispatch.go, internal/api/resolve_undo_authority.go |
+| `add_commit` | `merge_test_failed` -> `active` | system -- internal/reqs/add_commit.go |
+| `add_fix_commit` | `merge_test_failed` -> `active` | system -- internal/runflow/finalreviewconcerns.go, internal/runflow/recovery_answer.go |
 | `all_commits_done` | `merge_test_failed` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `close` | `merge_test_failed` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `merge_test_failed` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `edit_commit` | `merge_test_failed` -> `merge_test_failed` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `rebase_conflict` | `merge_test_failed` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
-| `reset` | `merge_test_failed` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `merge_test_failed` -> `merge_test_failed` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `rebase_conflict` | `merge_test_failed` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
+| `reset` | `merge_test_failed` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `merge_test_failed` -> `merge_test_failed` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_merge` | `merge_test_failed` -> `merging` | system -- internal/mergeflow/approved_stage.go |
+| `start_merge_gate_fix` | `merge_test_failed` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
 | `start_rebase` | `merge_test_failed` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_resolve` | `merge_test_failed` -> `resolving` | operator -- internal/api/mutations_dispatch.go |
+| `start_resolve` | `merge_test_failed` -> `resolving` | operator -- internal/api/mutations_dispatch.go, internal/api/resolve_undo_authority.go |
 | `start_merge` | `merged` -> `merged` | system -- internal/mergeflow/approved_stage.go |
 | `merge_aborted` | `merging` -> `ready_to_merge` | system -- internal/mergeflow/admission.go |
 | `merge_aborted_to_concerns` | `merging` -> `final_review_with_concerns` | system -- internal/mergeflow/admission.go |
 | `merge_aborted_to_pr_approved` | `merging` -> `pr_approved` | system -- internal/mergeflow/admission.go |
 | `merge_aborted_to_pr_open` | `merging` -> `pr_open` | system -- internal/mergeflow/admission.go |
 | `merge_conflict` | `merging` -> `merge_conflicts` | system -- internal/mergeflow/admission.go, internal/mergeflow/completion_merge.go |
-| `merge_success` | `merging` -> `merged` | operator -- internal/api/runner_stage_merge_landing.go |
+| `merge_success` | `merging` -> `merged` | operator -- internal/api/runners/runner_stage_merge_landing.go |
 | `post_rebase_test_failed` | `merging` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `push_for_pr` | `merging` -> `pr_open` | operator -- internal/api/runner_stage_pr_landing.go, internal/mergeflow/push_for_pr_stage.go |
-| `add_commit` | `pr_approved` -> `pr_approved` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `push_for_pr` | `merging` -> `pr_open` | operator -- internal/api/runners/runner_stage_pr_landing.go, internal/mergeflow/push_for_pr_stage.go |
+| `add_fix_commit` | `pr_approved` -> `active` | system -- internal/runflow/finalreviewconcerns.go, internal/runflow/recovery_answer.go |
+| `await_review` | `pr_approved` -> `awaiting_human_review` | operator -- internal/api/mutations.go, internal/runflow/breakdown_records.go |
 | `close` | `pr_approved` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `pr_approved` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `edit_commit` | `pr_approved` -> `pr_approved` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `github_merged` | `pr_approved` -> `merged` | orphaned -- no dispatcher |
+| `github_merged` | `pr_approved` -> `merged` | operator -- internal/api/runners/runner_stage_merge_landing.go |
+| `merge_gate_blocked` | `pr_approved` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `post_rebase_test_failed` | `pr_approved` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
 | `pr_approval_withdrawn` | `pr_approved` -> `pr_open` | system -- internal/mergeflow/approval_records.go |
 | `pr_changes_requested` | `pr_approved` -> `active` | orphaned -- no dispatcher |
 | `pr_closed` | `pr_approved` -> `awaiting_human_review` | operator -- internal/api/prwatch.go |
-| `rebase_conflict` | `pr_approved` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
+| `rebase_conflict` | `pr_approved` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
+| `replan` | `pr_approved` -> `active` | operator -- internal/api/mutations_replan.go |
 | `rerun_final_review` | `pr_approved` -> `pr_approved` | orphaned -- no dispatcher |
-| `reset` | `pr_approved` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `pr_approved` -> `pr_approved` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `pr_approved` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `pr_approved` -> `pr_approved` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_merge` | `pr_approved` -> `merging` | system -- internal/mergeflow/approved_stage.go |
+| `start_merge_gate_fix` | `pr_approved` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
 | `start_rebase` | `pr_approved` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `pr_approved` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
-| `add_commit` | `pr_open` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `add_fix_commit` | `pr_open` -> `active` | system -- internal/reqs/add_commit.go, internal/runflow/recovery_answer.go |
+| `add_fix_commit` | `pr_open` -> `active` | system -- internal/runflow/finalreviewconcerns.go, internal/runflow/recovery_answer.go |
+| `await_review` | `pr_open` -> `awaiting_human_review` | operator -- internal/api/mutations.go, internal/runflow/breakdown_records.go |
 | `close` | `pr_open` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `pr_open` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `edit_commit` | `pr_open` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `github_merged` | `pr_open` -> `merged` | orphaned -- no dispatcher |
+| `github_merged` | `pr_open` -> `merged` | operator -- internal/api/runners/runner_stage_merge_landing.go |
+| `merge_gate_blocked` | `pr_open` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `post_rebase_test_failed` | `pr_open` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
 | `pr_approved` | `pr_open` -> `pr_approved` | system -- internal/mergeflow/approval_records.go |
 | `pr_changes_requested` | `pr_open` -> `active` | orphaned -- no dispatcher |
 | `pr_closed` | `pr_open` -> `awaiting_human_review` | operator -- internal/api/prwatch.go |
-| `rebase_conflict` | `pr_open` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
+| `rebase_conflict` | `pr_open` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
+| `replan` | `pr_open` -> `active` | operator -- internal/api/mutations_replan.go |
 | `rerun_final_review` | `pr_open` -> `pr_open` | orphaned -- no dispatcher |
-| `reset` | `pr_open` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `pr_open` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `pr_open` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `pr_open` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_merge` | `pr_open` -> `merging` | system -- internal/mergeflow/approved_stage.go |
+| `start_merge_gate_fix` | `pr_open` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
 | `start_rebase` | `pr_open` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `pr_open` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
 | `close` | `provisioning` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `provisioning` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `override_baseline` | `provisioning` -> `active` | operator -- internal/api/mutations_dispatch.go |
 | `provision_complete` | `provisioning` -> `active` | system -- internal/runflow/provision_records.go |
-| `reset` | `provisioning` -> `active` | operator -- internal/api/mutations_reset.go |
-| `add_commit` | `ready_to_merge` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `add_fix_commit` | `ready_to_merge` -> `active` | system -- internal/reqs/add_commit.go, internal/runflow/recovery_answer.go |
+| `reset` | `provisioning` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
+| `add_commit` | `ready_to_merge` -> `active` | system -- internal/reqs/add_commit.go |
+| `add_fix_commit` | `ready_to_merge` -> `active` | system -- internal/runflow/finalreviewconcerns.go, internal/runflow/recovery_answer.go |
+| `await_review` | `ready_to_merge` -> `awaiting_human_review` | operator -- internal/api/mutations.go, internal/runflow/breakdown_records.go |
 | `close` | `ready_to_merge` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `ready_to_merge` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `create_pr` | `ready_to_merge` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `edit_commit` | `ready_to_merge` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `final_review_concerns` | `ready_to_merge` -> `final_review_with_concerns` | system -- internal/runflow/finalreviewconcerns.go |
+| `merge_gate_blocked` | `ready_to_merge` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `post_rebase_test_failed` | `ready_to_merge` -> `merge_test_failed` | system -- internal/mergeflow/admission.go |
-| `rebase_conflict` | `ready_to_merge` -> `merge_conflicts` | operator -- internal/api/runner_stage_pr_conflict.go |
+| `rebase_conflict` | `ready_to_merge` -> `merge_conflicts` | operator -- internal/api/runners/runner_stage_pr_conflict.go |
+| `replan` | `ready_to_merge` -> `active` | operator -- internal/api/mutations_replan.go |
 | `rerun_final_review` | `ready_to_merge` -> `ready_to_merge` | orphaned -- no dispatcher |
-| `reset` | `ready_to_merge` -> `active` | operator -- internal/api/mutations_reset.go |
-| `resolve_oscillation` | `ready_to_merge` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reset` | `ready_to_merge` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `ready_to_merge` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_merge` | `ready_to_merge` -> `merging` | system -- internal/mergeflow/approved_stage.go |
+| `start_merge_gate_fix` | `ready_to_merge` -> `implementing` | system -- internal/runflow/mergegate_plan_records.go |
 | `start_rebase` | `ready_to_merge` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `start_requirements_edit` | `ready_to_merge` -> `requirements_editing` | system -- internal/reqs/requirements_edit.go |
 | `close` | `rebasing` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `rebasing` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
 | `rebase_cancel` | `rebasing` -> `rebasing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
@@ -5547,16 +6925,9 @@ stateDiagram-v2
 | `rebase_return_pr_approved` | `rebasing` -> `pr_approved` | system -- internal/mergeflow/story_rebase_admission.go |
 | `rebase_return_pr_open` | `rebasing` -> `pr_open` | system -- internal/mergeflow/story_rebase_admission.go |
 | `rebase_return_ready_to_merge` | `rebasing` -> `ready_to_merge` | system -- internal/mergeflow/story_rebase_admission.go |
-| `requirements_edit_approved` | `requirements_editing` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_active` | `requirements_editing` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_final_review_with_concerns` | `requirements_editing` -> `final_review_with_concerns` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_implementing` | `requirements_editing` -> `implementing` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_pr_approved` | `requirements_editing` -> `pr_approved` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_pr_open` | `requirements_editing` -> `pr_open` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
-| `requirements_edit_restore_ready_to_merge` | `requirements_editing` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `close` | `resolving` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
 | `close_no_changes` | `resolving` -> `closed_no_changes` | system -- resolved from source->dest by an empty-trigger call |
-| `resolve_failed` | `resolving` -> `merge_conflicts` | system -- internal/mergeflow/resolve.go |
+| `resolve_failed` | `resolving` -> `merge_conflicts` | operator -- internal/api/resolve_undo_authority.go, internal/mergeflow/resolve.go |
 | `resolve_resume_run` | `resolving` -> `implementing` | system -- internal/mergeflow/resolve.go |
 | `resolve_success` | `resolving` -> `pr_open` | system -- internal/mergeflow/resolve.go |
 | `resolve_success_no_pr` | `resolving` -> `ready_to_merge` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
@@ -5612,9 +6983,39 @@ merge gate returns to `implementing` through `resolve_resume_run` with the
 `merge_gate` substage kept and no run started, so `hashd pr push` (when a PR
 exists) and then `hashd run` still take the branch through the gate and final
 review; otherwise it lands at `pr_open` (`resolve_success`, retry `hashd pr
-push`) or `ready_to_merge` (`resolve_success_no_pr`, retry `hashd merge`). The
-rollback and the stale-resolving self-heal land a workstream left at
-`resolving` over that record at the same place. `MergeApprovedPRLocked` is
+push`) or `ready_to_merge` (`resolve_success_no_pr`, retry `hashd merge`).
+One refusal continues instead: a push the stale-base guard refused only
+because the base moved while the resolve worked records no publication
+failure. The resolved commits stay as they are, an `ai_resolve` record with
+outcome `continuing` names the kept revision, how the lane continues and the
+attempt, and the workstream takes the same exit. A runner-origin lane goes to
+`implementing`, from which the resolve workflow starts the ordinary run
+(`ResumeWorkstreamRun`, bound to this landing's exact successor), whose sync rebase takes the new
+base. Any other lane goes to `pr_open` or `ready_to_merge`, from which the
+resolve workflow starts a fresh story rebase through the `hashd rebase
+<story> -y` admission, from the kept resolved commits: it rebases onto the
+current base, takes any conflict to the conflict agent at once (see
+**Rebase** above), lands, publishes, and returns the lane to the state it was
+admitted from. It never merges: a `ready_to_merge` lane stays there. That
+rebase's own admission into `rebasing` does not begin a new series. Up to 10
+such continuations in a row are taken, counted once per accepted landing in
+the durable parent/child series;
+the 11th refusal records the stop as the standing failure, with the kept
+revision and `hashd run <story>` or `hashd rebase <story> -y`, takes the same
+exit and starts nothing. Confirmed publication fulfills the series; an operator's
+run, rebase, resolve or PR push begins a new series. Replaying the limit stop
+never resets it. A resolve that stops after
+recording a continuation and before the run or rebase is confirmed started
+-- a refused or lost start, a crash, a lost result, a cancel, an interrupted
+workflow -- has that notice replaced by a standing failure
+naming the kept revision, `hashd show <story>` and `hashd run <story>` or
+`hashd rebase <story> -y`; the resolved commits stay kept. A rebase
+continuation that starts and then leaves without landing -- undone,
+cancelled or refused -- has the notice replaced the same way, with the reason
+it ended, so the lane never reads as continuing while nothing is. Every other push failure keeps
+the publication-failure exit above. The durable landing owns publication and
+acceptance: recovery reads it, and the snapshot self-healer refuses to infer
+completion from a clean checkout while it is pending. `MergeApprovedPRLocked` is
 `hashd merge` on an approved PR, whose pre-merge rebase conflicting is the one
 operator route that *enters* the state from outside it -- it transitions with
 an empty trigger, resolved source->dest, and is declared as such in
@@ -5733,7 +7134,7 @@ flowchart TD
   act on the item's forge, through the same credential decision the action's
   forge call makes: the owner's stored credential (or, in solo mode, the local
   forge login), never another user's or the server's. An owner with no
-  credential, or a team-mode workstream with no owner, gets a
+  credential, or an unassigned workstream, gets a
   `waiting_on_owner` record naming the automation, the owner and the forge's
   login steps (`hashd forge login --host <host>`). A credential gone by the
   time the dispatched run resolves its forge, for its plan or its re-run, gets
@@ -5772,37 +7173,33 @@ stateDiagram-v2
     drafting --> abandoned : hashd cancel (first draft)
     drafting --> draft_failed : hashd cancel (retry)
     pending --> queued : prerequisites satisfied, by completion or a dependency edit
-    pending --> accepted : hashd approve --force (every prerequisite implemented or abandoned)
+    pending --> approved : hashd approve --force (every prerequisite implemented or abandoned)
     pending --> abandoned : hashd close
     draft_failed --> drafting : hashd story retry
     draft_failed --> editing : hashd story edit
     draft_failed --> abandoned : hashd close
     draft --> editing : hashd story edit
-    accepted --> editing : hashd story edit (guard - no workstream rows)
+    approved --> editing : hashd story edit (guard - no workstream rows)
     editing --> draft : AI edit complete
     editing --> draft_failed : AI edit refused
     editing --> draft : timeout 15 min
     editing --> draft : hashd cancel (edit of a draft)
     editing --> draft_failed : hashd cancel (edit of a failed draft)
-    editing --> accepted : hashd cancel (edit of an accepted story)
-    draft --> accepted : hashd approve
-    accepted --> implementing : hashd run (LOCKS story)
+    editing --> approved : hashd cancel (edit of an approved story)
+    draft --> approved : hashd approve
+    approved --> implementing : hashd run (LOCKS story)
     implementing --> implemented : hashd merge (LOCKED)
-    implementing --> requirements_editing : hashd story edit (holds the workstream)
-    requirements_editing --> requirements_edit_draft : proposal ready
-    requirements_editing --> implementing : failed / timed out (workstream restored)
-    requirements_edit_draft --> requirements_editing : hashd story edit / hashd answer
-    requirements_edit_draft --> implementing : hashd approve --start-over | --keep-code (workstream to active)
-    requirements_edit_draft --> implementing : decline_edit (workstream restored)
+    implementing --> draft : hashd replan (its lane held until accepted)
     draft --> abandoned : hashd close
-    accepted --> abandoned : hashd close
+    approved --> abandoned : hashd close
     queued --> closed_by_person : close_by_person (work landed outside hashd)
     drafting --> closed_by_person : close_by_person (work landed outside hashd)
     pending --> closed_by_person : close_by_person (work landed outside hashd)
     draft_failed --> closed_by_person : close_by_person (work landed outside hashd)
     draft --> closed_by_person : close_by_person (work landed outside hashd)
-    accepted --> closed_by_person : close_by_person (work landed outside hashd)
+    approved --> closed_by_person : close_by_person (work landed outside hashd)
     implementing --> closed_by_person : close_by_person (work landed outside hashd)
+    note right of implementing : hashd cancel stops the workstream's open rebase, run, merge or resolve (refused if paused or nothing in flight; merge past attempt still lands)
 ```
 
 **Stages:**
@@ -5811,22 +7208,19 @@ stateDiagram-v2
 |-------|-------------|----------|
 | `queued` | Planning waiting for the PM slot; ordinary field edits remain available | No |
 | `drafting` | AI generating story (in progress) | No |
-| `pending` | Story waiting for dependencies before redraft | No |
+| `pending` | Story waiting for dependencies before redraft | Yes -- the edit lands back in `pending` (below) |
 | `draft_failed` | AI generation failed; needs operator clarification, retry, or close | Yes (via `hashd story edit`; retry with `hashd story retry`) |
 | `draft` | Generated, awaiting approval | Yes |
 | `editing` | AI edit in progress (auto-reverts after 15 min) | No |
-| `accepted` | Ready for implementation | Yes -- until its workstream row exists (`story_has_no_workstreams` guard, any status including closed/merged; a story owns at most one) |
-| `implementing` | Workstream active | Yes -- a requirements edit, which holds the workstream (below) |
-| `requirements_editing` | Read-only planner revising an implementing story (auto-ends after 15 min) | No |
-| `requirements_edit_draft` | The planner's proposal, awaiting approval or decline | Yes (revises the proposal) |
+| `approved` | Ready for implementation | Yes -- until its workstream row exists (`story_has_no_workstreams` guard, any status including closed/merged; a story owns at most one) |
+| `implementing` | Workstream active | No -- `hashd replan` returns it to `draft`, where it is edited |
 | `implemented` | Workstream merged | No |
 | `abandoned` | Closed without implementation; its requirement stays open in REQS, unless its workstream closed as no-changes-needed (`hashd close --no-changes`), which met it and burns its REQS sections | No |
 | `closed_by_person` | Closed by a person because the work landed outside hashd; its requirement is met, so its REQS sections are burned (one `requirement_burned` event), it satisfies a dependent's prerequisite and counts as a finished Arc child, and a merged workstream of it keeps its lineage | No |
 
 **Transitions:**
 
-- `hashd approve STORY-xxx` moves draft -> accepted (and a
-  requirements-edit proposal to implementing, below). It is refused while
+- `hashd approve STORY-xxx` moves draft -> approved. It is refused while
   any blocking clarification on the story is pending, and the story's
   `accept` row in `available_actions` is withheld then with the same reason;
   a pending count that cannot be read withholds it too. A story's own
@@ -5834,7 +7228,7 @@ stateDiagram-v2
   size estimate's verdict is `split` or `arc` is refused
   (`approve.size_verdict`), changing nothing, unless the request confirms it
   (`confirm_split=true`; `hashd approve --yes`); so is the generic
-  transition's accept edge (`POST /stories/{id}/transition` to `accepted`,
+  transition's accept edge (`POST /stories/{id}/transition` to `approved`,
   confirmed by the body's `confirm_split`). The refusal names the
   estimate's reason and concerns and an alternative chosen from the verdict
   and Arc membership alone: an Arc (`hashd story arc`) for verdict arc on a
@@ -5845,8 +7239,7 @@ stateDiagram-v2
   recommends, reason, every concern, threshold) for a draft or pending story
   the rule covers, decided by the same rule, so clients never derive it.
   Exempt: an implementing
-  story's workstream gate approval, a requirements revision, an Arc proposal
-  approval, finishing an approved draft's REQS narrowing, an Arc's own
+  story's workstream gate approval, an Arc proposal approval, finishing an approved draft's REQS narrowing, an Arc's own
   approval (an Arc is never implemented itself; its children are, each under
   this rule), and a story with no estimate or verdict `fits`.
   A confirmed approval the rule covers -- accepted, parked for prerequisites,
@@ -5868,7 +7261,17 @@ stateDiagram-v2
   reached. A failed close changes nothing. The story's `cancel` row in
   `available_actions` is offered for these three statuses, and withheld, with
   the route's own reason, for a drafting or editing story entered before the
-  entry record existed.
+  entry record existed. For a story whose workstream is rebasing, it cancels the
+  rebase. For any other story with a workstream, it checks whether the
+  workstream's run (`run:`), merge (`merge:`) or conflict resolution (`resolve:`)
+  workflow is open and requests a plain (non-forced) stop through the flow-run
+  cancel path: a run closes when its running stage stops; a merge whose merge
+  attempt has begun still lands (recording that the cancel came after landing).
+  While the workstream is paused (or under a restart hold or unsettled
+  dispatch), the cancel is refused unchanged (`workstream.pause` / hold refusal)
+  and nothing is cancelled. When nothing is in flight for the story -- or the
+  execution closed before the cancel landed -- cancel refuses with 409
+  (`story.cancel.nothing_in_flight`), naming the story's status and next steps.
 - `hashd story split STORY-xxx` can create dependent sub-stories in pending
 - Initial planning can also declare existing stories in `depends_on`. Hashd
   validates the project-local references and rejects dependency cycles, then
@@ -5881,10 +7284,30 @@ stateDiagram-v2
   that replan. If the last dependency completes before its result lands, the
   result still enters `pending` and the existing recovery scan releases it for
   replan, rather than returning a draft whose anchors were never applied.
+- After a non-Arc draft's own `depends_on` validates, the planner runs one
+  sequencing turn in the drafting session (`pm_refine_resume`): asked, with
+  every other open filed story listed -- draft, approved, pending or
+  implementing, each with its criteria and its plan's micro-commits --
+  whether the story should wait for any of them. The answer only adds
+  entries, each with a one-line reason; the combined list is validated
+  exactly as a drafted one is. An unreadable or refused answer is fed back
+  to the same session, which revises only that answer while the validated
+  draft stands; a session that cannot carry the turn falls back cold once
+  onto the sequencing prompt itself. An added unfinished prerequisite takes
+  the deferred path above: the story lands `pending` with no REQS
+  annotation, its landing event naming each prerequisite the turn added and
+  its reason, and the dependency handoff replans it -- a replan whose own
+  drafting turn is sequenced again. The landing combines the drafted list
+  with the answer again and validates it again; when that refuses the list
+  (a prerequisite the answer added has meanwhile come to depend on this
+  story, say), nothing lands and the validated draft goes back to the same
+  session, which revises only the answer within the same attempts -- or
+  redrafts, when the refused entry is one the draft itself names. Arc
+  stories run no sequencing turn.
 - dependency completion moves pending -> queued for a fresh plan against current code;
   the plan's own planning-slot acquisition moves it on to drafting
 - `hashd approve --force STORY-xxx` (`POST /stories/{id}/approve?force=true`,
-  the internal `force_accept` transition) moves pending -> accepted, accepting
+  the internal `force_accept` transition) moves pending -> approved, accepting
   the requirements as they stand now, without re-drafting. That is the
   operator's choice, not the automatic path: when the dependencies land on
   their own, the unblock moves pending -> queued and the planner re-drafts
@@ -5907,17 +7330,59 @@ stateDiagram-v2
   cancel sends nothing. A stale refusal shows the server's reload guidance on
   the head's error line.
 - `hashd story edit STORY-xxx` moves draft -> editing -> draft
-- `hashd run STORY-xxx` moves accepted -> implementing (LOCKS story)
+- After a non-Arc edit's reply validates -- and only for a story whose edit
+  entered from draft, draft_failed, approved or pending, as its entry
+  recorded -- the planner runs one sequencing turn in the editing session
+  (`pm_edit_resume`), exactly as a draft's does: every other open filed
+  story listed, the story's stored `depends_on` as its base, and the same
+  add-only answer with a one-line reason per entry, validated as a drafted
+  list is. An unreadable or refused answer is fed back to the same session,
+  which revises only that answer while the validated edit stands, ahead of
+  every write, so a failed turn leaves REQS untouched. A combined list with
+  an unfinished prerequisite defers the edit's REQS annotation, as a
+  waiting draft's is, so the edit never collides with that prerequisite's
+  WIP region. The edit's landing combines the stored list with the answer:
+  an unfinished prerequisite lands the edited story `pending`, through the
+  same internal `edit_complete` editing-to-pending edge a pending-origin
+  edit returns through, its landing event naming each prerequisite the
+  turn added and its reason, and the dependency handoff replans it when its
+  prerequisites land. Otherwise it lands where it does today. A landing
+  that refuses the combined list goes back to the same session, as a
+  draft's does, with the operator's feedback still carried by the edit.
+  Agent edits at Arc review run no sequencing turn.
+- An AI edit or answer entered from `pending` (`hashd story edit`, a bundle
+  `hashd answer`, or the final blocking answer by its own ID) moves
+  pending -> editing -> pending: the edited content, new questions and
+  unchanged `depends_on` land back in the dependency wait. An edit that fails
+  returns the story to `pending` with its prior content, recorded as any edit
+  failure is (a `failed` `operation_result`, the feedback kept as a dropped
+  edit) with no `failure_cause` and no `draft_failed`: the story did not fail,
+  the edit did. A cancel and an editing timeout also return it to `pending`
+  with its prior content (a cancel as its entry recorded, writing no failure).
+  A timeout is recorded as for an edit from any state: before housekeeping
+  revokes the owner it records a `failed` edit `operation_result` and keeps
+  the feedback the edit's entry recorded (`claim_origin`) as a `timeout`
+  dropped edit, beside the "editing timed out" story change.
+  Nothing new releases it afterwards: when the prerequisites are done, the
+  dependency release or the stranded-pending recovery sweep moves it to
+  `queued`, and the replan proceeds from the content the edit left.
+- `hashd run STORY-xxx` moves approved -> implementing (LOCKS story)
 - `hashd merge <ws>` moves implementing -> implemented
 - `hashd close <story>` (`POST /stories/{id}/close`) is one close of three
   kinds, and each says what happens to the story's requirement. Each closes
   the linked workstream too, cancelling a live run first.
   - Plain: the story is abandoned and its requirement stays open -- its WIP
     markers are stripped and its prose stays in REQS -- and a claimed source
-    suggestion returns to the backlog.
+    suggestion returns to the backlog. Given a reason (the request's
+    `reason`, which needs no workstream), the abandonment stores a closure
+    of kind `abandoned` -- who, when and the reason, with no reference -- in
+    the `abandon` transition's own write, so a refused or rolled-back close
+    leaves none, and its `story_changed` carries the reason; every story
+    read serves it whole as `closure`. Given none, it stores no closure.
   - `--no-changes --reason "..."`: no changes were needed, so the requirement
     is met: the workstream closes `closed_no_changes`, the story is abandoned,
-    and its REQS sections are burned.
+    and its REQS sections are burned. The abandonment stores its reason as a
+    plain close's does, as a closure of kind `abandoned`.
   - `--ref <ref> --reason "..."`: the work landed outside hashd, so the
     requirement is met: the story closes `closed_by_person`, its REQS sections
     are burned (one `requirement_burned` event, the cleanup's same burn as a
@@ -5935,7 +7400,7 @@ stateDiagram-v2
     `manual`, who, when, the reason and the verified reference -- in the
     transition's own write, and every story read serves it whole as
     `closure`.
-- `hashd close <ws>` unlocks story (returns to accepted)
+- `hashd close <ws>` unlocks story (returns to approved)
 - `hashd story clone STORY-xxx` creates editable copy of locked story
 
 ### Tracker stories
@@ -5983,116 +7448,18 @@ and whether link and unlink are allowed, with the reason when not;
 `unlink_tracker_story`. The TUI's `t` opens one Tracker menu (open, unlink,
 link) from that list, and the Web Overview shows one quiet line per tracker.
 
-### Requirements edit of an implementing story (Revise Story)
+### Changing an implementing story's requirements
 
-`hashd story edit STORY-xxx -f "..."` on an implementing story revises its
-requirements -- the TUI and Web label it Revise Story -- while its one linked
-workstream is **held** in
-`requirements_editing`, out of merge readiness. The hold is entered from
-`active`, `implementing`, `ready_to_merge`, `final_review_with_concerns`,
-`pr_open` or `pr_approved` when no run, merge, publish or pending recovery
-question is live, no amendment decision is open and no operator claim
-(`dispatching`, a gate decision) is unexpired, and never while the workstream
-is reserved for human edits. An amendment decision is open while a
-`requirements_conflict` question awaits its ruling, an `ac_edit_proposal`
-awaits approve or decline, or an amendment derive or apply workflow is running
-(`no_open_question_for_requirements_edit`,
-`server/internal/fsm/guards_recovery.go`). The workflows are found by exact
-workflow ID (`acamend-derive:` per `requirements_conflict` question,
-`acamend-apply:` per `ac_edit_proposal`), so one dispatched a moment ago is
-seen, and a probe that cannot read them withholds the edit. While the decision
-is open `start_requirements_edit`, and with it the story's `start_edit` row
-(`requirements_edit_entry_ready`), is withheld, and the edit is refused, naming
-what is open and how it settles (`hashd answer`, or waiting for the workflow);
-it never supersedes or cancels the amendment, and both are offered again once
-the decision settles. The guard rides only the `start_requirements_edit`
-edges: `add_commit` and `add_fix_commit` keep the plain
-`no_pending_recovery_question` check. The
-`dispatching` claim is short-lived and an add-commit's planner outlives it; an
-add-commit that finds the workstream held when it comes to append refuses and
-appends nothing.
-The stage it left is recorded on the story.
+What happens to REQS at each stage of a story is in [docs/REQS.md](docs/REQS.md#a-storys-claim-stage-by-stage).
 
-- The planner reads the worktree (read-only) and is told the completed
-  commits, the plan and the uncommitted changes. Its output is stored as a
-  proposal; the story's content is untouched and REQS is never written.
-- Approval must choose how the work continues: `hashd approve STORY-xxx
-  --start-over` or `--keep-code` (`POST /stories/{id}/approve?continuation=
-  start_over|keep_code`). A bare approval of a revision is refused, never
-  destructive by default; the choice is refused on any other approval, and with
-  `--force`. Either way approval writes the proposal, returns the story to
-  `implementing` and the workstream to `active`, replaces the plan with the
-  revised story's skeleton (its problem, criteria and non-goals, and no
-  micro-commits: nothing done under the previous requirements counts as done),
-  discards the retired attempt's reviews (and the final review's mark that
-  their concerns were delivered), commit failures, checkpoint, agent session
-  and merge-gate repair binding (shared attempt disposal), and starts a run whose breakdown plans
-  the revised story in full. A pending breakdown refusal on the held
-  workstream refused the plan approval retires, so approval supersedes it
-  inside the approval transaction and does not answer it: it neither blocks
-  the next run nor reaches a later prompt as an operator's answer. The workstream reaches `ready_to_merge` again only
-  through the gate and final review.
-  - **Start over** (recommended; the TUI, Web and Telegram offer it first and
-    confirm it)
-    resets the worktree to its base first, as replan does: the workstream's
-    commits and uncommitted work are discarded. If the approval then fails, the
-    code stays reset, the revision still awaits approval, and the same approval
-    re-run finishes it.
-  - **Keep and rework** keeps the unmerged code as starting material only. The
-    breakdown inspects it against the revised story and plans explicit keep,
-    change and removal work (obsolete code, tests and dependencies included),
-    with no micro-commit that merely adopts the existing code. Where the kept
-    code already meets revised criteria, it plans one micro-commit verifying
-    them, which the implementer reports `already_done` when nothing needs
-    editing; the merge gate and final review still run. That breakdown
-    reverts only its own agent's stray writes: the kept commits and
-    uncommitted work survive it. Answering `proceed` to a refusal of that
-    breakdown does not replan from the base: the workstream is prepared as a
-    replan would be but without the reset while the refusal is still pending,
-    then the answer and the permission to proceed are recorded in one
-    transaction. A failure in either leaves the refusal pending, and answering
-    `proceed` again repeats both; a dispatch failure after them is retried
-    with `hashd run`, which carries the permission. The revision stays owed
-    until a breakdown succeeds. An explicit `hashd replan` or `hashd reset`
-    still resets, and once its reset has succeeded it retires the owed
-    revision, whose kept code is gone. A full `hashd reset` of a workstream
-    still owed such a revision keeps the revised story's plan rather than its
-    soft-reset one (a revision approved before approval retired plans still
-    holds the superseded micro-commits): it writes that skeleton and retires
-    the revision in one transaction, and refuses before touching anything
-    when the story cannot be read.
-  - Unless the change is genuinely small, starting over is recommended: agents
-    tend to preserve or work around old code. Small, especially additive,
-    changes are usually better as a follow-up story than a revision.
-- Declining (story transition `decline_edit`), a failed or timed-out attempt,
-  or an edit whose workflow could not be dispatched applies nothing: the story
-  returns to `implementing` and the workstream to exactly the stage it was held
-  from.
-- While held, the workstream's FSM declares only these system transitions:
-  no verb moves it, the generic `/transition` and the status `PATCH` refuse it,
-  and run, push, remove, reservations, adjudication and hooks refuse with the
-  hold named.
-
-The proposal is exposed on `GET /stories/{id}` as `requirements_edit`; the
-TUI, Web and Telegram story details render it with its per-criterion changes
-and offer approve (with the continuation choice), revise and decline from the
-story's `available_actions` rows; Telegram's `/approve` on a revision replies
-with the same choice.
-
-A workstream that stopped on a breakdown refusal of a plan an earlier
-approval already retired, before approval superseded refusals, recovers
-through the same revision: run `hashd story edit STORY-xxx -f "..."`, review
-the proposal, and approve it with a chosen continuation. The pending refusal
-does not prevent the edit from starting, and approval supersedes it. This
-costs another edit-agent run and another operator review. Approval replaces
-the current plan with the revised story's skeleton and discards the attempt's
-reviews, commit failures, agent session, checkpoint and merge-gate repair
-binding. `--keep-code` keeps
-the code as starting material; `--start-over` resets the worktree to its base.
-Tests cover the edit starting on that workstream, and approval of a stubbed
-proposal that keeps every criterion. They do not show that a real edit agent
-returns such a proposal, so review what it proposes before approving. Do not
-answer the refusal (`proceed` or `hold`) and do not edit the database instead.
+An implementing story's requirements change only in planning: `hashd replan
+STORY-xxx` returns the story to `draft` with its lane held, where `hashd story
+edit`, the criteria verbs and `hashd approve` work as they do on any draft.
+On the implementing story itself, `hashd story edit` is refused
+(`edit.state_ineligible`) with the full replan as its next step, and the
+criteria verbs are refused (`story.content_locked`) naming `hashd replan
+STORY-xxx --from-commit <commit in progress>`, which keeps every landed
+micro-commit, or the full replan when the lane has none undone.
 
 ### Content ownership and recovery
 
@@ -6122,7 +7489,8 @@ dispatch inputs.
 Results require the same owner and stage; returning to the same stage under a
 new operation does not authorize an old result. Success atomically commits
 content, new questions and `draft`; failure commits its cause and
-`draft_failed`. Suggestion completion/release separately checks the linked
+`draft_failed`. An edit entered from `pending` lands in `pending` instead, and
+its failure returns it there with no cause. Suggestion completion/release separately checks the linked
 story, expected lifecycle and planning handoff in its transaction, so a late
 result cannot release another story's or retry's claim.
 
@@ -6155,8 +7523,8 @@ No database transaction spans Git.
 |------|--------------------------------|
 | Normal result / agent refusal / failure | The current execution finalizes atomically, then releases; an old execution cannot release a newer owner or replace its content. A success first waits, outside any transaction and up to the `requirements_lock_wait` bound, for Git descendants still holding its inherited REQS lock, clearing only its own marker under the reacquired lock; if the lock is still held at the bound it keeps ownership and the marker and records the lock-held diagnostic, with edit feedback kept as a dropped edit. A lock that cannot be checked ends the wait at once: ownership, the marker and edit feedback are kept the same way, and the story records the lock's own error as the cause, with no next step. |
 | Cancellation / worker death | Ownership lasts until failure finalization or recovery. A cancellation request alone does not prove activities stopped. A success finalization cancelled before its result lands records on the story, on a context detached from the cancellation and in the same transaction that finds it still owning the story in stage, the lock-held diagnostic when its most recent look found the REQS lock held and otherwise that it was stopped; the story keeps its owner and any requirements-write marker still set. One stopped by its activity deadline records no `operation_result` (an edit still keeps its feedback as a dropped edit, which the fallback's replaces): Temporal discards that leg's outcome and reports a timeout, so the lost-result fallback below records it. A look that finds the lock cannot be checked records the same way: on a context detached from a cancellation that coincides with it, and not once the deadline has expired. Delivery is not exactly once: a record that commits before the leg's response is lost -- its deadline expiring or its worker dying before the body returns -- is followed by the fallback's own. A success leg that ends without recording an outcome -- its worker lost, failing before its body ran, or its body returning an error it did not record -- is failed with that reason only while its execution still owns the story, because a leg declared lost can still land; an edit's feedback is saved with it. While the project-wide REQS lock is held the guard refuses that failure: the story keeps its owner and marker, an edit's feedback is still saved, and the story records the lock-held diagnostic instead. If the lock cannot be checked the guard refuses the same way, and the story records the lost result with the guard's refusal as its cause and no next step, since timeout recovery is refused until the lock can be checked. |
-| Operator cancel (`hashd cancel`) | `POST /stories/{id}/cancel` closes the story's `plan:` or `edit:` run and confirms it closed, then restores the story only when the run holding it closed Canceled, or no run holds it. Cancel wins only until the flow begins to finalize: the execution's REQS write interval stamped, or a finalize leg scheduled; a validated result that has done neither is discarded. Before that the flow waits for its cancelled activities and writes nothing -- no `draft_failed`, failure cause or dropped edit -- and `reqs.CancelStoryContent` restores the story in one write that also revokes the owner: a first draft (entered from `queued`) ends `abandoned`, a retry returns to `draft_failed`, and an edit returns to the status it started from with the recorded data, its dispatch's superseded clarifications back to `pending`. After that point the finalize leg runs to its end, including its dropped-edit writes on ownership loss; cancel changes nothing and reports the status the story reached. A failed or unconfirmed close changes nothing. |
-| Editing timeout | Housekeeping rechecks the 15-minute clock inside the mutation, refuses an active/unverifiable REQS write, otherwise returns to `draft` and revokes the owner. Scheduled housekeeping itself waits for the PM section; TUI refresh does not perform recovery. |
+| Operator cancel (`hashd cancel`) | `POST /stories/{id}/cancel` closes the story's `plan:` or `edit:` run and confirms it closed, then restores the story only when the run holding it closed Canceled, or no run holds it. Cancel wins only until the flow begins to finalize: the execution's REQS write interval stamped, or a finalize leg scheduled; a validated result that has done neither is discarded. Before that the flow waits for its cancelled activities and writes nothing -- no `draft_failed`, failure cause or dropped edit -- and `reqs.CancelStoryContent` restores the story in one write that also revokes the owner: a first draft (entered from `queued`) ends `abandoned`, a retry returns to `draft_failed`, and an edit returns to the status it started from with the recorded data, its dispatch's superseded clarifications back to `pending`. After that point the finalize leg runs to its end, including its dropped-edit writes on ownership loss; cancel changes nothing and reports the status the story reached. A failed or unconfirmed close changes nothing. For a story whose workstream is rebasing, it cancels the rebase. For any other story with a workstream, it checks whether the workstream's `run:`, `merge:` or `resolve:` workflow is open and requests a plain stop through `cancelFlowRun` (unsettled-dispatch check, `admitCancel` -- which refuses while the workstream is paused or under a restart hold -- and archive-cancellation record): a run closes when its running stage stops, and a merge whose merge attempt has begun still lands. When nothing is in flight (or the workflow closes before the cancel lands), the route refuses with 409 (`story.cancel.nothing_in_flight`). |
+| Editing timeout | Housekeeping rechecks the 15-minute clock inside the mutation, refuses an active/unverifiable REQS write, otherwise returns to `draft` (to `pending` for an edit entered from `pending`) and revokes the owner. For an edit from any state it records, in the same write and before the owner goes, a `failed` edit `operation_result` and the feedback the edit's entry recorded (`claim_origin`) as a `timeout` dropped edit, beside the "editing timed out" story change. Scheduled housekeeping itself waits for the PM section; TUI refresh does not perform recovery. |
 | Planning timeout / dispatch compensation | Recovery checks its inspected row again. An unavailable liveness probe retains the story; with no configured client, recovery may revoke database writes without claiming workflow closure. A parent timing out before its first acquisition may fail `queued`; retries enter `drafting`. |
 | Story-to-workstream claim | Routing must still match the story at the atomic `implementing`/`provisioning` claim. Orphan cleanup follows that claim, outside the transaction; failure uses `provision_error`. |
 | Deferred split / AC amendment | These proposals do not own story content while awaiting a human. Apply validates the saved source anchor and current eligibility inside the mutation; stale proposals preserve the story and saved answers. |
@@ -6165,9 +7533,9 @@ Independently saved answers and ruling IDs retain their current clarification/ro
 
 ### Dependency handoff (pending -> queued)
 
-`hashd story split` can give a sub-story a `depends_on` list, and a story with one starts in `pending`. That state has three edges — `unblock`, `abandon` and the internal `force_accept` behind `hashd approve --force` (see Transitions above) — and no operator command drives the first. What drives it is a dependency completing.
+`hashd story split` can give a sub-story a `depends_on` list, and a story with one starts in `pending`. That state has five edges — `unblock`, `abandon`, `start_edit` (to `editing`, behind `hashd story edit` and `hashd answer`; see the lifecycle above), the internal `force_accept` behind `hashd approve --force` and the internal `close_by_person` (see Transitions above) — and no operator command drives the first. What drives it is a dependency completing.
 
-When a story reaches `implemented` — by merge finalization, by the externally-merged-PR archive that runs the same finalization, or through the story-transition route — the server walks that story's `pending` children and releases every one whose dependencies are now **all** `implemented` or abandoned; an abandoned prerequisite counts as nonexistent for story prerequisites. Anything less holds the child: a dependency still drafting or accepted, or one missing from the project entirely. A `depends_on` entry links its prerequisite by the story's number within the project, so a retype or an alias never changes which story it names; an entry that named no story when the links were migrated keeps its recorded text, names no record, and holds the child like a missing one. A completion only considers the children that link it, so one merge never sweeps the project.
+When a story reaches `implemented` — by merge finalization, by the externally-merged-PR archive that runs the same finalization, or through the story-transition route — the server walks that story's `pending` children and releases every one whose dependencies are now **all** `implemented` or abandoned; an abandoned prerequisite counts as nonexistent for story prerequisites. Anything less holds the child: a dependency still drafting or approved, or one missing from the project entirely. A `depends_on` entry links its prerequisite by the story's number within the project, so a retype or an alias never changes which story it names; an entry that named no story when the links were migrated keeps its recorded text, names no record, and holds the child like a missing one. A completion only considers the children that link it, so one merge never sweeps the project.
 
 A released child follows `pending -> queued` and waits there for the
 project's planning slot, so dependents released together read `queued` while
@@ -6185,7 +7553,7 @@ per-story waits on an unresponsive sidecar.
 The `hashd restart` in-flight board uses the same verdict, not age alone.
 A spared `queued`/`drafting` story also retains its suggestion claim,
 preventing the same pass from calling its plan both live and orphaned. Other
-stale claims—on `draft`, `accepted`, `implementing`, or missing
+stale claims—on `draft`, `approved`, `implementing`, or missing
 stories—are released by `planning_started` alone.
 
 Three passes re-run the identical walk for children a completion path missed: `hashd plan reset` (the planning reconcile), the per-project housekeeping sweep, and the reconcile hashd runs at restart. They key on dependency state rather than on a parent id, so they need no record of which completion skipped the handoff. Each reports the children it released, meaning they left `pending` and their replan was dispatched — only the first child's dispatch is inline, so a later failure lands on the story rather than in that count.
@@ -6201,10 +7569,9 @@ stateDiagram-v2
 ```
 
 **Refused or unconfirmed dependency replans.** A proven dispatch refusal moves
-the child to `draft_failed`. One failed draft blocks the project's
-`/plan/new`, `/plan/quick` and `/plan/claim` entry points—CLI
-`hashd plan claim`, `hashd plan story`, `hashd plan bug`, and TUI/web
-planning—until retried with `hashd story retry` or closed.
+the child to `draft_failed`, retaining its own error and retry, edit and close
+actions. It does not block planning other stories through `/plan/new`,
+`/plan/quick` or `/plan/claim` (CLI, TUI and web).
 
 A dispatch error alone is not proof: Temporal may already have accepted the
 start. The server fails the child only when a workflow probe confirms nothing
@@ -6233,14 +7600,14 @@ The walk and failure-record writes have separate bounds: see
 
 These different bounds leave different resting states; both have recovery paths.
 
-### Arc proposal (draft/accepted -> arc_proposal -> origin or accepted)
+### Arc proposal (draft/approved -> arc_proposal -> origin or approved)
 
 An Arc proposal operation plans a story's breakdown into an Arc's children and is the only way a story becomes an Arc. The story keeps its identity and type until an approval converts it. Approval relabels the story by its new type: its served `story_label` reads ARC- with the same number, while its stored `id`, number and links stay the same. While a completed proposal awaits review its requirements stay editable through their existing writers, and an edit makes that proposal stale without changing it.
 
 ```mermaid
 stateDiagram-v2
     draft --> arc_proposal : request_arc_proposal
-    accepted --> arc_proposal : request_arc_proposal
+    approved --> arc_proposal : request_arc_proposal
     state arc_proposal {
         [*] --> queued : request write
         queued --> planning : pm slot acquired
@@ -6259,8 +7626,8 @@ stateDiagram-v2
         applying --> applying : refused after REQS / retries exhausted
     }
     arc_proposal --> draft : cancel_arc_proposal / discard_arc_proposal (origin draft)
-    arc_proposal --> accepted : cancel_arc_proposal / discard_arc_proposal (origin accepted)
-    arc_proposal --> accepted : approve_arc_proposal
+    arc_proposal --> approved : cancel_arc_proposal / discard_arc_proposal (origin approved)
+    arc_proposal --> approved : approve_arc_proposal
 ```
 
 - **Operations, attempts and versions.** An operation groups attempts, and
@@ -6370,9 +7737,15 @@ stateDiagram-v2
   other revision failure it records the attempt `failed` with its guidance kept
   and the target unchanged.
 - **Entry:** `POST /stories/{id}/arc-proposal` (body: `guidance`), offered by
-  the `request_arc_proposal` row of a draft or accepted story's
+  the `request_arc_proposal` row of a draft or approved story's
   `available_actions` (withheld by the Arc eligibility rule and the edge's
   guards). `hashd story arc <ID>` posts `POST /stories/{id}/arc-proposal`, the CLI form of `request_arc_proposal`.
+  Pending blocking story content questions (kind `question`, with missing urgency
+  treated as blocking) withhold this action, approval/acceptance, split,
+  implementation start and ready Arc-plan approval. The refusal names the
+  questions and `hashd answer <story>` with the project. The computed Arc
+  recommendation still shows; the split's `breakdown_proposal` is not a content
+  question. Answer paths, accepted Arc planning and `draft_failed` are unchanged.
   The request refuses before writing while the story's `arcproposal` workflow
   is still open or the probe cannot answer, then writes the reservation and
   dispatches. A start Temporal refused, or never attempted, records `failed`
@@ -6382,9 +7755,9 @@ stateDiagram-v2
   `queued`.
 - **Exits**: the cancel and the bound discard through
   `POST /stories/{id}/arc-proposal/cancel`, back to the origin (`draft` or
-  `accepted`); the bound approval through `POST /stories/{id}/approve`, and
+  `approved`); the bound approval through `POST /stories/{id}/approve`, and
   the Autonomous policy's approval of a proposal just stored, through the same
-  Arc decision service, to `accepted` whatever the origin. The help
+  Arc decision service, to `approved` whatever the origin. The help
   recorded on a failed attempt names that attempt's exits with their routes
   -- a revision chain's retry, revision cancel and target discard, an initial
   chain's cancel and retry -- as advice; clients act from `available_actions`.
@@ -6410,7 +7783,7 @@ stateDiagram-v2
       state "proposal_ready" as ready
       state "applying" as applying
       state "discarded (story at origin)" as discarded
-      state "approved (Arc accepted, children created)" as approved
+      state "approved (Arc approved, children created)" as approved
       state "queued (revision attempt, target stays stored)" as queued
       state "failed (revision attempt, target stays stored)" as failedrev
       state "needs_input (attempt waits on its question round)" as needsinput
@@ -6446,8 +7819,7 @@ stateDiagram-v2
   naming the combination; the unbound cancel never discards and the bound
   discard never cancels; a plain approve never approves a proposal (the held
   story refuses it, 409, at every phase) and a bound approve never reaches
-  forced acceptance, the pending-clarification or edit-in-flight checks, a
-  requirements-revision approval or a draft's acceptance. Every bound
+  forced acceptance, the pending-clarification or edit-in-flight checks or a draft's acceptance. Every bound
   decision runs under `reqs.ResolveArcProposalBinding`: admitted only while
   that version is the story's current operation in a phase the decision acts
   from, the story is held as that phase requires (a ready proposal has no
@@ -6706,7 +8078,7 @@ stateDiagram-v2
 - **Review-time editing.** At `proposal_ready`, stale or not, the story stays
   in `arc_proposal` and the operator edits its source through the direct
   writers, `POST /stories/{id}/update-criteria` and
-  `POST /stories/{id}/update-fields` (`mutateStoryContent` ->
+  `POST /stories/{id}/update-fields` (`MutateStoryContent` ->
   `reqs.MutateStoryContent`), or through the story edit agent (below). The one
   held-story rule (`arcProposalRefusal`, decided with the story's latest
   operation) admits a source edit only at `proposal_ready` with no
@@ -6756,7 +8128,7 @@ stateDiagram-v2
   story. The story stays in `arc_proposal` throughout and never takes the
   story `editing` status. The route admits it by the held-story rule and the
   origin status's own `start_edit` edge and guards
-  (`arcProposalStartEditRefusal`; an `accepted` origin requires
+  (`arcProposalStartEditRefusal`; an `approved` origin requires
   `story_has_no_workstreams`), then enters it with
   `reqs.EnterArcProposalSourceEdit` under the binding and dispatches
   `edit:{project}:{number}` naming the editing generation; the entry's
@@ -6780,7 +8152,7 @@ stateDiagram-v2
   offer is taken. Like an ordinary edit's `edit_complete`, that end sets the
   operation's `origin_status` to `draft`, so the agent-written content is
   accepted again: a later cancel or discard returns the story to `draft`,
-  never straight to `accepted`. A direct field edit at review leaves
+  never straight to `approved`. A direct field edit at review leaves
   `origin_status` as it was. A result that asks open questions applies
   nothing -- its attempt skips the REQS anchoring write -- and stores no
   clarification, since no answer route accepts one on a held story: the edit
@@ -6877,7 +8249,7 @@ stateDiagram-v2
   unknown key refuses the whole write), checks the REQS scope still applies
   (`CheckSplitScope`; a stale scope refuses the whole write), records the
   planner's intent capture for the source and every child, takes
-  `approve_arc_proposal` to `accepted`, clears `content_owner`, and records
+  `approve_arc_proposal` to `approved`, clears `content_owner`, and records
   `approved` with its time and the key-to-story mapping, keeping the decider
   the `applying` write recorded. Every `story_changed` is written in the
   transaction and published after commit. Then the REQS scope is written
@@ -7059,9 +8431,9 @@ Completion alone never satisfies abandonment eligibility, and implemented
 stories have no transition to abandoned. Existing inconsistent abandoned Arcs
 and their attached children are left unchanged.
 
-### Arc completion (accepted -> implemented)
+### Arc completion (approved -> implemented)
 
-An accepted Arc is completed by `complete_arc`, whose guards are the one rule:
+An approved Arc is completed by `complete_arc`, whose guards are the one rule:
 every non-abandoned child implemented (`arc_is_complete`) and no prerequisite
 holding the Arc back (`arc_prerequisites_finished`). The operator runs it with
 `hashd story complete-arc`; the server runs the same transition itself when a
@@ -7071,9 +8443,9 @@ each move records its own `story_changed`.
 
 ```mermaid
 stateDiagram-v2
-    arc_proposal --> accepted : approve_arc_proposal
-    draft --> accepted : accept (server, when the rule already passes)
-    accepted --> implemented : complete_arc (operator, or the server when a child or prerequisite finishes)
+    arc_proposal --> approved : approve_arc_proposal
+    draft --> approved : accept (server, when the rule already passes)
+    approved --> implemented : complete_arc (operator, or the server when a child or prerequisite finishes)
 ```
 
 - **Triggers.** After a story's move to `implemented` or `abandoned` has
@@ -7087,11 +8459,11 @@ stateDiagram-v2
   the catch-up path for an Arc whose rule already passes with no move left to
   trigger it -- finished before the server completed Arcs itself, or after a
   lost trigger. Each pass reads the project's stories once and runs the same
-  evaluation on every `draft` or `accepted` Arc, with the reason "completed by
+  evaluation on every `draft` or `approved` Arc, with the reason "completed by
   the server: the housekeeping sweep found its work finished". One Arc's
   fault does not stop the others; a fault adds to the sweep's error count, a
   refusal does not.
-- **Skips.** Only an Arc that is `accepted` or `draft` and has no
+- **Skips.** Only an Arc that is `approved` or `draft` and has no
   `content_owner` is a candidate; an Arc in any other status, or owned by an
   in-flight operation, is left as it is and nothing is recorded. A draft Arc
   whose rule fails stays draft, with no event and no record: the server never
@@ -7099,10 +8471,10 @@ stateDiagram-v2
 - **Draft Arcs.** For a draft Arc the server first moves it draft ->
   accepted through the `accept` edge, judging the rule with `complete_arc`'s
   own guards and the edge's `story_prerequisites_approvable` inside that
-  write, and records `story_changed` (status `accepted`, reason "accepted by
+  write, and records `story_changed` (status `approved`, reason "accepted by
   the server to complete the Arc: ..."). It then runs `complete_arc` on the
-  accepted Arc as below. These are two writes: if the completion fails after
-  the accept committed, the Arc is left accepted and the next evaluation
+  approved Arc as below. These are two writes: if the completion fails after
+  the accept committed, the Arc is left approved and the next evaluation
   completes it. The accept acts for nobody, so it applies no ownership check
   and leaves the Arc's owner as it was.
 - **The write.** A candidate runs `complete_arc` through the generic
@@ -7251,90 +8623,17 @@ In the TUI, suggestions show status indicators:
 
 ## Requirements Lifecycle
 
-```mermaid
-flowchart LR
-    REQS["REQS.md (shrinks)"] --> Stories --> SPEC["SPEC.md (grows)"]
-    Stories -- "descoped criteria" --> REQS
-```
+How REQS and SPEC are kept, owned and changed is in [docs/REQS.md](docs/REQS.md):
 
-### Document Update Flow
-
-REQS.md and SPEC.md target the configured base branch, separately from feature
-work. Post-merge finalization uses linked worktrees from the existing local Git
-repositories, not clones or the operator's checkout.
-
-```mermaid
-flowchart TD
-    subgraph PLAN["Planning Phase (main branch)"]
-        P1["hashd plan story '...'"] --> P2[git pull --rebase]
-        P2 --> P3["Planner annotates REQS.md\nwith WIP markers"]
-        P3 --> P4["git commit + push\nWIP markers on remote"]
-    end
-
-    subgraph IMPL["Implementation Phase (feature branch)"]
-        I1[hashd run STORY-0043] --> I2[Creates worktree on feature branch]
-        I2 --> I3[Agent implements in worktree]
-        I3 --> I4["Commits to feature branch\nNO changes to REQS.md or SPEC.md"]
-    end
-
-    subgraph MERGE["After code merge"]
-        M1[hashd merge] --> M2[Acquire merge and artifact locks]
-        M2 --> M3["Fetch destination branches\ncreate or reuse isolated linked worktrees"]
-        M3 --> M4["Update SPEC from story and diff\ncheckpoint prepared result"]
-        M4 --> M5["Preserve and burn marked REQS sections\nrestore deferred criteria; checkpoint"]
-        M5 --> M6["Commit only configured artifacts\npublish each owning repository"]
-        M6 --> M7["Record burn and finalize story\nbest-effort worktree cleanup; preserve changes"]
-        M7 --> M8[Record archive completion]
-        M4 & M5 & M6 & M7 -->|Failure or interruption| RETRY["Preserve prepared work\nretry hashd merge from checkpoints"]
-    end
-
-    PLAN --> IMPL --> MERGE
-```
-
-### Critical Invariants
-
-1. **WIP tags are added to main** during planning and pushed immediately
-2. **Feature branches never touch REQS.md or SPEC.md** - all doc work happens post-merge
-3. **Isolated publication** - remote finalization leaves the base checkout's files, index, and branch untouched. Only prepared artifact commits are rebased onto an advancing destination; conflicts preserve the work and stop finalization. Local merge publication uses the recorded code merge, never a later base HEAD.
-4. **One documentation commit per owning repository** - SPEC and REQS share a commit when colocated. No changes is success, not a commit failure.
-5. **Publication precedes completion** - required failures leave finalization incomplete and retryable. Completed preparation and publication steps are checkpointed under the project directory's `archive/`. Local-only / `--no-push` finalization fast-forwards a clean, unchanged local base; otherwise prepared work is retained and finalization stops.
-6. **Implemented stories' WIP markers survive until the burn** - the story-transition cleanup and planning's marker reconcile both preserve (or themselves burn) an implemented story's markers; only abandoned/missing stories get markers stripped with prose kept. The merge-archive burn finds the requirement sections by those markers, consumes the prose, and records a `requirement_burned` event; the reconcile sweep performs the same burn as the crash backstop when the archive never ran. Two closes meet a story's requirement without a hashd merge, and both burn it the same way: a story closed with `hashd close <story> --no-changes` (no work was needed: its workstream is `closed_no_changes`, the story `abandoned` with the met requirement recorded in its own data so removing the workstream later changes nothing, and its claimed source suggestion is completed), and a story closed with `hashd close <story> --ref <ref> --reason "..."` (`closed_by_person`: the work landed outside hashd; its source suggestion stays consumed). For either, the story-transition cleanup burns its sections with the sweep's same burn and `requirement_burned` event instead of stripping them, the sweep again the backstop (and the only burn for an ownerless story, which no one's sign-in may publish). A plain `hashd close <story>` abandons the story and returns its requirement to REQS as open prose. A story with no markers burns nothing. The legacy workstream close (`POST /workstreams/{id}/close`) returns the story for re-planning and burns nothing.
-
-### Manual Artifact Inspection and Edits
-
-Manual document writes share the artifact ownership boundary with planners and
-editors. They compare the editor's saved revision, hold the document lease during
-write/commit/publication, and reject stale revisions, dirty or wrong-branch
-checkouts, symlink paths, and edits inside protected REQS WIP sections. Explicit
-leases can span multiple steps and require renewal before expiry. See [manual document commands](docs/walkthrough.md#manual-artifact-inspection-and-edits).
-
-### Failure Modes
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Documentation incomplete after code merge | Finalization failed or was interrupted | Resolve the reported failure, then retry `hashd merge` |
-| Documentation publication conflicts | Destination changed since preparation | Reconcile the preserved documentation worktree, then retry |
-| No matching WIP sections | No published markers for this story, including ad-hoc stories | No REQS burn is recorded |
-
-### WIP Tag Conflicts = Scope Overlap
-
-If `git push` fails during planning due to conflicting WIP markers, this is NOT a git problem to auto-resolve.
-
-**What it means:** Two stories are claiming the same requirements.
-
-```
-Story A (already pushed):                Story B (trying to push):
-<!-- BEGIN WIP: STORY-0042 -->           <!-- BEGIN WIP: STORY-0043 -->
-| Skill Level Filtering | ... |    <--   | Skill Level Filtering | ... |
-<!-- END WIP -->                         <!-- END WIP -->
-```
-
-**Required action:** Rescope one of the stories. The overlap indicates:
-- Stories are too broad
-- Work is being duplicated
-- Requirements need to be split more granularly
-
-The system should abort story creation and report: "STORY-B overlaps with STORY-A. Rescope before proceeding."
+- [A story's claim, stage by stage](docs/REQS.md#a-storys-claim-stage-by-stage)
+- [Spec Mode](docs/REQS.md#spec-mode)
+- [Document Update Flow](docs/REQS.md#document-update-flow)
+- [Critical Invariants](docs/REQS.md#critical-invariants)
+- [Manual Artifact Inspection and Edits](docs/REQS.md#manual-artifact-inspection-and-edits)
+- [Failure Modes](docs/REQS.md#failure-modes)
+- [WIP Tag Conflicts = Scope Overlap](docs/REQS.md#wip-tag-conflicts--scope-overlap)
+- [Descoped Criteria Lifecycle](docs/REQS.md#descoped-criteria-lifecycle)
+- [Artifact Edit Locks (REQS / SPEC)](docs/REQS.md#artifact-edit-locks-reqs--spec)
 
 ---
 
@@ -7373,7 +8672,7 @@ form of the same operation is open (and refused, starting nothing, when that
 cannot be checked); for the notes and connector-event families a closed
 legacy-form execution of the same occurrence refuses too, so an occurrence
 documented before the move is never documented again, and the cancel, liveness and in-flight reads address
-whichever form is open, the planning run's stored `flow_run_id` first. PM-artifact mutations additionally serialize through the `pm:{project}` section, and the `housekeeping` sweep fires from a Temporal Schedule every 5 minutes. `hashd project describe --suggest` and `hashd project tech --suggest` dispatch the same way under `pmdescribe:{project}:{target}` (target `description` or `tech`): the CLI POSTs `/projects/{name}/describe` or `/tech`, the server runs the `pm_describe` agent stage server-side, and the CLI renders the result from the `pm_describe_completed` event -- so the agent runs on the server in both local and team mode and the CLI never invokes an agent itself.
+whichever form is open, the planning run's stored `flow_run_id` first. PM-artifact mutations additionally serialize through the `pm:{project}` section, and the `housekeeping` sweep fires from a Temporal Schedule every 5 minutes. `hashd project describe --suggest` and `hashd project tech --suggest` dispatch the same way under `pmdescribe:{project}:{target}` (target `description` or `tech`): the CLI POSTs `/projects/{name}/describe` or `/tech`, the server runs the `pm_describe` agent stage server-side, and the CLI renders the result from the `pm_describe_completed` event -- so the agent runs on the server in both local and team mode and the CLI never invokes an agent itself. `hashd directives ai-edit` dispatches the same way under `directivesedit:{project}:{level}` for the global and project levels, and `directivesedit:{project}:workstream:{ws}` for a workstream's (one ai-edit per document at a time): the CLI POSTs `/directives/{level}/ai-edit`, the server runs the pm_edit agent stage server-side, the CLI renders the proposal from the `directives_edit_completed` event, and nothing is saved without the operator's explicit confirmation.
 
 #### Restart in-flight inventory
 
@@ -7430,11 +8729,11 @@ A human-gate park (`PARKED`) and a restart hold (`HELD`) are different waits wit
 
 ### Restart holds
 
-Stopping hashd-server stops its in-server Temporal worker, and every activity it is running dies with it. `hashd restart`, `hashd restart server` and `hashd stop` therefore put a **restart hold** in force first and wait until every affected workflow is at a stopping point. Running stages finish under their own existing timeouts and retry policies; the hold only keeps the next unit of work from starting. There is no restart-specific wait limit: no countdown, no wait-timeout flag or setting, no derived ceiling. The wait ends when every item is ready, or when the operator cancels it (Ctrl-C/SIGTERM) or runs the `--force` form. No request, transport or probe timeout ends it or releases the hold.
+Stopping hashd-server stops its in-server Temporal worker, and every activity it is running dies with it. `hashd restart`, `hashd restart server` and `hashd stop` therefore put a **restart hold** in force first and wait until every affected workflow is at a stopping point. Running stages finish under their own existing timeouts and retry policies; the hold only keeps the next unit of work from starting. There is no restart-specific wait limit: no countdown, no wait-timeout flag or setting, no derived ceiling. The wait ends when every item is ready, or when the operator cancels it (Ctrl-C/SIGTERM) or runs the `--force` form. No request, transport or probe timeout ends it or releases the hold. `hashd backup create` takes the same restart hold through the same gate and wait before it copies the stores; it stops nothing, and it releases the hold when it ends, whether or not a backup was written.
 
 **The hold.** One row per owner kind and scope on the system database (`execution_holds`, `server/internal/holds`). A restart hold is server-wide -- it names no project or workstream, and covers every project and every workflow family in `server/internal/inflight/families.go`; a **workstream pause** names one workstream and covers only that one (see below). The row carries the exact request that holds it (`request_id`, chosen by the requesting command) and the server boot that took it (`boot_id`). `POST /restart-hold` takes or re-asserts it; `DELETE /restart-hold?request_id=` releases it; `GET /restart-hold` reads it and the startup release below. These routes accept solo-mode callers and team-mode owners and admins; the internal service token never reaches them.
 
-**Admission.** While any server-wide hold row exists, every request that would dispatch, signal, cancel or close workflow execution is refused with a 409 Diagnostic sourced `hold.restart` that names the hold and the command to retry afterwards. A request also carries the workstream it executes for, if any, and is refused the same way by that workstream's reservation. That covers the operator verbs -- run, approve, reject, answer (story, workstream and the final clarification answer), plan (new/quick/claim/retry/discover/split), replan, reset, close, workstream remove/delete, project remove, story run and cancel, docs, merge and AI resolve, add-commit, PR create and push, detect, and a new artifact-lock acquire, cancel or override -- and every machine-originated start through the same engine chokes (`dispatchWork`, `signalHumanGateTemporal`, `closeRunExecution`, `cancelDispatchedWork`): startup resume, `ResumeWorkstream`, the post-merge dependency handoff (whose refusal leaves the child `pending` for the planning reconcile, as any declined handoff does). A route refuses before its first side effect; replan, reset, close and remove are refused because closing a held run discards it (the runner workflows run no cleanup on cancellation). Heartbeat and release of an artifact lock someone already holds stay open, so current work can finish.
+**Admission.** While any server-wide hold row exists, every request that would dispatch, signal, cancel or close workflow execution is refused with a 409 Diagnostic sourced `hold.restart` that names the hold and the command to retry afterwards. A request also carries the workstream it executes for, if any, and is refused the same way by that workstream's reservation. That covers the operator verbs -- run, approve, reject, answer (story, workstream and the final clarification answer), plan (new/quick/claim/retry/discover/split), replan, reset, close, workstream remove/delete, project remove, story run and cancel, docs, merge and AI resolve, add-commit, PR create and push, detect, and a new artifact-lock acquire, cancel or override -- and every machine-originated start through the same engine chokes (`dispatchWork`, `signalHumanGateTemporal`, `closeRunExecution`, `cancelDispatchedWork`): startup resume, `ResumeWorkstream`, the post-merge dependency handoff (whose refusal leaves the child `pending` for the planning reconcile, as any declined handoff does). A route refuses before its first side effect; replan, reset, close and remove are refused because closing a held run discards it (the runner workflows run no cleanup on cancellation). Heartbeat and release of an artifact lock someone already holds stay open, so current work can finish. A runner's capacity refuses no request: work that would start on a full runner is dispatched and waits at its run's boundary for a slot (the wait for a runner slot, below).
 
 The refusal is race-free by one admission lock, shared by both hold kinds. Every admitted request holds its read side until its engine call has returned, and taking the hold takes the write side: when `POST /restart-hold` returns, every request that passed admission has already started (and is described exactly by the inventory), and every later one is refused. Admission is always taken inside the project lifecycle lock, never around it.
 
@@ -7443,11 +8742,13 @@ The refusal is race-free by one admission lock, shared by both hold kinds. Every
 | Family | Boundary |
 |---|---|
 | run cycle (`run-cycle:`) | before every runner substage starts, except `commit`: QA gate -> commit -> push is one unit, held only before `qa_gate` |
-| run (`run:`) | between micro-commit cycles; before continue-as-new; the human-gate decision, where auto-continue becomes a hold; before the merge gate; between the merge gate and final review; and, on a hold-requested signal only, at a park already waiting on a human decision (the review gate, the agent-stop gate) |
+| run (`run:`) | before provisioning, a fresh run's first boundary once it has begun; between micro-commit cycles; before continue-as-new; the human-gate decision, where auto-continue becomes a hold; a decision a park returns (the review gate, the agent-stop gate), before it runs anything on the runner; before the merge gate (after final review approves, in the review-first lane end; ahead of the gate's prepare phase in a gate-first one); between the merge gate and final review (ahead of final review in both orders); and, on a hold-requested signal only, at a park already waiting on a human decision (the review gate, the agent-stop gate), whose check asks for no runner slot |
 | planning, edit, AC amendment (`plan:`, `edit:`, `acamend-apply:`) | acquiring the `pm:{project}` section, where their work starts (sections that wait with a deadline -- housekeeping -- are not held there) |
 | housekeeping | skips its whole tick and records `skipped_held`; the next tick after release is the recovery |
-| usage-limit timer (`usage-limit:`) | its wait for the reset, acknowledged at once when the hold asks (`execution-hold-requested`); no retry is sent while it is held |
-| merge, mergelock, resolve, PR create/push, docs, discovery, detect, adjudicate, AC-amendment derive, add-commit, plan split, describe | none: ready only when not executing (closed) |
+| story rebase (`rebase:`) | before its first stage on the runner, an undo-only rebase's undo included; before the conflict agent resolves a conflict, or the step the operator's fix continues with; before its undo when its conflict gave the runner slot back; and, on a hold-requested signal only, at a conflict waiting on the operator, whose check asks for no runner slot |
+| PR reopen (`prreopen:`) | before its stage on the runner |
+| merge, resolve, PR create, PR push, recovery answer, add-commit, adjudicate, docs (`merge:`, `resolve:`, `prcreate:`, `prpush:`, `recovery-answer:`, `addcommit:`, `adjudicate:`, `docs:`) | before the first stage each puts on the runner -- a merge's in every execution it continues as new, before the merge lock; an interrupted resolve's before its undo; a recovery answer's before its fix is planned -- and past it; a completed resolve's before it dispatches its run continuation (`before continuing its run`), after the resolution or the FIX it scheduled, and again, at a site of its own, each time admission refuses that dispatch for a hold that landed after the check, ready only when not executing (closed); before the next stage it puts on the runner while it holds no slot it asked for there, cancelled at that boundary or started by a build before it, and a merge so before each attempt at its merge lock; and a PR merge or a merge-workflow archive waiting in the merge chute, on a hold-requested signal or at its grant, out of the queue (`queued for the merge chute`) once it has withdrawn -- a direct merge, and a PR merge that entered the chute under a build before this boundary, does not withdraw: it waits for its grant or its cancellation, and a plain restart does not reach readiness while one is queued; and a PR merge whose locked section yielded to its pause, at the same boundary once the lock run has closed -- the locked section looks at the pause at the last point core code controls before each push and forge write until its first merge request is sent; no check is atomic with a remote write, so a pause landing inside a forge call or git's credential fetch is taken at the next boundary |
+| mergelock, discovery, detect, AC-amendment derive, plan split, describe | none: ready only when not executing (closed) |
 
 At a boundary the workflow runs `HoldBoundaryCheck`, an activity that reads the committed hold rows without the admission lock: an admitted request can be waiting for this very workflow to close, and a hold writer queued behind that request would otherwise block the check. With no hold, it deletes this run's acknowledgement and the workflow proceeds. With a hold, it records an acknowledgement for this exact run (`execution_hold_acks`: workflow ID, run ID, parent execution, entity, boundary), then reads the holds again, so a release that took its acknowledgement snapshot just before this one landed cannot strand the run; if the hold is gone by then, the acknowledgement is deleted and the workflow proceeds. Otherwise the workflow blocks on the `execution-hold-released` signal or cancellation, then checks again. A signal is a prompt to look, never permission: a stray or duplicate one under a standing hold costs one re-check. A run already parked at a human gate reaches no boundary on its own, so it checks only when the `execution-hold-requested` signal arrives; each request is its own numbered site, and the gate channel is not read while it is held. An unreadable check retries under the activity retry policy rather than proceeding past a hold it could not read. Each call site is its own `GetVersion` change, so a run started by an earlier build replays the boundaries it already passed unchanged and holds at every one it reaches after.
 
@@ -7455,29 +8756,41 @@ At a boundary the workflow runs `HoldBoundaryCheck`, an activity that reads the 
 
 **Detect starts.** A detect workflow ID hashes a repo path nothing else records, and the project may not be registered, so a detect start is recorded on the system database (`detect_dispatches`) before it is attempted and settled after, per attempt: a confirmed start binds its run; AlreadyStarted binds the run it names, and leaves the start pending when it names none; an explicit engine refusal, or a start never attempted, clears that attempt's pending mark; anything else (a transport error, a timeout) leaves it pending. An earlier attempt settling late never clears a later attempt's pending mark. The inventory reads these records for every project. A pending start is listed as unchecked, whatever run the record also names -- a closed earlier run says nothing about the start after it -- so a plain restart does not reach readiness over it. A confirmed run is described by its exact workflow and run ID and is on the board while it runs; closed, or not found, it is not.
 
-**Workflow epoch.** A release that cannot replay the histories an earlier one wrote raises the workflow epoch, and its upgrade's runtime migration M024 moves the older store aside (CONTAINER.md, Upgrades). The move loses every workflow open in the store except those the server re-creates from its own databases: a run parked at a human gate (its workstream at `awaiting_human_review`, no decision being delivered, no cycle open), whose approve or reject continues through orphan recovery; PR watches and usage-limit timers, which housekeeping starts again; and the housekeeping sweep. Everything else blocks it, and so does a runner assignment that is offered, started, or holding a result its run has not taken. The full restart asks once its gate is satisfied, while the server it is replacing still runs: with any blocker it releases its hold, stops nothing, and names each one with how to finish it. On the box that hosts the server, `--force`, and `hashd restart server`, which leaves the sidecar running, are refused before the gate while the move is pending. M024 asks again with the sidecar stopped and refuses, writing nothing, if anything has appeared since; only the release that started that work can run it then.
+**Workflow epoch.** A release that cannot replay the histories an earlier one wrote raises the workflow epoch, and its upgrade's runtime migration M024 moves the older store aside (CONTAINER.md, Upgrades). The move loses every workflow open in the store except those the server re-creates from its own databases: a run parked at a human gate (its workstream at `awaiting_human_review`, no decision being delivered, no cycle open), whose approve or reject continues through orphan recovery; PR watches, which housekeeping starts again; and the housekeeping sweep. Everything else blocks it, and so does a runner assignment that is offered, started, or holding a result its run has not taken. The full restart asks once its gate is satisfied, while the server it is replacing still runs: with any blocker it releases its hold, stops nothing, and names each one with how to finish it. On the box that hosts the server, `--force`, and `hashd restart server`, which leaves the sidecar running, are refused before the gate while the move is pending. M024 asks again with the sidecar stopped and refuses, writing nothing, if anything has appeared since; only the release that started that work can run it then.
 
 **Release.** `DELETE /restart-hold` deletes the row only for the request named (a late release from a cancelled request cannot delete a later request's hold, and is refused), then signals every acknowledged run -- by exact workflow and run ID -- while no hold row remains. A delivered signal leaves the acknowledgement for the run's own re-check to clear; a run the engine reports closed has its acknowledgement removed; a signal that cannot be delivered is reported as undelivered and the release is unconfirmed. Release is repeatable: the acknowledgements, not the row, decide what is signalled, so a later release -- any `hashd restart` cancel, or the next startup -- re-delivers. For a workstream, Go (`hashd run`, the TUI and web run action) on a run still waiting with no hold left delivers the release to that exact run and dispatches nothing. A planning, edit or AC-amendment section waiting at its acquisition has no such verb; its release is re-delivered by the next successful restart or start.
 
 **Shutdown, startup, release.** The hold row survives the stop. A replacement server does not start held work before it is ready: held runs are waiting on a signal, hold rows still refuse admission, and startup auto-resume runs only after the startup release. Once the boot is ready -- temporal client connected, worker started, and its own API answering the boot self-dial -- it releases restart holds taken by earlier boots (never the current boot's), re-delivers to acknowledged runs, and records the outcome for `GET /restart-hold`. `hashd start` and `hashd restart` both wait for that recorded startup release outcome and report it, ending early if the server process exits before reporting or refuses the read for want of credentials (a team server started before supervisor credentials exist). A boot that is not ready keeps the holds and says why; there is no retry loop, no supervisor and no failed-start repair. Work keeps its FSM and micro-commit/section position; nothing completed is repeated to resume.
 
-**The wait for a runner.** After any boot, upgrade or not, a run whose family puts work on its workstream's runner (`UsesRunner` in `server/internal/inflight/families.go`: run, run cycle, story rebase, usage-limit retry) is held at its boundary until that runner is back: until its event stream (`GET /runner/events`, the connection offers travel on) attaches while its last check-in reported the server's version. That is the earliest point an offer can reach it; an offer made before would be lost when the runner was found disconnected. The boundary check adds this wait to the holds it reads (owner `runner_return`, reason "waiting for runner <name> to come back"), the startup release reports such a run as held with that reason rather than signalling it, and the runner's return releases every acknowledged run no other hold or absent runner covers. Runs on runners already back resume at the startup release, runs that need no runner (a PR watch, a planner section) are never held for one, and the local runner returns the same way. There is no deadline: a runner that stays away keeps its runs waiting, shown as runtime status `waiting`, never failed, and they resume when it reconnects on a compatible version; no other runner's runs wait for it. Moving the story to another runner (`hashd story runner set`) asks its waiting runs to check again, so a move to a runner that is back resumes them unless another hold still covers them. A move under a ready pause leaves that pause standing with its request identity intact and its run held; exact-request unpause lets the run continue on the destination. If no open run remains, unpause starts nothing: use `hashd run <story>` afterwards. The destination rebuilds from the branch, and the placement epoch fences old-runner work; checkout state is never transported. Go (`hashd run`) does not resume a run waiting for its runner, since its own check would hold it again: the `run` row is withheld naming the wait, the route refuses with a 409 sourced `dispatch.run.waiting_for_runner` and dispatches nothing, and the inflight board leaves the run out of `release_pending` (it is held, not missed by a release). `hashd restart` and `hashd start` report each such run as staying held with its reason, resuming when the runner reconnects. The set of runners back lives in the server's memory, so every boot starts it empty.
+**The wait for a runner.** After any boot, upgrade or not, a run whose family puts work on its workstream's runner (`UsesRunner` in `server/internal/inflight/families.go`: run, run cycle, story rebase, PR reopen, and the merge, resolve, PR create and push, recovery answer, add-commit, adjudicate and docs workflows) is held at its boundary until that runner is back: until its event stream (`GET /runner/events`, the connection offers travel on) attaches while its last check-in reported the server's version. That is the earliest point an offer can reach it; an offer made before would be lost when the runner was found disconnected. The boundary check adds this wait to the holds it reads (owner `runner_return`, reason "waiting for runner <name> to come back"), the startup release reports such a run as held with that reason rather than signalling it, and the runner's return releases every acknowledged run no other hold or absent runner covers. Runs on runners already back resume at the startup release, runs that need no runner (a PR watch, a planner section) are never held for one, and the local runner returns the same way. There is no deadline: a runner that stays away keeps its runs waiting, shown as runtime status `waiting`, never failed, and they resume when it reconnects on a compatible version; no other runner's runs wait for it. Moving the story to another runner (`hashd story runner set`) asks its waiting runs to check again, so a move to a runner that is back resumes them unless another hold still covers them. A story at `rebasing` is not moved (`placement.rebase_unpublished`, see **Rebase**), so a story rebase waiting for its runner waits for that runner. A move under a ready pause leaves that pause standing with its request identity intact and its run held; exact-request unpause lets the run continue on the destination. If no open run remains, unpause starts nothing: use `hashd run <story>` afterwards. The destination rebuilds from the branch, and the placement epoch fences old-runner work; checkout state is never transported. Go (`hashd run`) does not resume a run waiting for its runner, since its own check would hold it again: the `run` row is withheld naming the wait, the route refuses with a 409 sourced `dispatch.run.waiting_for_runner` and dispatches nothing, and the inflight board leaves the run out of `release_pending` (it is held, not missed by a release). `hashd restart` and `hashd start` report each such run as staying held with its reason, resuming when the runner reconnects. The set of runners back lives in the server's memory, so every boot starts it empty.
 
-**Workstream pauses.** A person pauses one workstream: `hashd workstream pause <id>` (`POST /workstreams/{id}/pause`) writes a `workstream_pause` naming that workstream, under the same admission write lock and inside the project lifecycle lock, so a removal either finishes first or finds the hold. A workstream has at most one; a repeat naming the same `request_id` returns the standing one, and another request's is a 409. The request stops nothing itself: it refuses what would start next, asks the workstream's open run to check its holds, and lets running work reach its own boundary. Requests scoped to that workstream are then refused with a 409 sourced `workstream.pause`, including the plan rewrites a restart hold does not refuse (PATCH plan, edit-commit, skip, resolve-oscillation, story split). Removing the containing project is refused too, naming the paused workstreams -- the pause is server-wide state that outlives the project row, so a teardown that went ahead would strand it -- and `--force` does not pass that refusal: force skips hashd's judgement about its own work, not a person's. Reads are untouched, every other workstream and project is untouched, and the housekeeping tick is not skipped. While the hold stands, a workstream whose runtime status would be `running` or `idle` reads `paused`, with the hold's readiness served as `pause_readiness`; the pause adds no stage, trigger or transition.
+**The wait for a runner slot.** A runner's capacity (`runners.capacity.<runner-id>`, a whole number of at least 1, 4 when unset) limits ordinary work across every project placed on it: ordinary work is admitted only while the runner's active load is below its capacity. The holder of a project's merge lock (a merge or archive granted the project's merge chute) is the exception: once granted the lock, it is admitted to its runner at once whatever the runner's load, in addition to it, and counts in that load until it gives its slot back, which it does as today -- a merge keeps its place on the runner after it releases the merge lock and gives it back when it queues for the lock again for its archive. The project merge lock serializes every merge and archive of the project, so a holder waiting for a slot keeps the lock idle while merges on runners with free slots wait behind it, and granting the lock only to merges whose runners have free slots would let a merge on a busy runner be passed over without limit. The cost is that a runner can be above its capacity by one job for each project whose lock holder runs on it, plus that project's merges that have landed on that runner and have not yet queued for their archive. That second part lasts only as long as the archive's preparation; no merge or archive waits because of it, ordinary work on that runner is admitted once the load is back under capacity, and it is acceptable because a landed merge preparing its archive runs no build and no test. Only capacity is waived; restart holds, the wait for a runner to come back and workstream pauses act on a lock holder as before, and when that hold ends a merge or archive granted the lock while held is awakened directly and admitted at once whatever the runner's load, never queued for a runner slot (housekeeping retries any failed direct release of such a holder). Work starts on a runner only through admission there. A run whose family takes a slot on its workstream's runner (`UsesRunner` in `server/internal/inflight/families.go`) is admitted at its boundary: the boundary check asks last, and only when no other hold covers the run. For ordinary work, asking enters the workstream in its runner's queue and admits it while that runner's active load is below its capacity and it is the first entry that could start; a merge lock holder asks marked for that grant and is admitted immediately without entering the queue. Which entries could start is read inside the admission's own serialized transaction, and a run left waiting is acknowledged in that same transaction, so no pause, unpause or acknowledgement lands between that read and the admission it decides, and no entry waits without the acknowledgement that makes it eligible: work queued later never starts ahead of an earlier entry that could. Admitted, the workstream holds the slot until it leaves active execution, and every later boundary of its runs finds it admitted. Queued, the run is held (owner `runner_capacity`, reason "waiting for runner <name> (<active>/<capacity>)"), acknowledged like any held run, and reads runtime status `waiting`. A wait for a slot is a waiting state, never an error, and has no deadline. A fresh run's first boundary comes before anything is provisioned, once the run has begun, and that of every other workflow that takes a slot -- a story rebase, a PR reopen, a merge, a resolve, a PR create or push, a recovery answer, an add-commit, a scope judge, a docs update -- before its first stage on the runner, an undo-only rebase's (the cancel of a rebase whose workflow is gone) before its undo, so newly placed work keeps its runner and waits in that runner's queue without starting. A rebase that ends at that first boundary, cancelled or failed while it waits, has run nothing on the runner and undoes nothing there: the story returns to the stage it came from, and an undo-only rebase leaves the stopped rebase standing for the story's next cancel. A fresh resolve cancelled there has run nothing either, but its rollback, the one way out of `resolving`, runs on the runner, so it asks for the slot the resolve never got first, and the story stays `resolving` until the runner admits it. A run dispatch puts unplaced work on the local runner first, as its provisioning would, and starts no run whose work it cannot place. Unplaced legacy work that a standalone command -- a docs update, an added commit -- runs as it stands runs on the local runner, so it waits for one of the local runner's slots. The queue has two tiers -- every workstream that has held a slot under its current placement waits ahead of every new placement -- and within a tier the further-along story goes first, by stage group, then plan progress, then waiting time (`server/internal/runnerqueue`); no rank is stored. Before it admits anything, each boot reserves a slot, whatever the runner's load, for every stage a runner is already executing -- a stage reserved, offered or started that nothing has consumed, whose workflow is open and of a family that takes a slot, or a merge lock's under the merge that took one -- for a workstream that holds no slot and waits in no queue, a merged one's archive included, and an unplaced story's on the local runner, so work already in flight when a server first applies admission is counted, and its run's next boundary finds it admitted. Until that reconciliation succeeds, nothing is admitted. The same reconciliation counts a stage an older workflow reserved before its boundary asked for a slot, whose offer is still to come and whose replay passes the boundary added since: every command occurrence neither consumed nor closed at its workstream's current command generation counts, reserved, offered or running. Upgrade to slot admission through `hashd restart` or `hashd start`, whose hold leaves no runner stage being prepared or reserved: a stage that a crash or a forced restart interrupts before its reservation is written is counted only from its workflow's next boundary. A workflow that asks only at its first boundary, started by a build before that boundary, has passed it without asking; it asks before the next stage it puts on the runner instead, and a merge before each attempt at its merge lock.
 
-To move a running story, first use `hashd workstream pause <story>` and wait for `pause_readiness` to become `ready`, then `hashd story runner set <story> <runner> -y`. Only the placement move passes the pause's refusal: it leaves the pause and its exact request standing, and all other scoped execution remains refused. Ownership, destination eligibility, discard confirmation and expected-placement checks still apply, and an open command occurrence or live attempt still refuses the move. Saved human edits refuse it even with discard confirmation; restart holds and open worktree resets still refuse it too. An acknowledged parked workflow does not itself hold a stage open. Unpause with `hashd workstream unpause <story> --request-id <pause-request-id>` to continue the paused run on the destination. If no open run remains, use `hashd run <story>` after unpausing. The destination rebuilds from the published branch rather than receiving checkout state. If origin positively reports that branch absent, a move with discard confirmation recorded on its current `workstream_placed` event permits rebuilding at the recorded base SHA, never the current base tip. Without that consent, preparation refuses and asks for `hashd story runner set <story> <runner> -y`; repeating the current destination records consent under the same move guards without changing its epoch. Historical placement events grant no discard consent.
+A workstream's slot, or its place in the queue, belongs to the execution that asked for it last: a later execution of the workstream that asks at its boundary takes it over. A release of held runs that replays an acknowledgement enters a workstream with no slot and no place in the queue but takes nothing over, since a later execution may have asked since the acknowledgement was written. The slot goes back when its workstream leaves active execution: when the workflow that took it ends -- any workflow that takes one -- on success, failure or cancellation (its exit's `RunnerReleaseSlot`, version `runner-slot-release`; a continue-as-new keeps it). The exit names its own execution -- its run, and the run it continued as new from, since a workflow asks at a boundary before it continues -- so an earlier execution's exit, an independent rerun's, or a PR reopen's whose saved run has taken the slot over gives back nothing; when it is closed (`closed`, `closed_no_changes`); and when it is removed. A closed workstream (`closed`, `closed_no_changes`) never waits in a queue, whatever wrote the stage. A merged one is not closed: a stage is written while its execution still runs -- the archive after a merge lands -- so a slot held as the stage was written stays held until the execution that took it gives it back, and a retry of an unfinished archive (`hashd merge`, housekeeping's archive retry) asks for its slot at the merge's boundary like any work, waiting in the resume tier with the merging group, the tail of its merge. A run terminated outside workflow code runs no exit, so housekeeping releases the slot, or the queue entry, of a workstream with no open run of a family that takes one, and a dead worker leaks no capacity; a merge lock section the slot's merge started, which a terminated merge abandons to finish its runner operations, keeps the slot until it ends; the release names the execution it found closed, so one that has taken the slot over since keeps it. Each release runs its runner's dispatch pass, and so does a release of held runs -- a runner's return among them -- for each runner where a run it released waits, and every housekeeping sweep for each runner where the project's work waits: the pass admits, in queue order and while a slot is free, each entry whose run waits acknowledged at a boundary no other hold covers, and then sends `execution-hold-released` to every run on that runner that waits that way in a slot its workstream holds -- first those it admitted, in the order it admitted them, then any an earlier release did not reach. The run's own boundary check confirms its admission; the signal grants nothing. A workstream whose waiting runs have all closed gives its slot back, naming those runs' executions, so one that has taken the slot over since keeps it. A system config write that sets or resets a runner's capacity records the change through the runner queue change event, whether or not the queue moved, and runs that runner's dispatch pass once the write has landed -- `reset --all` erases the whole section at once, so it records and runs once for each runner whose override it removed -- so a raise lets eligible queued entries take the new slots in queue order, with no re-placement, and a client re-reads the capacity, and the waiting explanation built from it, after a lowering too, which admits nothing. Admission reads the capacity inside its own serialized transaction, so an accepted change governs every later admission, concurrent ones included. Lowering a runner's capacity below its active load stops nothing: running work finishes, and no ordinary work starts or resumes there until the load is below the new capacity. A restart hold and the wait for a runner to come back are not waits of the story's own: a run they hold keeps its slot.
 
-Execution and structural-edit rows in the workstream's `available_actions` read unavailable while it is paused, with the pause as the failed guard. Unpause remains offered, as does append-only guidance (`feedback`), which changes neither execution nor the plan. A pause that cannot be read withholds them the same way, because that is what admission does with it. A server with no system database withholds nothing but the two pause rows: nothing can be paused there, so nothing is refused.
+**What the reads serve.** The runner reads (`GET /runners`, `GET /runners/{id}`) serve each runner's `capacity`, its `active_load` -- its workstreams in active execution, across every project placed on it, which can exceed `capacity` by each project's merge lock holder running on it plus that project's merges that have landed on it and have not yet queued for their archive, served as it is without clamping (for example 3 of 2, or 4 of 2 while a landed merge prepares its archive) -- and its `queue`: every workstream waiting there, in the order admission takes them, read from the same records the dispatch pass admits from, so no client recomputes the order (a merge lock holder is admitted at its grant and is never in the queue). Each entry names its project, workstream and story label, and the facts it is ordered by: `tier` (`resume` or `new`), `stage_group` (`merging` for merging / merge gate, a merged story's archive retry among them, `pr_open` for PR open / final review, `implementing` or `provisioning`, mapped from the stage by `fsm.RunnerQueueStageGroupOf`), `micro_commits_done` and `micro_commits_total` of its plan, and `waiting_since`. The queue has no truncation or count cap; the waiting work of a project the reader cannot view is left out, as every collection read leaves it out, and `queue_withheld` says that some was. A read that fails serves `slots_error` in place of the three, never a partial queue. A failed read of a runner's queue names no project its reader cannot view, nor its work, wherever it is served -- the runner and workstream reads, the `run` row and Go, the inflight inventory, a release's outcomes: a failure in such a project says only that a workstream of a project the reader cannot view could not be read. The workstream reads -- the detail, its snapshot and the project's list -- serve the wait for a slot beside its reason as `capacity_wait`, the runner whose queue the work waits in (`runner_id`, `runner_name`), so no client parses the reason. They serve it for no other wait: the wait for a runner to come back has only its reason, a pause reads `paused`, even before its run has given back its place in the queue, a merge lock holder is admitted at its grant so it is never in the queue or in `capacity_wait`, and a wait of the story's own -- for a person or a dependency -- holds no place in a queue. A workstream read that cannot read its runner's queue fails with a 503 rather than report queued work `running`, and so does the inflight inventory. The refresh triggers are the existing events: `runner_queue_changed`, naming the runner, for every change to its slots, its queue or its capacity, and each workstream's own state changes. An entry's place moving because another entry progressed publishes nothing more.
+
+**Waits free the slot.** A story waiting for a person, or for something outside its own work, occupies no slot, and keeps its runner placement and its worktree. The writer that records the wait gives the slot back beside its write -- the store's release, then the runner's dispatch pass, so the next work waiting there starts: the park at the human gate, the review gate's and the agent-stop gate's alike (`runflow.ParkForHumanReview`); the marker of a run blocked on a clarification (`MarkRunnerBlockedCLQAt`); the run's merge-gate exit transition to `merge_test_failed` (`ApplyMergeGateExitState`); a story rebase's conflict left waiting for its operator, once the wait is narrated (`StoryRebaseStage`); a merge's wait for the forge to answer on its PR, before it sleeps; and the boundary check that finds a run of a family that takes a slot held by its workstream pause (the hold once named `human_edit`). That release runs only while the pause stands: the pause is asked again inside the release's own transaction, on the database both rows live on, so the pause's deletion cannot commit between that ask and the release -- an unpause that deleted the pause first has taken the resumption over, finding the slot the run holds and signalling it, and a release asked from a read the deletion has outrun erases nothing and frees no slot for a new placement to take ahead of the resumption. The release records the run's acknowledgement, the record an unpause resumes from, in its own transaction, and the unpause reads acknowledgements in the one that deletes the pause: an unpause racing the check either finds the slot given back and queues the run's resumption with the deletion, or deletes the pause first, and the check gives nothing back. Every release that check makes is followed by a confirming read, which sees a pause deleted since and asks for the slot itself. A pause first seen by the confirming read, one that landed while another hold kept the run, is released there and confirmed again. One that lands after the check, while a restart hold or the wait for a runner keeps the run, is caught by the runner's next dispatch pass once the pause is the only hold left: the pass prompts the run, whose own check gives the slot back. A wait its run stays open through -- a park, a pause, a rebase's conflict -- fails its write when the release fails: the park fails and its run's exit gives the slot back, the rebase is undone and its exit gives the slot back, and the boundary check retries. A rebase cancelled while its conflict waits, or while the boundary after its operator's act waits for a slot, asks for one before its undo runs on the runner. A wait its run ends at logs a failed release, which the run's exit makes up, and so does a merge's wait for the forge, whose next execution takes the slot over at its boundary. A story waiting for another story has no slot to give back: it waits in `pending`, which it enters from planning or editing, before any run of it starts on a runner. A standalone merge's, resolve's or PR push's stops end their workflows, whose exits give the slot back.
+
+When the wait clears, the run asks for its slot at a boundary before it goes on, which enters it in its runner's queue in the resume tier, with the time it became eligible as its waiting time: on a full runner it stays queued, and it starts only when the runner admits it. A decision at either human gate asks at its own boundary as soon as its park returns it, before it runs anything on the runner -- a reject's reset of the checkout, an approve's re-entry -- so while it waits the story's stage still reads as parked, with its decision pending, and its runtime status reads `waiting` with the slot's reason over the park's `blocked`; cancelled while it waits, the run is cancelled at its park, the decision not acted on. An answer, a triggered run retry and an approve with no open run dispatch a run whose first boundary asks. An unpause enters the held run in its runner's queue in the write that deletes the pause, deciding which run from the acknowledgements that write reads, so no admission sees the pause gone and the resumption not yet queued, and runs the dispatch pass, which admits it or reports it held for its slot. While it waits for its person a parked run takes no slot: its check on a hold-requested signal asks for none, and a release of a hold it acknowledged there signals it rather than queueing it -- a release queues no run acknowledged at its park, the review gate's, the agent-stop gate's or a rebase's conflict, to which no decision has been delivered. One acknowledged after its gate's decision or its conflict's act, or at another boundary while its story stays parked, is about to run on the runner, and is queued as any other. A repeated unpause, approve or retry for one pending resumption keeps its one queue entry and its waiting time and starts nothing twice. A free slot never lets a story run past a wait that still stands, since the slot is asked for only when no other hold covers the run. A pause that frees a slot reports its readiness from its acknowledgement as before, and a ready pause's replan and reset are unchanged.
+
+Go (`hashd run`) on a workstream whose work -- a run, a story rebase or a PR reopen -- is queued for a slot dispatches nothing new, whatever a new start would be refused for: it shares that work's execution claim rather than competing with it, delivers the release to it, which checks again, and answers that the work is queued on its runner, with the wait as its reason -- not a refusal; the work's singleton still prevents a second execution. A hold that covers the work is reported as for any work. The `run` row is withheld naming the wait, and the inflight board leaves the run out of `release_pending`: it is held, not missed by a release.
+
+**Workstream pauses.** A person pauses one workstream: `hashd workstream pause <id>` (`POST /workstreams/{id}/pause`) writes a `workstream_pause` naming that workstream, under the same admission write lock and inside the project lifecycle lock, so a removal either finishes first or finds the hold. A workstream has at most one; a repeat naming the same `request_id` returns the standing one, and another request's is a 409. The request stops nothing itself: it refuses what would start next, asks the workstream's open run and its open merge to check their holds, and lets running work reach its own boundary. Requests scoped to that workstream are then refused with a 409 sourced `workstream.pause`, including the plan rewrites a restart hold does not refuse (PATCH plan, edit-commit, skip, story split). Close (`close`, `close_no_changes`, `close_by_person`, and a story's `abandon`), replan and reset (not `reject --reset`) are the exception once the pause reads `ready`: they close the run the pause holds, do their work, and then end the pause under the unpause's authority (its holder or a server administrator), recording `workstream_pause_released` with the verb that ended it. On a `waiting` or `unknown` pause they are refused, naming what the pause is still waiting on. Removing the containing project is refused too, naming the paused workstreams -- the pause is server-wide state that outlives the project row, so a teardown that went ahead would strand it -- and `--force` does not pass that refusal: force skips hashd's judgement about its own work, not a person's. Reads are untouched, every other workstream and project is untouched, and the housekeeping tick is not skipped. While the hold stands, a workstream whose runtime status would be `running` or `idle` reads `paused`, with the hold's readiness served as `pause_readiness`; the pause adds no stage, trigger or transition.
+
+To move a running story, first use `hashd workstream pause <story>` and wait for `pause_readiness` to become `ready`, then `hashd story runner set <story> <runner> -y`. Besides close, replan and reset on a ready pause, only the placement move passes the pause's refusal: it leaves the pause and its exact request standing, and all other scoped execution remains refused. Ownership, destination eligibility and expected-placement checks still apply, and an open command occurrence or live attempt still refuses the move. Saved human edits refuse it even with discard confirmation; restart holds and open worktree resets still refuse it too. An acknowledged parked workflow does not itself hold a stage open. Unpause with `hashd workstream unpause <story> --request-id <pause-request-id>` to continue the paused run on the destination. If no open run remains, use `hashd run <story>` after unpausing. The destination rebuilds from the published branch rather than receiving checkout state. Once the move commits, hashd removes the story's checkout, its branch and its stage files from the runner it left. If that runner is offline or revoked, or the removal fails or does not answer, the move still stands: its answer carries a warning, also recorded in the story's history, naming the runner, the checkout path and what was left, with the steps to remove them by hand. Test consoles retained on that runner stay there until the story closes. If no micro-commit has completed and origin has no story branch, the destination rebuilds at the recorded base SHA, never the current base tip, with no discard confirmation required. Completed work without a published story branch is refused at move time: publish the branch (and configure an origin remote if missing), then retry the move. The in-progress micro-commit restarts from that published branch or recorded base. Checkout notices report the completed rebuild. A move retires the old placement's run failures from current views while keeping history and pending human decisions readable.
+
+Execution and structural-edit rows in the workstream's `available_actions` read unavailable while it is paused, with the pause as the failed guard. Unpause remains offered, as does append-only guidance (`feedback`), which changes neither execution nor the plan. A pause that cannot be read withholds them the same way, because that is what admission does with it. On a ready pause replan, reset and the close rows (`close`, `close_no_changes`, `close_by_person`, and a story's `abandon`) are offered when their other guards pass, and their routes end the pause; on a waiting or unknown pause they are withheld with the not-ready reason. A server with no system database withholds nothing but the two pause rows: nothing can be paused there, so nothing is refused.
 
 Readiness is reported on the workstream's own reads (`workstream_pause` on the detail read and the snapshot): `ready` when every open execution of the workstream has an acknowledgement matching its exact workflow and run ID -- or when nothing is open at all -- `waiting` while one has not, and `unknown` when a leg did not answer, which is never to be read as stopped. Nothing is inferred from a stage name or an idle stamp.
 
 What counts as open is decided by the engine, not by the visibility index. The index is eventually consistent -- it can still list a run that has closed, and can omit one that has just started -- and a start whose RPC returned under the admission lock says nothing about whether the index has caught up. So every workstream-scoped family whose workflow ID is fixed by the project and the workstream (run, merge, resolve, PR create/push, add-commit, adjudicate -- those whose `ProbeFor` yields an exact ID) is described directly, and that answer replaces whatever the index said about that ID: a listed run is not the run if the engine names another, and a writer the index has not indexed yet does not read as stopped. The listing then contributes only the families whose ID carries a segment this read cannot supply -- a cycle's parent run and leg, an amendment's or a recovery answer's question id -- where a stale row can only add an execution and so hold the pause waiting. Unlike the restart board, an open `run:` with no cycle under it is counted rather than narrowed away: a run parked at a gate resumes into the worktree the moment its gate is answered, so it has to acknowledge. `workstream_pause_requested`, `_ready` and `_released` are recorded once per hold on the workstream's timeline.
 
-`hashd workstream unpause <id> --request-id` (`DELETE /workstreams/{id}/pause`) ends exactly that pause and signals the workstream's acknowledged runs, which go on from where they stopped. Nothing else ends it: no restart release, startup release, housekeeping tick, timer or lease. It dispatches no run, answers no gate and answers no clarification -- a workstream parked for a human decision is still parked for it afterwards -- and a run a restart hold also covers stays held and is reported as such. Its holder unpauses it, or a team-mode owner or admin. A restart wait lists a paused workstream separately, as held for a human that no restart release answers, and a restart release reports such a run as held rather than signalling it.
+`hashd workstream unpause <id> --request-id` (`DELETE /workstreams/{id}/pause`) ends exactly that pause and signals the workstream's acknowledged runs, which go on from where they stopped. Only a close, replan or reset on a ready pause also ends it; nothing else does: no restart release, startup release, housekeeping tick, timer or lease. It dispatches no run or merge -- a merge the pause held out of the merge chute, from the queue or from its locked section, enqueues again at the tail itself -- answers no gate and answers no clarification -- a workstream parked for a human decision is still parked for it afterwards -- and a run a restart hold also covers stays held and is reported as such. A run the pause held gave its runner slot back, so it resumes as its runner admits it: on a full runner it is reported held for its slot and waits in the runner's queue as a resumption (the wait for a runner slot, above). Its holder unpauses it, or a team-mode owner or admin. A restart wait lists a paused workstream separately, as held for a human that no restart release answers, and a restart release reports such a run as held rather than signalling it.
 
 A pause is not permission to skip a review: changed material that had been reviewed returns through the applicable tests and review like any other change.
 
-**The commands.** Plain `hashd restart`, `hashd restart server` and `hashd stop`, with or without `--yes`, take the restart run lock first (a concurrent stop is refused), put the hold in force, and wait. `--yes` answers the command's other prompts and never forces; the wait says so once. Progress prints the whole time: each affected flow with its stage, running time and its substage's existing deadline where the server resolves one ("no known deadline" otherwise), what is held, what waits on a human, and elapsed time -- in place on a terminal, and without one as a line per change plus a full summary every 60 seconds. Every status names Ctrl-C and `<invocation> --force`. A server that stops answering is reported with how long, with readiness unknown and nothing stopped, and the wait continues. Ctrl-C releases this request's hold, stops nothing, and reports whether the release was confirmed. A hold that cannot be put in force (no answering local server, a configured URL on another machine, a refusal) exits non-zero at once with nothing stopped, naming the same command and the `--force` form. `--force` skips the wait: it takes the hold when it can, shows the full inventory (unknown coverage included, no count cap), asks y/n on a terminal (no releases the hold and stops nothing), refuses without a terminal unless `--yes` is given, and proceeds without asking when the inventory is complete and empty; it reports each interrupted item as interrupted, not held. `--force` is refused on `hashd restart telegram` and `web`. Which machine the command acts on -- whether this machine owns the configured hashd-server -- is decided once, before the wait, and the full restart acts on that decision after it rather than resolving the endpoint again. When this machine's running hashd-server listens at a different address from the configured URL -- a rebind, such as `hashd server set https://<lan-ip>:1337` followed by a restart -- the version read, the hold and the inventory go to the running server, the restart prints one line naming both addresses, and the replacement binds the configured address, where its readiness check and startup-release report find it. The running address is read from the pidfile process's own `--listen` argument; when it cannot be read, the gate targets the configured URL as before. `hashd stop` leaves the hold in force; the next successful start releases it. A stop path whose hashd-server stop fails releases the hold it put in force instead and still fails: the server is still up, and no start is coming to release it. The installers run the plain form and stream its progress.
+**The commands.** Plain `hashd restart`, `hashd restart server` and `hashd stop`, with or without `--yes`, take the restart run lock first (a concurrent stop is refused), put the hold in force, and wait. `hashd start` and `hashd backup restore` take the same lock, so no start launches a server under a restore that is still publishing. `--yes` answers the command's other prompts and never forces; the wait says so once. Progress prints the whole time: each affected flow with its stage, running time and its substage's existing deadline where the server resolves one ("no known deadline" otherwise), what is held, what waits on a human, and elapsed time -- in place on a terminal, and without one as a line per change plus a full summary every 60 seconds. Every status names Ctrl-C and `<invocation> --force`. A server that stops answering is reported with how long, with readiness unknown and nothing stopped, and the wait continues. Ctrl-C releases this request's hold, stops nothing, and reports whether the release was confirmed. A hold that cannot be put in force (no answering local server, a configured URL on another machine, a refusal) exits non-zero at once with nothing stopped, naming the same command and the `--force` form. `--force` skips the wait: it takes the hold when it can, shows the full inventory (unknown coverage included, no count cap), asks y/n on a terminal (no releases the hold and stops nothing), refuses without a terminal unless `--yes` is given, and proceeds without asking when the inventory is complete and empty; it reports each interrupted item as interrupted, not held. `--force` is refused on `hashd restart telegram` and `web`. Which machine the command acts on -- whether this machine owns the configured hashd-server -- is decided once, before the wait, and the full restart acts on that decision after it rather than resolving the endpoint again. When this machine's running hashd-server listens at a different address from the configured URL -- a rebind, such as `hashd server set https://<lan-ip>:1337` followed by a restart -- the version read, the hold and the inventory go to the running server, the restart prints one line naming both addresses, and the replacement binds the configured address, where its readiness check and startup-release report find it. The running address is read from the pidfile process's own `--listen` argument; when it cannot be read, the gate targets the configured URL as before. `hashd stop` leaves the hold in force; the next successful start releases it. A stop path whose hashd-server stop fails releases the hold it put in force instead and still fails: the server is still up, and no start is coming to release it. The installers run the plain form and stream its progress.
 
 **Sidecar log level.** The Temporal sidecar logs at `warn` to `temporald.log`. `HASHD_TEMPORAL_LOG_LEVEL` in the environment of the full `hashd restart` sets another level for the sidecar it starts (`hashd start` applies it only when no sidecar is running, since it reuses a live one, and `hashd restart server` leaves the sidecar alone) -- `debug`, `info`, `warn`, `error`, `dpanic`, `panic` or `fatal`, in any case -- because `hashd internal temporald` regenerates the sidecar's config on every start and reads the level then; editing the generated config does not survive a restart. The level lasts until the next restart without the variable. Any other value refuses the start before the sidecar is spawned, naming the variable and the levels, rather than letting temporal-server fall back to a default of its own. `debug` writes far more to `temporald.log`, so it is for a bounded window of investigation.
 
@@ -7486,7 +8799,7 @@ A pause is not permission to skip a review: changed material that had been revie
 - Families other than detect are found through the per-project visibility listing, so the board is only as current as that listing: an execution it does not return is not on the board.
 - A detect start whose outcome is unknown (never confirmed or refused, or an AlreadyStarted naming no run) stays unchecked -- plain restart waits on it -- until a later detect for that repository settles it, or the operator uses `--force`.
 - An entity row the listing finds no open execution for can never read held. Apart from the verified-closed `implementing` row under Readiness, it keeps a plain restart waiting until its state changes -- so does an `implementing` row whose run the engine answers NotFound for -- and the way out is Ctrl-C or `--force`.
-- A plain-cancelled run releases its own runner claim and stamp once its agent stage stops (version `agent-stage-waits-for-cancel`). A forced cancel, a cancel that reaches the cycle between stages or at a stage that does not wait for its cancellation, and a cancel on a history before that version still leave them for the housekeeping sweep. Because a cancel can still leave them, close, remove, replan and reset are refused under a hold rather than allowed to close a held run.
+- A plain-cancelled run releases its own runner claim and stamp once its agent stage stops (version `agent-stage-waits-for-cancel`). A forced cancel, a cancel that reaches the cycle between stages or at a stage that does not wait for its cancellation, and a cancel on a history before that version still leave them for the housekeeping sweep. Because a cancel can still leave them, remove is refused under a hold rather than allowed to close a held run; close, replan and reset on a ready pause close the held run and clear its runner state themselves.
 - Families with no modeled interior boundary are ready only when closed, however long they wait. A PR-mode merge polling an open PR, and a document lease a person holds (`reqs-lock:`, `spec-lock:`), keep a plain restart waiting until they close; the operator's way out is Ctrl-C or `--force`.
 - Restart holds add no bound: the boundary check reuses the runner's quick activity leg, a release signal reuses `dispatch_rpc`, and the command's requests reuse the in-flight inventory's own per-attempt bound. No row is added to the Deadline inventory below.
 - A reservation has no expiry and no lease: it stands until its holder or an administrator releases it. A server restart does not end it, and the startup release deletes restart holds only.
@@ -7574,7 +8887,7 @@ consumes a result, or authorizes replay. The original runner journals custody
 before requesting start and saves the start receipt before workspace work.
 After the invocation joins and all cleanup and repository exclusions finish,
 its saved observation travels on ordinary check-in until durably acknowledged.
-Only that bound settlement releases the outstanding-execution placement blocker.
+Settlement is history: it is recorded and read, and gates no listing, move or placement.
 Temporary contention on a shared repository exclusion defers delivery to the
 next check-in; it does not turn completed cleanup into a permanent failure.
 
@@ -7586,9 +8899,40 @@ After a crash without saved cleanup, automatic settlement requires the original
 authenticated runner, matching machine and journal filesystem identities, a
 different kernel boot ID, and every original repository exclusion intact and
 free. Missing proof, changed state, cleanup errors, or a same-boot process death
-keep the attempt blocked with a Diagnostic. A new runner ID, absent PID, or free
-lock alone proves nothing. Legacy attempts without custody require audited
-operator recovery; upgrading does not settle them.
+leave the attempt unsettled with a Diagnostic. A new runner ID, absent PID, or free
+lock alone proves nothing. An attempt without custody is never settled by its
+runner; it stops being listed once it is fenced or its story is moved or closed.
+
+Runner work stays with its runner until the runner returns or its story is
+moved or closed. A change to the runner's access does not fence it either:
+access decides only new placements, so work queued, running or paused on the
+runner, and the resumed, retried and recovered stages that follow it, start,
+call their stages, are answered credentials and have their results accepted
+there while they carry the workstream's current placement epoch and its
+owner and the work was not closed under that placement: a stage that merges
+the work completes, and the archive after it and the recovery of either
+continue there, while work reopened after a close on the same placement
+continues nothing. The work's owner must still
+be able to work on its project, and the runner's credential, its owner's
+standing and Team still apply. A move or a new placement after that is
+admitted by the access as it now reads. There is no fencing on disconnect: when a runner's event stream
+ends, by detach or by missed heartbeats, its offered and started attempts keep
+their phase, and only a stop or cancel, the owning stage's own deadline, a later
+generation, a move or a close fences one. A close fences on the attempt records:
+once its executions are confirmed closed, and before the workstream is closed,
+it supersedes every offered attempt of the workstream on every runner and closes
+every started one with its outcome unknown; a result already recorded stands.
+A fence that cannot be written refuses the close. An offer of a cancelled
+execution that is published only after that fence reads the cancellation once
+published and supersedes itself. A returning runner gets its listing
+from the connect snapshot and check-in and delivers the results it holds through
+the ordinary result path. The listing follows the current placement: it holds
+attempts with no result, offered or authorized to start, placed on that runner
+at the attempt's own placement epoch, whatever the workstream's stage. A close
+withdraws the work by fencing its earlier attempts, so a teardown offered after
+the close is listed. A runner stops any attempt it runs that is not listed, so a
+move or close withdraws the work at the old runner's next check-in or
+`runner_changed` wakeup.
 
 ### Competing workstream executions
 
@@ -7609,46 +8953,57 @@ of that startup allowance; normal stage deadlines apply after the first entry.
 
 ### Deadline inventory
 
-Every bound that stops work while it runs -- or that holds a failure back before it is reported -- has one row in the registry at `server/internal/deadline` (`registry.go`), and one row here: the agent stage and runner substage kills, the Temporal activity legs that carry them, the test/baseline gate, remote git operations, the housekeeping sweep over their stamps, the bounded re-probe of an agent binary that was missing when a stage tried to spawn it or when preflight looked for it, the post-merge dependency handoff together with the records a failed replan dispatch writes about a released child, the `/plan/reconcile` heal route, the acquisition and body bounds on PM and merge singleton sections, a finished planner or edit result's wait for the REQS lock, a read's wait on a placed story's runner for its branch facts, the backstop expiry of an agent run's own server token, and the device-code sign-in wait. That registry is the source of truth for the names -- which setting moves a bound, and which bound a derived one builds on -- and it deliberately holds no seconds: a margin looks constant from a distance and is not, so the path that fires passes the numbers it actually used and the descriptor checks that they add up to the bound the operator was shown. A drift test in that package parses the table below and fails when a registry bound has no row, when a row names a bound the registry does not have, or when a row's setting disagrees with the registry's.
+Operational timer values live in `server/internal/config/defaults.yaml` and use the existing system/project overrides. Zero or NA disables an elapsed timer; it never selects a numeric Go default. Change a setting with `hashd project config set <key> <seconds>`. Project files can omit values and inherit the shipped declarations.
 
-`dispatch_rpc` and `plan_reconcile` stop no work, and are here because each can end an operator's request. `dispatch_rpc` bounds a caller's wait on one sidecar round trip, and on the handful of routes that take the project lifecycle lock before the call (run, add-commit, replan, reset, approve, reject, merge, PR create, PR push) that wait is holding a project-wide lock as well; its other callers — the probe that classifies a failed planning dispatch, and the liveness probe that refutes a story's staleness for the stale-draft sweep, the `/suggestions` reads and the restart board alike — end no request and hold no lock, and its row says where they report instead. `plan_reconcile` bounds a whole handler that stacks several of those legs in series, so the documented heal command answers with its counts instead of dying in the client with none of them. `requirements_lock_wait` and `requirements_lock_poll` stop no work either: they hold a finished planner or edit result's outcome back while it waits for the REQS lock, and pace its looks at the lock. `runner_head_observation` stops no work either: it ends a read's wait on a runner, and the read answers the branch as unreadable. `run_token` stops no work a live run does: a run revokes its token when it ends, and the expiry only ends a token whose run never could. `pr_watch_interval_active` and `pr_watch_interval_idle` stop no work either: they pace the PR watch's reads of an open PR. `pr_watch_max_age` stops only the watch's reads, never the PR or its workstream.
+Native Temporal activities require a positive elapsed limit and use `timeouts.workflow_ceiling` when their stage timeout is zero. Whole-stage runner processes do not inherit that ceiling: zero carries no deadline. Runner liveness, heartbeats, custody and workflow-liveness checks remain. Timeout Diagnostics identify the setting that actually stopped the operation.
 
-The entity-lifecycle timeouts are outside that family and are deliberately absent from this table: `workflow.drafting_timeout_minutes` (the planning reconcile that fails a stale drafting story), the 15-minute editing revert (which also returns an agent edit of the source at Arc review from `editing` to `proposal_ready`), and the 15-minute planning-claim timeout. Each has its own lifecycle recovery rule (see Story Lifecycle), and each still reports a bare elapsed naming no bound and no setting. An Arc proposal attempt parked in `needs_input` is deliberately unbounded: it waits on its question round, holding its story, for as long as the operator takes to answer, and no timeout or housekeeping pass moves it; its exits are the answers completing its round, which resume it, the cancel, the revision cancel and the bound discard of its target. The table does not cover them, so a missing row does not mean there is no bound.
+This registry lists the bounds used in operator-facing timeout reports. The complete operational timer declarations, including cadences and cleanup waits, are in the default file. Values in reports are resolved for that execution, not hardcoded numbers.
+
+Runner offers wait `timeouts.workflow.runner_start_ack` (shipped: 5 seconds) for a committed start receipt. An unanswered offer is re-sent three times with the same assignment and generation, then closed without starting; the Diagnostic names the runner, story, offer count and elapsed time. Zero or NA disables this acknowledgment window. Only the initial provision, before any start receipt for that workstream, may move to another eligible runner. Every later stage stays on its runner. A lost start response is retried with the saved nonce; a receipt-bearing execution is never relaunched.
 
 Optional background Network access name discovery (`networkaccess.Detect`) shares `deadline.APIFailsafe`; no retries, no startup wait, and unavailable names leave local interface addresses intact.
 
-| bound | value or derivation | setting | reported by |
-|---|---|---|---|
-| `agent_stage` | the stage's timeout resolved `defaults.yaml < system config < project config`, or `stagetimeout.AgentDefaultSeconds` when the stage carries no entry | `stages.<name>.timeout` | the agent subprocess kill: `agents.RunStageWithOptions` stops the process at the stage's bound and `agents.timeoutKillClassification` describes it |
-| `runner_stage` | the substage's `runner_stages` entry, set by editing config.yaml rather than through the settings path (see Commit supervision under Timeouts): a duration string, `NA` (no bound, skipped entirely), or the `config` sentinel, which resolves to the project test timeout and therefore reports under `test_gate` rather than under the table the sentinel sits in | `runner_stages.<name>.timeout` | the commit stage enforcing its recorded budget, and the housekeeping sweep as the base its threshold builds on |
-| `activity_start_to_close` | the leg's resolved base plus `stagetimeout.RuntimeBufferSeconds`, so the in-process leg records its own outcome before Temporal expires the activity -- with `stagetimeout.Floor` raising the holistic review stages and `stagetimeout.WorkflowCeilingSeconds` standing in when a stage resolves to nothing. New implement cycle contexts also reserve `stages.browser_classify.timeout` and `stagetimeout.BrowserLifecycleSeconds` for browser startup/cleanup; optional setup respects the remaining activity budget, including for older recorded contexts without this allowance. The commit leg derives from its resolved runner-stage budget plus the same margin. The network legs scale off the remote-git bound by the number of remote operations they perform -- the PR-create and PR-push activities (`workflows.prPushLegDeadline`) counting their sync fetches, and the PR push its base leg's ls-remote confirming a missing base, the guard fetch of an attempt refused as behind base and the re-sync leg's fetch and ls-remote after it, plus `mergeflow.PushNetOps`, every remote operation of every push attempt since a transport failure re-runs the push in-activity, plus `mergeflow.PushRetryBackoffTotal` for the waits between attempts, scaled off `gitnet.DefaultTimeout` when dispatched without the bound -- and hold `deadline.APIFailsafe` more for each forge CLI call on their worst path, resolving the forge (which may run the CLI's auth check) counting as one (the merge begin's PR adoption, the pr_open status check, PR create's find-or-create, and the runner's merge-ready PR reconcile, whose flat leg holds the same addend); `requeue_build`'s plan leg holds the same addend for each forge call it makes (`mergeflow.RequeueBuildPlanForgeCalls`) plus the house margin, per attempt under the infra-only retries of `workflows.idempotentActivityOptions`, and its single-shot re-run leg the addend for each call on the worst path of reading the PR and its checks again and re-running exactly the checks the plan found (`mergeflow.RequeueBuildRerunForgeCalls`) plus the same margin; the automation's record leg takes the house margin alone, per attempt under the same retries; no setting moves any of them; the locked merge activities' flat body bound already covers their forge calls. The post-merge dev publish re-runs a push that failed on transport in-activity under the same transport-only policy (`mergeflow.retryTransportPush`) and adds nothing to its leg: each retry runs only while its backoff wait plus one remote-git bound still fits before the activity's deadline. The resolve's recovery activity sums its own legs, each resolved the way a stage leg is and with the same margin: the base comparison at the project test timeout, the `adjudicate` stage and the `fix_generation` stage (`resolveRecoverySeconds`); the resolve attempt before it keeps its flat budget, and none of that attempt's time is taken from the recovery's. The planning and edit success-finalize legs (`workflows.resultFinalizeActivityOptions`) take `pm.RequirementsLockWait` plus a 60s budget, which no setting moves. The Arc decision apply leg takes the same `pm.RequirementsLockWait` plus 60s and its release leg `workflows.arcDecisionReleaseBudget` (three `deadline.APIFailsafe` -- the inline planning dispatch's start and classification probe, then the backgrounded dispatches it waits for -- plus 60s), each per attempt under the infra-only retries of `workflows.idempotentActivityOptions`, as is its record leg's 60s; no setting moves any of them. The flat budgets (the resolve attempt, docs and housekeeping-section legs, and the cycle's own short legs) are literals in the workflow that no setting moves | `stages.<name>.timeout` / `runner_stages.<name>.timeout` / `test_timeout` / `git.network_timeout`, or `not configurable` for a flat budget | Temporal expiring the activity |
-| `heartbeat` | the `HeartbeatTimeout` the leg was started with, reported as the number that leg used. It is set in the leg's own `ActivityOptions`: `agentActivityOptions` for the runner's agent stages, `idempotentActivityOptions` for the Arc decision apply and release legs, and `resultFinalizeActivityOptions` for the planning and edit success-finalize legs all take the shared `activityHeartbeatTimeout` (`server/internal/temporal/workflows/activity_options.go`), and the options beside each other workflow's activity under `server/internal/temporal/workflows` carry their own literal. This is dead-worker detection, not a deadline set on the work, so its next steps point at server/worker health and never at config | `not configurable` | heartbeat loss |
-| `housekeeping_sweep` | the substage's resolved base plus `stagetimeout.OrphanReapMarginSeconds` (one sweep interval) on the in-process-stage branch and on the `test`, `merge_gate`, `pre_merge_tests` and `post_rebase_test` substages -- and so the judge-requested re-runs' `rerun_test` and `rerun_build` stamps, which have no row of their own and resolve through the `test` row, and the merge gate's judge-requested re-run's `merge_gate_rerun` stamp, which has no row of its own and resolves through the `merge_gate` row (`stagetimeout.RunnerStageBound`) -- and no margin at all on the rest of the `runner_stages` table -- `adjudicate` included, which resolves through the same `config` sentinel and gets no margin with it, and so the judges' `adjudicate_test`, `adjudicate_build` and `adjudicate_review` stamps, which have no row of their own and resolve through the `adjudicate` row (`stagetimeout.RunnerStageBound`); `push_branch` additionally floors at twice the remote-git bound, which then becomes the setting that moved the threshold | `stages.<name>.timeout` / `runner_stages.<name>.timeout` / `test_timeout` / `git.network_timeout` | the housekeeping sweep marking an orphaned stamp failed |
-| `test_gate` | the project's test timeout, capping the build command, the test stage's staging and pre-commit hook steps and the test command. Non-positive is the operator setting no cap, and this gate then enforces none -- what expires is an enclosing deadline. The key is integer-typed, so a raise for it proposes bare seconds and never the duration grammar | `test_timeout` | the runner's test/baseline gate, plus every merge-gate, rebase, regeneration and conflict-resolution leg that re-runs those same commands |
-| `git_remote` | the remote-operation bound resolved `defaults.yaml < system config < project config` | `git.network_timeout` | remote git operations (`gitnet.KillDiagnostic`), but a repository's first clone, which has the two bounds below |
-| `git_clone` | the first-clone ceiling resolved `defaults.yaml < system config < project config` (30m by default, so it does not exceed provisioning's 30m bound); it bounds a runner workspace's first clone (`runnerworkspace.cloneSource`) and the CLI's clones in place of `git.network_timeout`, inside the enclosing stage's own deadline -- for a runner workspace, provisioning's fixed 30m, whose clock starts before the clone, so it stops the clone first unless this is set shorter | `git.clone_timeout` | the clone, as `runner.workspace.clone_ceiling` (`project.add.clone_ceiling` for the CLI's) with its last progress line (`gitnet.CloneKill`). A runner workspace's clone that provisioning's bound stops first is reported by provisioning's own failure instead: the provision stage records `workspace_clone_started` just before the clone and `workspace_clone_finished` as soon as it returns, each naming its run, and the failure of a provisioning its bound stopped before the runner reported (`runflow.ProvisionExpiryFailure`) says the first clone was stopped by provisioning's bound, not `git.clone_timeout`, with that setting's value; after a clone that completed, the last step provisioning recorded -- a provisioning substage, or `code_map_index_started`, the row it writes before indexing the worktree, which records no substage -- named by everything that step spans until the next record, since a record proves only that its work had begun; otherwise that the outcome is unknown |
-| `git_clone_stall` | resolved the same way (5m by default): the longest a first clone, run with git's progress reporting on, may go without writing a progress line -- a CR- or LF-terminated stderr segment | `git.clone_stall_timeout` | the clone, as `runner.workspace.clone_stalled` (`project.add.clone_stalled` for the CLI's) with its last progress line (`gitnet.CloneKill`) |
-| `detect` | the detect stage's timeout, resolved like any other agent stage. It is its own bound so a payload's `bound_kind` separates the wizard's stage from a runner's | `stages.detect.timeout` | the project-add wizard's detect stage kill |
-| `dispatch_rpc` | `api.dispatchCancelBudget`, `deadline.APIFailsafe` (130s), the value the connector host subprocess also takes as its whole-host bound and each forge CLI call (gh/glab/bkt/tea, the auth check included) takes per call, neither of which is this bound's caller: the bound one caller puts on one sidecar round trip -- the dispatch start, the human-gate probe and signal, the cancel and its confirm leg, the story cancel, the artifact lock's detached cancel, state query and release, and the probe that decides whether a failed planning dispatch left a workflow running (classifyPlanningDispatchFailure, in `mutations_story.go`). It is a failsafe a healthy sidecar never meets, sized so a close's confirm leg outlasts a cancelled run still stopping in-flight work (a merge gate hears of the cancellation only at its next heartbeat). Taken on a request's context it ends no later than that request: the server sets no request timeout, the CLI's mutations wait 3 minutes, the CLI's reads and the web client stop after `deadline.SyncHTTPWait` (120s) in total, and the Python client after 120s with no bytes read (a per-read wait, not a total one), cancelling the request context there; only the legs detached from the request, the classification probe among them, spend the whole bound regardless. It stops no agent work. For a handler it ends that handler's wait — and on the routes that take the project lifecycle lock first (run, add-commit, replan, reset, approve, reject, merge, PR create, PR push), the hold on that lock with it; most dispatch sites take no such lock. The classification probe is not a handler at all: it runs detached, in a background goroutine on the story-transition path and inside the merge archive activity on the worker path, and it bounds the post-merge dependency handoff's per-child start and probe, so the first child that meets an unanswering sidecar spends `mergeflow.dependencyHandoffBudget` whole. The staleness-refuting liveness probe reports the same way, by leaving the story it condemned alone. Its three callers all take it on their own context, clamped to a share of what that caller has left, but spend it two ways: the stale-draft sweep and the `/suggestions` reads spend one such budget across a whole pass rather than one per row, so an unanswering sidecar cannot charge the cap per condemned row; `hashd restart`'s in-flight board spends one per row, since there it is one row's refutation, and is bounded instead by the aggregate deadline the inventory sets before the rows, which that clamp reads -- so no single row can spend the board's whole budget either | `not configurable` | a handler's own refusal, whose next step is `deadline.SidecarHealthNextStep` rather than a raise. The connector host and forge CLI calls that share the value do not report here: a forge call returns that operation's own timeout error. The classification probe reports through the record it decides instead: the story-scoped `operation_result` for the released child, plus the merge system error on the archive path. The staleness probe reports by leaving the story it condemned alone -- on the story row for the sweep, on the board for the restart gate |
-| `agent_probe_interval` | `ProbeIntervalSeconds` (`server/internal/agentprobe/probe.go`): pacing for failed starts and missing-binary checks; covers the observed 1-2s replacement gap. Preflight shares one window across unresolved binaries | `not configurable` | `agents.runStageSubprocessWithBinaryProbe`, `preflight.probeAgentBinaries`; successful recovery records `agent_retry` / `binary_unavailable` |
-| `agent_probe_window` | `ProbeWindowSeconds` (`server/internal/agentprobe/probe.go`): covers a 10-20s reinstall with margin. One elapsed-time window, clamped to the enclosing deadline minus the caller's reserve; independent of the subprocess timeout | `not configurable` | Runner retries failed starts only; preflight shares PATH checks across agents using the same binary. Exhaustion retains the existing failure. A credential check the leg has no room for is deferred to launch (`preflight.checkAssignedAgentsHealthy`) |
-| `dependency_handoff` | `mergeflow.dependencyHandoffBudget`, a literal in `server/internal/mergeflow/archive.go`: the slice of the archive activity the post-merge dependency handoff may spend releasing a merged story's pending children, fan-out included. A fixed budget rather than a share of the activity bound, so an unreachable sidecar cannot turn post-merge bookkeeping into a failed archive over a merge git has already committed | `not configurable` | the archive's post-merge handoff, as the durable system error recorded against the merged workstream; children the expired walk did not reach stay `pending` and the planning reconcile releases them |
-| `dispatch_failure_record` | `storydeps.dispatchFailureRecordBudget`, a literal in `server/internal/storydeps/unblock.go`: the bound on the records written about a released child whose planning dispatch failed. It is a budget of its own rather than the dispatch's, which a failing dispatch has commonly already exhausted | `not configurable` | the records themselves -- the child's `draft_failed` fields for a proven refusal, and the story-scoped `operation_result` `hashd show STORY-x` reads for a dispatch whose outcome is unconfirmed |
-| `plan_reconcile` | `api.planReconcileBudget`, a package var in `server/internal/api/mutations_plan_reconcile.go` (a var only so its own test can lower it): the bound on the whole `POST /plan/reconcile` handler, which stacks three fixed sidecar legs in series -- the stale-draft sweep's probe budget, the claim sweep's, and the first stranded child's inline dispatch. It stops no agent work; what it ends is the operator's own heal request. Sized so the route plus the one sidecar leg it cannot reach -- the detached dispatch classification probe, on its own `dispatch_rpc` budget -- still lands inside the CLI's 3-minute mutation timeout (15s plus the probe's 130s). Every ctx-following leg under it shortens automatically, since a nested Go context timeout takes the earlier deadline; the WIP-marker heal is outside its *cancellation*, detached with its own git bound so an ended request cannot abort a REQS commit midway, but it is synchronous and so does spend this window while it runs | `not configurable` | the route's own response: it returns its base counts and whatever clauses apply, rather than the client timeout with neither that an unbounded pass produced. Children and claims the expired pass did not reach are left where they were, for the next pass, and the response says the budget ran out rather than naming rows it never examined as failures |
-| `singleton_section_wait` | `workflows.acquireSingletonChild` retries busy starts at five-second intervals against the caller's acquisition deadline. For `pm:{project}`, `HousekeepingSectionDeadline` in `server/internal/temporal/workflows/housekeeping.go` is 30s; planning, story edits and AC amendments pass zero (no acquisition cap, still cancellable). For `mergelock:{project}`, `workflows.mergeLockDeadline` is 900s for merge and normal finalization, `workflows.mergeArchiveLockDeadline` is 60s for archive-only routes, and `workflows.mergeExternalLockDeadline` is 600s for externally merged archive routes | `not configurable` | Housekeeping warns, increments its error count and skips that project's sweep for the tick. Merge callers record a `merge_busy` stop identifying whether merge or archive is outstanding |
-| `singleton_section_body` | `workflows.acquireSingletonChild` applies a positive body timeout as the child's `WorkflowRunTimeout`: `workflows.planningBodyDeadline` is 1500s, `workflows.housekeepingBodyDeadline` is 300s, and `workflows.mergeLockBodyDeadline` is 7200s. Edit and AC-amendment sections set no body timeout here; their activity and lifecycle bounds remain separate. This bounds the section workflow's lifetime, not proof that its activities have stopped or that a retry can safely write | `not configurable` | The child timeout propagates to its caller. Planning attempts ownership-revoking compensation; housekeeping warns and increments its error count; merge callers propagate the section error. Existing ownership and physical-write fences remain necessary |
-| `requirements_lock_wait` | `pm.RequirementsLockWait` (`server/internal/pm/story_result.go`), a package var only so its own tests can lower it: how long a validated planner or edit result waits, with plain reads and outside any transaction, for Git descendants of its own REQS write to release the requirements lock they inherited before `pm.finishStory` lands it. It stops no work. The planning and edit success-finalize legs take it plus their 60s budget as a single-attempt, heartbeating StartToClose (`workflows.resultFinalizeActivityOptions`), so the wait records its own outcome before Temporal expires the activity. It is not clamped to the planning section's body deadline (`workflows.planningBodyDeadline`). A section that times out mid-wait runs the parent's body-timeout compensation, which the guard refuses while the lock is held; the waiting result's next heartbeat reports the section gone and cancels it, and a wait stopped with the lock still held records the same lock-held diagnostic and keeps ownership. If the lock frees first, the ownership check lets only the first of the compensation and the result land | `not configurable` | the result's own record, when the bound runs out or the wait is stopped with the lock held: a story-scoped `operation_result` (`planning` or `edit`, `failed`) titled "The project-wide REQS lock is still held", with the lock's acquire error as its explanation and the recovery command as its help. The story keeps its owner and `content_applying`, and edit feedback is kept as a `requirements_locked` dropped edit |
-| `requirements_lock_poll` | `pm.requirementsLockPoll` (`server/internal/pm/story_result.go`): the pause between the waiting result's nonblocking looks at the lock | `not configurable` | nothing of its own: each look lands the result, waits again, or records a lock it could not check, and expiry reports under `requirements_lock_wait` |
-| `run_token` | the backstop expiry of an agent run's own server token (`agents.runTokenLifetime`): the stage's timeout for each attempt its retry ladder may make, each followed by the longest wait the ladder honors (a server's Retry-After up to its 300s sanity cap, above the computed backoff's ceiling), plus `stagetimeout.OrphanReapMarginSeconds`. It stops no work a live run does: the run revokes the token when it returns, on every path, and this expiry ends only a token whose run never revoked it, a server that died mid-run. Housekeeping deletes the run's row once the expiry has passed | `stages.<name>.timeout` | the run's chain: a call with the token past its expiry answers 401 (`auth.run_token_ended`) |
-| `runner_connect_grant` | `api.runnerConnectLifetime` (`server/internal/api/runner_session.go`), fixed at one hour from registration; the atomic credential exchange checks the recorded creation time. It stops no runner work and never expires an established session | `not configurable` | `runner.connect.refused` on `POST /auth/session`; create a new link with `hashd runner add` |
-| `runner_head_observation` | `api.runnerHeadObservationTimeout` (`server/internal/api/branch_head.go`), a fixed 1s the operator ruled: one observation of a placed, unfinished story's branch on its runner made inside a read -- the detail, list and availability reads, the PR readiness, the ready notice, the PR threads and the PR watch's served readiness -- and before the merge dispatch's lifecycle lock. An observation it ends is an unreadable branch: the merge is refused, Reject's findings are withheld, readiness is unverified and the conflict standing reads as a failed probe | `not configurable` | the read's own answer for an unreadable branch (`dispatch.merge.branch_unreadable` on the merge row and route) |
-| `runner_heartbeat_interval` | `runnerconnect.heartbeatInterval`, fixed 60s: a connected runner sends machine observations through its existing check-in route, scoped to its event-stream connection | `not configurable` | existing `runner_changed` health observation and Fleet refresh |
-| `agent_sign_in` | `deadline.AgentSignInTimeout`, fixed 5 minutes (operator ruling 2026-11-01); stop the process group and remove the attempt's temporary home | `not configurable` | Fleet sign-in Diagnostic: sign-in timed out after 5 minutes; press Sign in again |
-| `runner_heartbeat_timeout` | `runnerconnect.HeartbeatTimeout`, two heartbeat intervals (120s) since connection open or its last accepted heartbeat: remove a silently dead stream from the live registry, interrupt blocked SSE writes, and require reconnect; the runner ends its stream and stops its whole stages if server acknowledgments miss the same bound | `not configurable` | existing `runner_connection_changed` offline fact; placement and Fleet read the same live-stream registry |
-| `pr_watch_interval_active` | the project's `pr.watch.interval_active` (shipped 2m), resolved `defaults.yaml < system config < project config`: the PR watch's wait between polls while a blocking check runs or the forge has not settled a state (`api.prWatchNeedsActiveCadence`). A failing forge read doubles it for each failure in a row, up to `pr.watch.interval_idle`. It stops no work | `pr.watch.interval_active` | nothing of its own: each poll records `pr_watch.last_poll_at` and `next_poll_at`, which the workstream reads serve |
-| `pr_watch_interval_idle` | the project's `pr.watch.interval_idle` (shipped 15m): the PR watch's wait between polls while every outstanding reason waits on a reviewer or the operator, while the owner's forge credential is missing, and after a poll that could not run; the ceiling of a failing read's back-off. It stops no work | `pr.watch.interval_idle` | nothing of its own, as above |
-| `pr_watch_max_age` | the project's `pr.watch.max_age` (shipped 14d): how long a PR may go without a change the PR watch sees (a timeline row), counted from the watch's start or its last such row, before the watch stops reading the forge (`api.prWatchPoll.stopIdle`). It stops the watch only, never the PR or the workstream: the watch leaves a `watch stopped: PR idle N days` notice, the housekeeping sweep does not start it again, and a PR create, a PR push or a merge dispatch starts a fresh one | `pr.watch.max_age` | the notice, a standing `pr_watch` operation result with condition `stopped_idle`, and `pr_watch.stopped_at` / `stop_reason` |
-| `device_code_wait` | the expiry Entra returned with the device code, plus `stagetimeout.RuntimeBufferSeconds`, as the device-code wait's single-attempt, heartbeating StartToClose (`workflows.deviceCodeWaitOptions`). The wait polls Entra until that expiry and reports an expired code itself, so the bound fires only on a wait that has not returned by then. The provider sets the expiry for each code | `not configurable` | the sign-in's failure record on the credential key, written by the sign-in workflow and read through the key's sign-in status, which tells its person to sign in again |
+The wait for a runner slot has no bound (Restart holds, the wait for a runner slot): a run queued on its runner waits until the runner admits it, with no timer or setting of its own, and its slot's release rides the writer of each wait that frees it, the run's exit and the housekeeping sweep below.
+
+| Bound | Value or derivation | Setting | Reported by |
+| --- | --- | --- | --- |
+| `workflow_ceiling` | The configured ceiling required by native Temporal activities when their own stage timeout is zero; also the merge-lock child lifetime. It is not copied into an unlimited whole-stage runner process. | `timeouts.workflow_ceiling` | The existing timeout Diagnostic and the operation’s failure record. |
+| `workflow_record` | The configured bound for short server record and receipt activities. | `timeouts.workflow.record` | The existing timeout Diagnostic and the operation’s failure record. |
+| `workflow_network_stage` | The configured outer budget for network workflow legs; derived multi-call budgets include their configured network limits. | `timeouts.workflow.network_stage` | The existing timeout Diagnostic and the operation’s failure record. |
+| `workflow_provision` | The configured whole provisioning-stage budget, shared by checkout preparation, setup, baseline testing and indexing. | `timeouts.workflow.provision` | The existing timeout Diagnostic and the operation’s failure record. |
+| `review_floor` | The configured minimum for positive review and final-review timeouts. A zero stage timeout stays zero. | `timeouts.review_floor` | The existing timeout Diagnostic and the operation’s failure record. |
+| `runner_connect_grant` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.identity.join_lifetime` | `runner.connect.refused` on `POST /auth/session`; create a new link with `hashd runner add` |
+| `run_token` | The resolved stage budget across its existing attempt ladder, configured retry allowance and orphan margin. Zero disables elapsed expiry; normal completion still revokes the token. | `stages.<name>.timeout` | the run's chain: a call with the token past its expiry answers 401 (`auth.run_token_ended`) |
+| `agent_stage` | An explicit per-stage timeout in the shipped file, overridden by system and project settings. No numeric Go default; zero and NA disable the agent timer. | `stages.<name>.timeout` | the agent subprocess kill: `agents.RunStageWithOptions` stops the process at the stage's bound and `agents.timeoutKillClassification` describes it |
+| `runner_stage` | The named runner-substage timeout; config resolves to test_timeout. Zero or NA disables elapsed-age housekeeping for that substage. `acquire_lock`'s applies only to an orphaned stamp for new-rule FIFO attempts; legacy attempts retain their elapsed-age bound. | `runner_stages.<name>.timeout` | the commit stage enforcing its recorded budget, and the housekeeping sweep as the base its threshold builds on |
+| `pr_merge_mergeability_wait` | 10 s between reads, at most 4 min from the wait's start, inside the held merge lock; each read re-records the pr_merge stamp, so runner_stages.pr_merge.timeout (300 s) never elapses between stamps, and 4 min fits well inside the MergeApprovedLocked StartToClose | not configurable | the merge's progress narration while waiting, and its blocked operation_result notice after 4 min |
+| `activity_start_to_close` | Positive stage budgets plus configured runtime headroom, review floor and browser preparation where applicable. Native Temporal activities use timeouts.workflow_ceiling at zero; whole-stage runner processes keep zero and wait on existing completion and liveness signals. Historical literal budgets remain describable during replay. | `timeouts.workflow_ceiling` / `timeouts.review_floor` / `stages.<name>.timeout` / `runner_stages.<name>.timeout` / `git.network_timeout` / `test_timeout` / `not configurable` (historical literal budgets only) | Temporal expiring the activity |
+| `heartbeat` | The configured native activity heartbeat window; this detects a worker that stopped heartbeating, not a live stage that ran a long time. | `timeouts.workflow.heartbeat` | heartbeat loss |
+| `housekeeping_sweep` | Only positive configured stage budgets are eligible for elapsed-age reaping. The configured orphan margin applies where the stage requires it. Independent owner and workflow-liveness checks still run. A new-rule FIFO `acquire_lock` stamp is reaped on age only when orphaned: while its `merge:{project}:{ws}` execution runs, or cannot be read, it is left for the next sweep. | `stages.<name>.timeout` / `runner_stages.<name>.timeout` / `test_timeout` / `git.network_timeout` | the housekeeping sweep marking an orphaned stamp failed; on workflow liveness alone, with no elapsed age, the same sweep releases the runner slot, or queue entry, of a workstream with no open run of a family that takes one (Restart holds, the wait for a runner slot) |
+| Sign-in refresh activity | One attempt per scheduled housekeeping tick, before project discovery; shares the cleanup activity budget. | `timeouts.workflow.cleanup` | An activity failure or timeout increments housekeeping errors and leaves refresh incomplete; server-owned infrastructure and delivery failures use independent refresh health. Cleanup and project sweeps continue; the next tick retries. |
+| `git_remote` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `git.network_timeout` | remote git operations (`gitnet.KillDiagnostic`), but a repository's first clone, which has the two bounds below |
+| `git_clone` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `git.clone_timeout` | the clone, as `runner.workspace.clone_ceiling` (`project.add.clone_ceiling` for the CLI's) with its last progress line (`gitnet.CloneKill`). A runner workspace's clone that provisioning's bound stops first is reported by provisioning's own failure instead: the provision stage records `workspace_clone_started` just before the clone and `workspace_clone_finished` as soon as it returns, each naming its run, and the failure of a provisioning its bound stopped before the runner reported (`runflow.ProvisionExpiryFailure`) says the first clone was stopped by provisioning's bound, not `git.clone_timeout`, with that setting's value; after a clone that completed, the last step provisioning recorded -- a provisioning substage, or `code_map_index_started`, the row it writes before indexing the worktree, which records no substage -- named by everything that step spans until the next record, since a record proves only that its work had begun; otherwise that the outcome is unknown |
+| `git_clone_stall` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `git.clone_stall_timeout` | the clone, as `runner.workspace.clone_stalled` (`project.add.clone_stalled` for the CLI's) with its last progress line (`gitnet.CloneKill`) |
+| `test_gate` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `test_timeout` | the runner's test/baseline gate, plus every merge-gate, rebase, regeneration and conflict-resolution leg that re-runs those same commands; and the merge gate's whole stage when its own deadline (`test_timeout` plus the runtime margin) expires before the runner reports: the run's `merge_gate` failure is the merge gate's timeout, naming `runner_stages.merge_gate.timeout` (the key the dispatch reads; its `config` value takes `test_timeout`), the enforced bound and its derivation (rounded up to whole seconds, and saying so, when a configured part is not), the raise steps for both `test_timeout` and `runner_stages.merge_gate.timeout`, the last step the gate reported (or that it reported none) and whether the runner acknowledged the stop of that stage's process; the lost-runner `outcome unknown` report is kept for a runner that disconnected, closed its assignment without a complete result, or whose receipt observation ended |
+| `detect` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `stages.detect.timeout` | the project-add wizard's detect stage kill |
+| `dispatch_rpc` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.api.external_call` | a handler's own refusal, whose next step is `deadline.SidecarHealthNextStep` rather than a raise. The connector host and forge CLI calls that share the value do not report here: a forge call returns that operation's own timeout error. The classification probe reports through the record it decides instead: the story-scoped `operation_result` for the released child, plus the merge system error on the archive path. The staleness probe reports by leaving the story it condemned alone -- on the story row for the sweep, on the board for the restart gate |
+| `singleton_section_wait` | New-rule local, pr_approved and archive entry, the run workflow's inline external-merge archive included, has no elapsed limit. Under the `merge-archive-prepare-first` / `run-archive-prepare-first` version pins (selected only with `ArchiveChuteFIFO`), archive SPEC preparation runs outside `mergelock:{project}` and the REQS/SPEC artifact locks before admission (bounded by `timeouts.workflow.merge_body` and `timeouts.workflow.extended_heartbeat`, with `WaitForCancellation`), and the locked section runs the whole archive pass (`ArchivePhaseWhole`), reusing the checkpointed SPEC preparation when valid and regenerating inside the lock on a destination conflict (at most once per destination, stopping deterministically with `documentationConflictedTwice` on a second conflict). Unpinned executions run only the whole archive pass inside the locks. timeouts.workflow.merge_lock_wait applies only to attempts started before the upgrade; archives of executions started before queued archives keep the bound their recorded timer snapshot carries (the retired merge_archive_lock_wait / merge_external_lock_wait, or merge_lock_wait after a merge), and housekeeping uses housekeeping_lock_wait. PM admission can wait without an elapsed limit. There is no single setting for this abstract registry row. | `not configurable` (no single hashd-owned setting) | Housekeeping warns, increments its error count and skips that project's sweep for the tick. Pre-FIFO merge attempts and historical bounded archives record a `merge_busy` stop identifying whether merge or archive is outstanding |
+| `singleton_section_body` | The caller uses timeouts.workflow.planning_body, housekeeping_body or workflow_ceiling as appropriate (and `timeouts.workflow.merge_body` for the archive's unlocked `prepare` pass and locked whole pass). Zero body budgets omit the child lifetime. There is no single setting for this abstract registry row. | `not configurable` (no single hashd-owned setting) | The child timeout propagates to its caller. Planning attempts ownership-revoking compensation; housekeeping warns and increments its error count; merge callers propagate the section error. Existing ownership and physical-write fences remain necessary |
+| `agent_probe_interval` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.agentprobe.probe_interval` | `agents.runStageSubprocessWithBinaryProbe`, `preflight.probeAgentBinaries`; successful recovery records `agent_retry` / `binary_unavailable` |
+| `agent_probe_window` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.agentprobe.probe_window` | Runner retries failed starts only; preflight shares PATH checks across agents using the same binary. Exhaustion retains the existing failure. A credential check the leg has no room for is deferred to launch (`preflight.checkAssignedAgentsHealthy`) |
+| `dependency_handoff` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.mergeflow.dependency_handoff_budget` | the archive's post-merge handoff, as the durable system error recorded against the merged workstream; children the expired walk did not reach stay `pending` and the planning reconcile releases them |
+| `dispatch_failure_record` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.storydeps.dispatch_failure_record_budget` | the records themselves -- the child's `draft_failed` fields for a proven refusal, and the story-scoped `operation_result` `hashd show STORY-x` reads for a dispatch whose outcome is unconfirmed |
+| `plan_reconcile` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.api.plan_reconcile_budget` | the route's own response: it returns its base counts and whatever clauses apply, rather than the client timeout with neither that an unbounded pass produced. Children and claims the expired pass did not reach are left where they were, for the next pass, and the response says the budget ran out rather than naming rows it never examined as failures |
+| `requirements_lock_wait` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.pm.story_result_requirements_lock_wait` | the result's own record, when the bound runs out or the wait is stopped with the lock held: a story-scoped `operation_result` (`planning` or `edit`, `failed`) titled "The project-wide REQS lock is still held", with the lock's acquire error as its explanation and the recovery command as its help. The story keeps its owner and `content_applying`, and edit feedback is kept as a `requirements_locked` dropped edit |
+| `requirements_lock_poll` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.pm.requirements_lock_poll` | nothing of its own: each look lands the result, waits again, or records a lock it could not check, and expiry reports under `requirements_lock_wait` |
+| `runner_head_observation` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.api.runner_head_observation` | the read's own answer for an unreadable branch (`dispatch.merge.branch_unreadable` on the merge row and route) |
+| `runner_heartbeat_interval` | The configured interval for the existing runner check-in and machine observations. | `timeouts.runnerconnect.heartbeat_interval` | existing `runner_changed` health observation and Fleet refresh |
+| `runner_heartbeat_timeout` | The server serves `Hashd-Runner-Heartbeat-Interval` and `Hashd-Runner-Heartbeat-Misses` for each connection. Both peers use interval × (allowed misses + 1), giving the last beat a full interval to answer (240s by default). Zero interval or zero misses removes this elapsed liveness window; explicit stream closure still disconnects. | `timeouts.runnerconnect.heartbeat_misses`, `timeouts.runnerconnect.heartbeat_interval` | existing `runner_connection_changed` offline fact; placement and Fleet read the same live-stream registry |
+| `agent_sign_in` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `timeouts.agent_sign_in` | Fleet sign-in Diagnostic: sign-in timed out after 5 minutes; press Sign in again |
+| `pr_watch_interval_active` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `pr.watch.interval_active` | nothing of its own: each poll records `pr_watch.last_poll_at` and `next_poll_at`, which the workstream reads serve |
+| `pr_watch_interval_idle` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `pr.watch.interval_idle` | nothing of its own, as above |
+| `pr_watch_max_age` | Resolved through the settings snapshot by `config.Timer`; zero disables this elapsed limit or cadence. | `pr.watch.max_age` | the notice, a standing `pr_watch` operation result with condition `stopped_idle`, and `pr_watch.stopped_at` / `stop_reason` |
+| `device_code_wait` | The provider-returned device-code expiry plus configured runtime headroom. The provider owns the expiry; hashd does not replace it. | `not configurable` (no single hashd-owned setting) | the sign-in's failure record on the credential key, written by the sign-in workflow and read through the key's sign-in status, which tells its person to sign in again |
 
 ### Runner transfer bound
 
@@ -7753,9 +9108,58 @@ When the implementer reports `already_done`:
 
 This prevents orphaned changes when a timeout leaves uncommitted work in the worktree.
 
+
+A recorded command failure creates an obligation independent of repair retention.
+A completed passing execution of that exact argv by hashd for the same lane,
+ordered after the corresponding failure, pays it once. A go-anyway acceptance
+for exactly that execution's revision and failures also pays a test obligation
+without rewriting its nonzero process outcome or failure evidence. Later rebases (including
+document-only target advances) do not revive a paid obligation. Another recorded
+failure renews only its command; replacing `current_failure` preserves other
+unpaid commands and prior discharges. Configuration changes and skip flags do
+not pay obligations. Manual `hashd test`, base comparisons, other lanes,
+narrowed checks and incomplete outcomes cannot pay them.
+
+In approved-PR chute verification, including preparation without a new rebase, each configured build, fast, full or required command that exits normally with a nonzero status runs once more immediately through `RunProjectCommand`. The repeat keeps the same checkout, HEAD, argv, environment and fast-check handoff under the existing merge lock and timeout policy. No fetch, rebase, classification, regeneration commit or side-effect restoration occurs between executions. A passing repeat continues verification; two failing exits stop through `FailPostRebaseTest` in `merge_test_failed`, with a structured diagnostic naming the command and both failures. A twice-failing fast check never substitutes the full suite or runs a third time. Both executions retain distinct references, complete console captures and individual outcomes even when the repeat passes; evidence-delivery errors fail explicitly. Cancellation, timeout, credential refusal, signals and launch failures keep their existing handling and never initiate a repeat. Other verification modes and other fast-selection fallback reasons are unchanged. This is local command verification, not a Temporal retry or a restarted preparation.
+
+The server narrows execution reads by lane and command before decoding evidence.
+New failure anchors keep the server's durable execution-order floor; historical
+anchors use their corresponding failed execution's insertion order, or the
+original failure's server timestamp when available. `repair.created_at` never
+dates a later `current_failure`, and runner clocks never establish this order.
+When a historical failure has no execution anchor, the upgrade's execution-order
+watermark conservatively admits later verifications; it does not preclude
+provable passes before upgrade. No timestamp or pass is invented for historical records. Chute build and test
+failures use their existing run evidence and retirement stamps even without a
+repair row and never create or spend an automatic-FIX allowance. Re-entering
+merge without a gate keeps each unpaid chute command; a qualifying pass stays
+paid across restart, another attempt and later preparations in the merge lock.
+Each preparation reads current obligations rather than retaining the attempt's
+initial required-check snapshot. New chute records also carry the execution-order floor. Required
+verification executes an unpaid command rather than borrowing an older content
+cache pass. This changes command obligations only: retained evidence, ruling,
+FIX binding, spent allowance and reset/checkpoint-reset/replan retirement
+boundaries remain intact. Merge and FIX gates consume this same outstanding-command
+projection. Each qualifying execution pays its command even if a later check
+blocks the gate. Discharged commands add no execution beyond ordinary gate
+policy. Reused verification retains its original lane and execution order;
+a configured-suite match or a full/fast pair alone cannot discharge a check.
+Assigned context reads retain the raw repair separately for recovery ownership
+and allowance decisions.
+
+Explicit recovery and shared post-rebase verification retain each completed
+command execution before the aggregate outcome, including when a later command,
+regeneration commit, or publication fails. Each qualifying unrestricted pass
+pays only its own command through the shared resolver; the retained repair
+adds no replay after that discharge. Ordinary configured checks and cache
+eligibility still apply. Reuse keeps its original execution reference and time,
+and a touched-file fast pass never becomes an unrestricted command execution.
+The successful-command list used to retire recovery clarifications is separate
+from this evidence: an argv list alone cannot discharge an obligation.
+
 A FIX bound to a recorded merge-gate repair ruling does not auto-skip when
 the worktree is clean: a local environment repair can require no file changes.
-It still passes the pinned verification command, review and QA gate. If there
+It still satisfies any unpaid pinned verification command, review and QA gate. If there
 is nothing to commit afterward, the commit stage marks the plan entry done
 and records completion without creating a Git commit or commit-chain row.
 Ordinary implementation with no changes retains its existing failure/auto-skip rules.
@@ -7839,7 +9243,9 @@ on its next heartbeat, and the activity answers it with the step it had
 reached and the error it stopped with. The rollback record names the
 operator's cancel, that step and that error. A cancel that lands after the
 activity has finished leaves its result standing but starts no runner
-continuation: the run outcome names the cancel and `hashd run`. A
+continuation: the workstream's standing `resolve_continuation` failure names
+what the resolve completed, the cancel, and `hashd show` then `hashd run`
+(see **Return to the interrupted work**). A
 forced cancel (the resolve execution cancelled, then sent `force-cancel` on
 the same run; a failed signal leaves a plain, waiting cancel) does not wait:
 it rolls back at once, and the record names the forced interrupt and says
@@ -7942,8 +9348,10 @@ non-zero exactly like a broken build, and no structural field separates them.
 An established failure is recorded as the workstream's current merge-gate
 failure (`merge_gate_repairs`, under the story's recovery key), so its command
 stays required verification whatever the configured commands say next, until
+an ordered qualifying lane verification pays that command's obligation, or
 full reset, checkpoint reset or replan retires the record. A later failure
-retains the original check and spent allowance alongside its new evidence. A
+renews only its command and preserves other unpaid checks, prior discharges,
+retained repair evidence and the spent allowance. A
 command that timed out, was killed by a signal or never launched (a missing
 binary, an unstartable harness), and a leg where no gate command resolves where
 it requires one (a `merge_gate_test_cmd` that does not parse, on either leg; an
@@ -8350,8 +9758,29 @@ returns to `implementing` (`resolve_resume_run`) and starts the ordinary
 merge gate and final review; resolving conflicts does not approve the branch.
 The resolver uses the same lifecycle-locked continuation as AC amendments,
 waits for dispatch confirmation, then releases its own workflow.
-A failed handoff leaves the resolved work intact and reports `hashd run` as
-recovery. Post-PR publish/merge resolution retains its existing PR-aware exit.
+A failed handoff leaves the resolved work intact, and a scheduled FIX bound,
+and records the workstream's standing failure as a `resolve_continuation`
+operation result, not a run outcome: no run started, so there is no run to
+report against and none is invented. It names what the resolve completed and
+kept, the reason, and the dispatch's own Diagnostic. A cancel before the
+dispatch says no run started; any other failure says the run may already be
+running, and leads with inspecting it before a retry, and is never dispatched
+again on its own.
+A hold does not fail the hand-off. Before the dispatch the completed resolve
+holds at its continuation boundary (see **Restart holds**), acknowledged,
+while a restart hold or the workstream's pause stands, keeping the resolution
+or the scheduled FIX it completed; the release resumes the dispatch, and
+nothing the resolve did is repeated or undone. A hold that lands between the
+boundary's check and the dispatch is refused by admission before anything
+starts, and that refusal alone returns the resolve to its boundary to wait
+for the release. Startup recovery does not stand in for it: the startup
+release signals the acknowledged resolve, which then dispatches its run. A
+resolve that reached its hand-off under a build before the boundary records a
+hold's refusal as a stop that says no run started. Both name `hashd show` and then `hashd run`. A run of the
+workstream already started since the resolve began answers the hand-off, and
+nothing is recorded; otherwise the record stands until a run of the
+workstream starts. Post-PR publish/merge resolution retains its existing
+PR-aware exit.
 Snapshot recovery must not infer runner completion from a clean worktree.
 If the resolver is confirmed closed before handoff, recovery returns to
 `merge_conflicts` for another AI-resolve attempt, to `merge_test_failed`
@@ -8400,7 +9829,10 @@ code it changes. Approval applies to reviewed content, not merely a run, stage,
 or commit identity. Human or agent edits that change reviewed material must
 return through test and review before commit or merge, including after final
 review. `qa_gate` checks recorded test status and approval; it does not rerun
-tests or perform a review. A SHA-only rewrite with demonstrated patch
+tests or perform a review. For the plan's final planned micro-commit and for
+FIXes the build runs before the per-commit review and the test command runs
+after final review, at the merge gate; each review states the evidence it has
+(see **Order of the all-complete leg**). A SHA-only rewrite with demonstrated patch
 equivalence does not by itself invalidate a review.
 
 Review, retry, and adjudication handoffs preserve the complete text of the
@@ -8415,12 +9847,22 @@ Per-commit stage reviews are **stable records** about the code at the moment the
 The first final review includes active per-commit concerns with commit provenance.
 After completion, `concerns_pool_consumed_at` is set on the workstream. Subsequent
 final reviews see an empty per-commit concern pool; they retain previous
-final-review context and the approved accepted deviations described below. A
-replan or an approved requirements revision deletes the retired attempt's
-reviews and clears the mark with them, so the next attempt's first final review
+final-review context and the approved accepted deviations described below. A replan deletes the retired attempt's reviews and clears the mark with them, so the next attempt's first final review
 receives its own pool.
 
-The rejection path (`hashd reject`) and micro-commit planning path (`hashd workstream add-commit`) pull the most recent final review by review type and recency, without filtering by run. The latest final review is always the one the user is reacting to.
+A partial replan (`from_commit`) keeps the records of the code it keeps:
+
+| Record | Kept code (before the boundary) | Discarded code (boundary and later) |
+|--------|---------------------------------|-------------------------------------|
+| Per-commit reviews | kept | deleted |
+| Final reviews | -- | deleted (their verdict covered the replaced code) |
+| Commit failures | kept | superseded, by id |
+| Delivered-concerns mark | cleared, so the next first final review receives the kept and new concerns once | |
+| Transcripts | never deleted | never deleted |
+
+Full replan and reset are unchanged.
+
+The rejection path (`hashd reject`) and micro-commit planning path (`hashd story add-commit`) pull the most recent final review by review type and recency, without filtering by run. The latest final review is always the one the user is reacting to.
 
 Final-review records and agent invocation evidence carry the real run identity
 when called from the engine. This is bookkeeping and traceability, not a
@@ -8441,6 +9883,12 @@ Because `run_id` is not a read filter, it cannot say what a review graded. A per
   `verdict` with a matching `review_id`; otherwise return null. Running or
   verdictless attempts cannot revive an earlier verdict.
 - A recorded PR does not select a review.
+
+**Stale** (`ReviewDetail.stale`) is set only on the snapshot's selected review. On a selected final review it is true exactly when the currency answer the `final_review_current` guard reads (`review.FinalReviewCurrencyOf`) is readable and not current. It is false when that answer is current, including after a newer run row that did not change the story's changes, such as the synthetic run a failed post-rebase merge test records. It is false when currency could not be read, false when the answer is not current only because the latest verdict was never applied (that review was not replaced by later work, and it is the one to read), and false at `merged`. On a selected per-commit review it is true when the review's run is not the workstream's latest run.
+
+Every surface shows a stale selected review as history, never as the current verdict. It gets one line naming what the review graded, when it was recorded, its verdict and its finding count, with the whole record one step away: `hashd show` prints `hashd review show <id>`, the TUI Review panel unfolds it on its details key, and the Web Review tab unfolds it in a closed fold. `hashd review` reports no current review for it.
+
+The `hashd show` Workstream Gates `final_review` row reports a recorded final-review verdict that the server did not select as the current, non-stale review as `superseded`, naming the earlier verdict, without the pass mark. `--json` `workstream_gates` carries the same row.
 
 Every snapshot includes `review_selection: "current_piece"`, even with null
 `review`. `hashd show`, default `hashd review`, the web Review tab, TUI
@@ -8472,7 +9920,7 @@ The states are evaluated in that order, and each arm exists because the one afte
 
 Every input is a persisted row plus that liveness answer, so a server restart or a client reconnect re-answers identically.
 
-**Merge needs a current verdict.** Merge and PR create from `ready_to_merge` and `final_review_with_concerns`, the merge from `pr_open` and `pr_approved`, and the merge retry from `merge_test_failed` carry the `final_review_current` guard. It passes when the currency state above is `verdict` and the change hash that verdict recorded equals the change hash of the story's branch over its merge base now (`review.FinalReviewCurrencyOf`): the review stays current while the story's own changes are unchanged. A clean rebase onto a moved base keeps it current; a conflict-resolved rebase, a fix commit, an edit or a commit pushed to the PR makes it not current. What the base's moves break is the post-rebase merge tests' to find. A verdict recorded with no change hash is not current, so it costs one more final review. A failed hash read refuses as "could not be read", not as stale. A PR's forge review and CI gates apply on top of the guard. The guard applies in every autonomy mode. Merge reconciliation is the exception: a canonical landing record or a stored merged observation for the linked repository-and-PR key (including a stopped watch) offers and admits `start_merge` without reading final-review currency, its records, or branch publication parity, even if an earlier attempt changed the branch. It does not make the review current for PR creation, rerunning review, or other actions. Admission retains lifecycle locking, busy and ownership checks, and revalidates the reconciliation decision under its write lock. Begin's live PR read remains authoritative: an open result must pass normal open-PR currency and publication eligibility before any merge mutation. Where it refuses at `ready_to_merge`, `pr_open` or `pr_approved`, `hashd run` re-runs the final review (`rerun_final_review`, guarded by its negation, the busy guard and the active-publish guard, since a PR create keeps the workstream at `ready_to_merge` while it rebases and pushes); where it passes, `hashd run` is refused and names `hashd merge`. A publish to an existing PR records the workstream at `pr_open` without these guards, whoever ran it: the branch is on the PR either way.
+**Merge needs a current verdict.** Merge and PR create from `ready_to_merge` and `final_review_with_concerns`, the merge from `pr_open` and `pr_approved`, and the merge retry from `merge_test_failed` carry the `final_review_current` guard. It passes when the currency state above is `verdict` and the change hash that verdict recorded equals the change hash of the story's branch over its merge base now (`review.FinalReviewCurrencyOf`): the review stays current while the story's own changes are unchanged. A clean rebase onto a moved base keeps it current, and so do the merge gate's own changes: its commits at and after the rebase (a migration renumber that keeps migration content, the post-rebase regeneration, the trailing-whitespace fix, and the verify phase's `merge_doc_update` documentation commit), the ownership heal's owned-file regeneration, a second rebase in the verify phase when the base moved, and a fully verified AI conflict resolution. Each gate phase that ends without a stop, and each heal that commits, records an operation result (`merge_gate_changes`, carrying `automatic_rebase_recovery`) linking the branch's change hash as it entered to the one it left, and currency follows those links from the reviewed hash. Any other change after the approval -- a fix commit, an operator or agent commit, an edit, a commit pushed to the PR, a conflict resolution nothing verified, or a migration whose content changed (the merge's migration-review stop) -- makes it not current, including when it lands between the approval and the gate's entry. What the base's moves break is the post-rebase merge tests' to find. A verdict recorded with no change hash is not current, so it costs one more final review. At `ready_to_merge` a reject or concerns verdict that a run recorded and then failed at final_review without applying (no park at `final_review_with_concerns` after it, which also covers an operator's `final_review_approve` out of that park, no automatic FIX round for that run, and no nit dismissal of that review) is not current either: the lane rests there only because the checkpoint failed, so the refusal names the review and its verdict and `hashd run` re-reviews. At `final_review_with_concerns` merge stays the operator's deliberate choice. A failed hash read refuses as "could not be read", not as stale. A PR's forge review and CI gates apply on top of the guard. The guard applies in every autonomy mode. Merge reconciliation is the exception: a canonical landing record or a stored merged observation for the linked repository-and-PR key (including a stopped watch) offers and admits `start_merge` without reading final-review currency, its records, or branch publication parity, even if an earlier attempt changed the branch. It does not make the review current for PR creation, rerunning review, or other actions. Admission retains lifecycle locking, busy and ownership checks, and revalidates the reconciliation decision under its write lock. Begin's live PR read remains authoritative: an open result must pass normal open-PR currency and publication eligibility before any merge mutation. Where it refuses at `ready_to_merge`, `pr_open` or `pr_approved`, `hashd run` re-runs the final review (`rerun_final_review`, guarded by its negation, the busy guard and the active-publish guard, since a PR create keeps the workstream at `ready_to_merge` while it rebases and pushes); where it passes, `hashd run` is refused and names `hashd merge`. A publish to an existing PR records the workstream at `pr_open` without these guards, whoever ran it: the branch is on the PR either way.
 
 ### Answered workstream clarifications
 
@@ -8488,10 +9936,7 @@ round render once with every question and origin retained. Distinct rounds stay
 separate, and missing legacy creation or answer times do not justify deduplication.
 The resumed reviewer renders this evidence from its existing context reload even
 when its session predates the answer. Existing answer persistence and
-per-rejection guidance remain separate. A breakdown refusal ends with the plan
-it refused: approving a requirements revision supersedes the held workstream's
-pending breakdown refusals inside the approval transaction and does not answer
-them, so none reaches this evidence as an answered refusal.
+per-rejection guidance remain separate.
 
 ### Operator Guidance (workstream_guidance)
 
@@ -8501,11 +9946,11 @@ Operator guidance -- rejection feedback and replan instructions -- is an append-
 
 PR/MR review threads from the forge are durable external findings. They are not the same thing as the single-shot per-commit concern pool above.
 
-`GET /workstreams/{id}/pr/threads` calls `forge.ListReviewThreads`, serves the threads to its caller, and folds the same fetch into `pr_review_findings`, deduped by the forge-stable thread ID. The forge owns resolution: hashd writes `resolved_by_forge` only when the forge reports `IsResolved`, and writes `outdated` only when the forge reports `IsOutdated`. Hashd does not close or self-resolve review findings -- an operator editing or excluding a finding in the rejection draft changes that one FIX's selected findings; it does not settle the thread. A reject that folds forge threads into its FIX records each one's `folded_into_fix` and `folded_at` in the FIX's own transaction, which the PR panel's `presentation` reads to tell a thread already handed to FIX work from a new one.
+`GET /workstreams/{id}/pr/threads` calls `forge.ListReviewThreads`, serves the threads to its caller, and folds the same fetch into `pr_review_findings`, deduped by the forge-stable thread ID. A root its adapter exempts from readiness (`ReadinessExempt`) is the attention badge's alone (**The attention total** above): it is neither folded into the ledger nor served as a finding. The forge owns resolution: hashd writes `resolved_by_forge` only when the forge reports `IsResolved`, and writes `outdated` only when the forge reports `IsOutdated`. Hashd does not close or self-resolve review findings -- an operator editing or excluding a finding in the rejection draft changes that one FIX's selected findings; it does not settle the thread. A reject that folds forge threads into its FIX records each one's `folded_into_fix` and `folded_at` in the FIX's own transaction, which the PR panel's `presentation` reads to tell a thread already handed to FIX work from a new one.
 
 Reconciliation runs when the operator reads threads, including when a rejection draft loads its optional forge section through `GET /workstreams/{id}/review/findings?include_forge=true`. Loading a section does not select it for submission. Both routes share the thread reader and ledger reconciliation; only Reject withholds forge findings when local work is ahead of the PR head. Upserts preserve `first_seen_sha` / `first_seen_at`, so a finding keeps the commit it first appeared at even as GitHub re-anchors the underlying comment to each new head on push. A ledger write never costs the caller its threads: the forge round-trip has already succeeded, so a failed reconcile is logged and the threads are served anyway.
 
-`/pr/threads` is the detail-surface read: the TUI and Web workstream detail screens show the forge review from it, without starting a rejection. Beside the threads it reports the PR head and the checks status for that head, each reviewer's current verdict with the commit it covers and a freshness of `at_head` or `unknown`, and the local branch compared with the PR head as `equal`, `ahead`, `rebased`, `behind`, `diverged` or `unverified`. Only current findings are served: a thread the forge reports resolved or outdated is stale, and so is a verdict given on an older commit than the PR head, and neither is served; Reject folds the same current threads (`currentForgeThread`), so a stale thread never feeds a fix round either. The readiness beside them is still judged from every thread the forge returned, since it states what the forge will allow. Each thread carries a one-line `summary`, the first line of its text with no knowledge of its author or format: the forge's own plain text where it serves one (`text`, GitHub's `bodyText`), else its Markdown read as text by goldmark with code blocks and raw HTML left out -- and links to itself on the forge, or to the PR when the forge gives it no link; its full body is served beside it. When the local branch is not the PR head, the threads and verdicts are still served, labelled `evidence_head: pr_head`, with a `notice` naming the comparison and the publish command; `withheld` is always false on this route. Reject keeps its withhold: with local work ahead, `include_forge=true` refuses with 409 rather than offer findings about a head the operator has moved past.
+`/pr/threads` is the detail-surface read: the TUI and Web workstream detail screens show the forge review from it, without starting a rejection. Beside the threads it reports the PR head and the checks status for that head, each reviewer's current verdict with the commit it covers and a freshness of `at_head` or `unknown`, and the local branch compared with the PR head as `equal`, `ahead`, `rebased`, `behind`, `diverged` or `unverified`. Only current findings are served: a thread the forge reports resolved or outdated is stale, and so is a verdict given on an older commit than the PR head, and neither is served; Reject folds the same current threads (`currentForgeThread`), so a stale thread never feeds a fix round either. The readiness beside them is still judged from every thread the forge returned except a `ReadinessExempt` root, since it states what the forge will allow. Each thread carries a one-line `summary`, the first line of its text with no knowledge of its author or format: the forge's own plain text where it serves one (`text`, GitHub's `bodyText`), else its Markdown read as text by goldmark with code blocks and raw HTML left out -- and links to itself on the forge, or to the PR when the forge gives it no link; its full body is served beside it. When the local branch is not the PR head, the threads and verdicts are still served, labelled `evidence_head: pr_head`, with a `notice` naming the comparison and the publish command; `withheld` is always false on this route. Reject keeps its withhold: with local work ahead, `include_forge=true` refuses with 409 rather than offer findings about a head the operator has moved past.
 
 Reconciliation is two-sided. A thread can stop being reported without ever being resolved -- its author deletes the comment, or a rebase destroys the anchor it hung on -- so each pass also stamps `absent_at` on every finding for that PR it did not touch (the upsert refreshes `last_seen_at`, making an older stamp exactly the set that went missing). Absence is recorded *beside* `status`, not over it: `status` remains whatever the forge last said, `absent_at` is what hashd observed. A thread the forge reports again has its `absent_at` cleared, because absence describes the last pass rather than a terminal state. The row itself is never deleted -- an absent finding is still part of the PR's history.
 
@@ -8526,7 +9971,7 @@ flowchart LR
     FR --> X[Consumed once]
 ```
 
-The loop is operator-paced. `P` publishes the branch to the long-lived PR -- the whole point of pushing is to solicit review, so it is a deliberate keystroke rather than an automatic consequence of committing, and it moves no FSM state. The publish is a force-with-lease, because the merge flow's rebase legs legitimately rewrite this branch's history and a plain push can never publish a rebased branch; the lease refuses if the remote gained commits the worktree has never seen, so a colleague's concurrent push is not overwritten -- with the one caveat recorded under the publish invariants, that a branch with no local tracking ref is fetched once and the lease primed from that tip. On the TUI detail screen the forge review section reads `/pr/threads` when the screen opens, and again only on `F` (offered while the workstream has a PR) -- never on a timer or an event refresh, and never by Merge or Reject. `r` opens the TUI draft in human-guidance, forge, internal order. Forge findings are included and expanded by default after fetching; internal findings are included and collapsed, with their loaded summary visible. Only open, current forge threads are offered; the selected and edited findings are saved to the next FIX with separate guidance.
+Each completed micro-commit publishes the branch to origin, including its long-lived PR, before marking the step done. `P` also explicitly publishes the branch and moves no FSM state. The publish is a force-with-lease, because the merge flow's rebase legs legitimately rewrite this branch's history and a plain push can never publish a rebased branch; the lease refuses if the remote gained commits the worktree has never seen, so a colleague's concurrent push is not overwritten -- with the one caveat recorded under the publish invariants, that a branch with no local tracking ref is fetched once and the lease primed from that tip. On the TUI detail screen the PR panel renders the server's `presentation`: the PR watch's, from the snapshot every refresh reads, so each poll the watch completes reaches it with no forge call of its own; and `F` (offered while the workstream has a PR) reads `/pr/threads` live. The newest successful forge evidence is kept by `observed_at`, while the presentation's separately dated `watch` health follows later polls, including failures. A failed watch read leads with its server Diagnostic without discarding newer forge evidence or presenting that evidence as a current green answer; `M` unfolds the evidence and current watch details. Merge and Reject read nothing for it. `r` opens the TUI draft in human-guidance, forge, internal order. Forge findings are included and expanded by default after fetching; internal findings are included and collapsed, with their loaded summary visible. Only open, current forge threads are offered; the selected and edited findings are saved to the next FIX with separate guidance.
 
 The ledger is durable and reconciled across review cycles. The concern pool is internal review context consumed once by the first final review. Keeping them separate prevents stale per-commit notes from leaking into later prompts while preserving forge-owned review threads until the forge itself says they are resolved or outdated.
 
@@ -8567,6 +10012,17 @@ An operator ruling dismisses a finding for the rest of the workstream. Rulings a
 - `hashd reject --dismiss "<finding-ref>: <reason>"` (repeatable)
 - `POST /workstreams/{id}/acknowledged-concerns`
 
+Dismissal references may mix internal review items (`2073#F1`, `2073#C2`)
+and stored forge threads (`forge#704`, as printed by `hashd show`). Each must
+belong to the target project and workstream. Forge dismissals copy the complete
+stored body and file location, including evidence for resolved or absent threads;
+they require no forge refresh and never resolve threads. Every dismissal is
+validated before side effects, including withdrawing auto-merge. Explicit
+dismissals also work with replacement findings, including an empty file or stdin.
+A refused FIX records no rulings; a successful FIX records them atomically with
+its plan change. Repeating the same covered text and reason keeps the standing
+ruling rather than adding another entry.
+
 Every reviewer round that can raise findings receives the whole list, read from the workstream row when that round loads its context, so a ruling recorded between rounds reaches the next one: the per-commit stage review (fresh, closed-list or resumed session), the final review's full round and its delta round, and the within-round repair redraft (the verifier redraft and the format retry). Implementers receive the same list as accepted concerns to preserve. A project `review_repair.md` override that renders without the rulings fails the redraft rather than running it blind.
 
 Reviewers are told that a finding matching a ruling, by the rule it is an instance of and by its text, is not a finding and is not raised again, and that a ruling's reason is not relitigated. The one exception is new evidence the ruling did not have -- a test that now fails, the same defect in a different file. Such a re-raise names the evidence and sets the finding's `ruling` field to the ruling's ACK id, which is recorded as given and changes neither severity nor blocking.
@@ -8581,7 +10037,7 @@ Different surfaces have different audiences and different needs:
 - **Operator surfaces** (TUI detail, `hashd show`, CLI summaries, review history inspection): cumulative across attempts. Humans need to see the workstream's history; agents don't.
 - **Concern lifecycle**: concerns flagged in per-commit reviews persist at workstream level until the first final review, then drop. Concerns do not flow to next per-commit implementers.
 - **Operator guidance** (`hashd reject <id> -f "<text>"`): the operator's free-text guidance for a specific reject is passed to the next implementer attempt via the human-guidance section -- per-cycle on that implementer surface (signal-borne, cleared after first use). A reject that lands on a closed run (orphan recovery) and a replan additionally record the guidance as a standing `workstream_guidance` row, which keeps informing every subsequent review of its scope (see Operator Guidance under Review Scoping Rules). At review gates, `-f` is optional and additive: hashd folds the gate findings into the FIX commit by default, while human guidance appears first and takes precedence.
-- **Per-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-run historical context. It runs once a selected micro-commit has at least two prior stage reviews, whether the commit is a regular `COMMIT-...-001` or a `COMMIT-...-FIX-001`. It detects "going in circles" on the same finding, including A -> B -> A and persistent identical reviews. It does not treat partial progress as oscillation: if `(A, B)` becomes `A`, the workstream is still converging. Pure `A -> A` needs three consecutive identical reviews before escalation. FIX commits continue to use their structured fix history and oscillation-resolution records. A triage judge whose agent call fails after the agent attempt ladder (a classified failure, an in-process kill at `stages.concern_triage.timeout`, or a prelaunch refusal) leaves no ruling, so the run ends `failed` at `concern_triage` before the micro-commit is implemented, in every autonomy mode. Its `run_failed` record is titled `The concern-triage judge could not run: <reason>` and carries the same `failure_code`, deadline keys, usage-limit keys (so a `usage_limit` failure takes the scheduled retry) and `output_transcript_id` as the adjudicate judges' failed stop, the output recorded as a `concern_triage_response` transcript row. The failure reaches the workflow as an activity outcome, so no Temporal retry re-runs it. A reply that arrives but cannot be parsed is not a failed call: the check logs it and the run proceeds.
+- **Per-commit oscillation check** (in `stage_concern_triage`): the explicit exception that uses cross-run historical context. It runs once a selected micro-commit has at least two prior stage reviews, whether the commit is a regular `COMMIT-...-001` or a `COMMIT-...-FIX-001`. It detects "going in circles" on the same finding, including A -> B -> A and persistent identical reviews. It does not treat partial progress as oscillation: if `(A, B)` becomes `A`, the workstream is still converging. Pure `A -> A` needs three consecutive identical reviews before escalation. FIX commits continue to use their structured fix history. A triage judge whose agent call fails after the agent attempt ladder (a classified failure, an in-process kill at `stages.concern_triage.timeout`, or a prelaunch refusal) leaves no ruling, so the run ends `failed` at `concern_triage` before the micro-commit is implemented, in every autonomy mode. Its `run_failed` record is titled `The concern-triage judge could not run: <reason>` and carries the same `failure_code`, deadline keys, usage-limit keys and `output_transcript_id` as the adjudicate judges' failed stop, the output recorded as a `concern_triage_response` transcript row. The failure reaches the workflow as an activity outcome, so no Temporal retry re-runs it. A reply that arrives but cannot be parsed is not a failed call: the check logs it and the run proceeds.
 
 Principle: agent evaluation artifacts are current; answered operator clarifications remain durable historical evidence. Artifacts visible to humans are cumulative.
 
@@ -8595,7 +10051,7 @@ Principle: agent evaluation artifacts are current; answered operator clarificati
 | pr_open | Latest internal findings plus open forge threads and current changes-requested review bodies by default, or a complete override, with separate human guidance | Keep PR open; append FIX commit |
 | pr_approved | Latest internal findings plus open forge threads and current changes-requested review bodies by default, or a complete override, with separate human guidance | Keep PR open; append FIX commit |
 
-**Durable PR:** rejecting a PR never closes it. At `pr_open` and `pr_approved` the server folds, by default, the latest applicable internal findings, the PR's open forge threads and the bodies of current changes-requested reviews -- those submitted against the PR head, or undatable -- whether or not `-f` guidance is given; other gates keep internal-only defaults and fetch forge findings only when requested. A failed default forge read refuses the reject before anything changes; `--findings-file` rejects without forge findings. When local work is ahead of the PR head, the default read is withheld: the reject carries on with the internal findings and guidance and returns the withhold as a warning (an explicit `--include-forge` refuses instead), and with nothing else to fold it refuses, naming the withhold and `hashd pr push`. All interactive clients submit the complete selected findings with separate human guidance. All clients default to including internal findings; the TUI also initially includes available forge findings. CLI supports `--include-forge` (the default at the PR gates) or `--findings-file` and additive `-f`. Empty selections never restore defaults; a new FIX needs findings or guidance. The same PR gains the FIX and is reused after implementation. Exclusion does not resolve a forge thread; resolution remains with its reviewer.
+**Durable PR:** rejecting a PR never closes it. At `pr_open` and `pr_approved` the server folds, by default, the latest applicable internal findings, the PR's open forge threads and the bodies of current changes-requested reviews -- those submitted against the PR head, or undatable -- whether or not `-f` guidance is given; other gates keep internal-only defaults and fetch forge findings only when requested. A failed default forge read refuses the reject before anything changes; `--no-forge-findings` rejects without forge findings, skipping the read of both threads and review-level requests. When local work is ahead of the PR head, the default read is withheld: the reject carries on with the internal findings and guidance and returns the withhold as a warning (an explicit `--include-forge` refuses instead), and with nothing else to fold it refuses, naming the withhold and `hashd pr push`. All interactive clients submit the complete selected findings with separate human guidance. All clients default to including internal findings; the TUI also initially includes available forge findings. CLI supports `--include-forge` (the default at the PR gates), subtractive `--no-local-findings` and `--no-forge-findings` (combinable), or complete replacement via `--findings-file`, plus additive `-f`. Replacement findings, including empty files/stdin, refuse source selection flags; `--include-forge` refuses `--no-forge-findings`. Omissions never enable a source. Explicit dismissals remain usable with replacements. Empty selections never restore defaults; a new FIX needs findings or guidance. The same PR gains the FIX and is reused after implementation. Exclusion does not resolve a forge thread; resolution remains with its reviewer.
 
 #### Low-touch finding disposition: FIX completion is authoritative
 
@@ -8617,7 +10073,7 @@ or bypassing forge and unrelated safety guards.
 Feedback processing only organizes supplied review material; it does not inspect
 code, judge correctness, invent findings/severity or verify a FIX. Ambiguity stays
 visible and all clients consume the same disposition. The
-[adapter and classification design](docs/ARCHITECTURE.md#forge-review-feedback-adapter-contract)
+[adapter and classification design](docs/FORGES.md#7-review-feedback-adapter-contract)
 records the current design; this section does not declare those paths delivered.
 
 #### Reject Fold Loop
@@ -8636,7 +10092,7 @@ flowchart TD
     REV -->|approved| DONE[proceed]
     REV -->|same concerns recur| OSC{recurrence?}
     OSC -->|2nd, below threshold| INF["informed retry:<br/>fold + recurring history"] --> IMPL
-    OSC -->|persists a -> a -> a / a -> b -> a| ESC["escalate -> resolve-oscillation (human)"]
+    OSC -->|persists a -> a -> a / a -> b -> a| ESC["park at the human gate -> approve / reject"]
 ```
 
 ### Rejoining an existing runner
