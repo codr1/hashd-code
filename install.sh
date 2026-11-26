@@ -735,17 +735,6 @@ install_via_pipx() {
     pipx ensurepath 2>/dev/null || true
 }
 
-# node_install_hint: the ONE OS-correct command to install a Node.js runtime,
-# used in the agent on-ramp printed at finish. Agents are npm-installed, so Node
-# is the agent's prerequisite -- not hashd's.
-node_install_hint() {
-    if [ "$PLATFORM" = "macosx" ]; then
-        echo "brew install node"
-    else
-        echo "https://github.com/nvm-sh/nvm  then: nvm install 20"
-    fi
-}
-
 # git_install_hint: the ONE OS-correct command to install git. git is a system
 # prerequisite hashd shells out to for every project op (worktrees, commits,
 # merges) -- the installer checks for it but, like a C library or coreutils,
@@ -1537,19 +1526,11 @@ printf '\n%s+ Installed hashd %s%s\n\n' "${C_GREEN}${C_BOLD}" "$RELEASE_TAG" "$C
 # non-zero while setup is unfinished, so we ignore its exit here: a fresh box
 # WILL have those user-setup steps outstanding, and that is expected, not a
 # broken install (a broken install already aborted at the restart step above).
+# The checklist is also the agent on-ramp: while a stage agent is missing or
+# not signed in for hashd, it names that agent's install and sign-in commands.
 step "Running hashd doctor"
 echo ""
 "$HASHD_BIN" doctor || true
-echo ""
-
-# --- Agent on-ramp ---
-# hashd needs git + one authenticated agent CLI. Agents are npm-installed, so
-# Node is the agent's prerequisite, not hashd's. Print the ONE OS-correct path.
-NODE_HINT="$(node_install_hint)"
-printf '%sAdd an AI agent%s -- hashd needs one authenticated agent CLI:\n' "$C_BOLD" "$C_RESET"
-step "Install Node.js 20+:  $NODE_HINT"
-step "Install Claude Code:  npm i -g @anthropic-ai/claude-code"
-step "Authenticate:         claude login"
 echo ""
 
 # --- Forge auth ---

@@ -288,9 +288,11 @@ After a PR lands in `spec_mode repo` (whether hashd-, forge-, or person-merged,
 including external merges), the post-merge archive completes the landing record
 first and decides each artifact from what the PR actually merged:
 
-- **SPEC**: if the recorded intent operation of `landing.SourceCommit` is
-  `merge_doc_update` (including clean rebase replays), the archive neither
-  registers the SPEC destination nor calls `UpdateSpec`.
+- **SPEC**: SPEC is skipped when `landing.SourceCommit` is recorded as
+  `merge_doc_update`, or the merge gate's documentation step completed on it --
+  by committing documentation or by finding nothing to change, recorded in
+  `merge_gate_docs_checks` -- including clean rebase replays of either; the
+  archive then neither registers the SPEC destination nor calls `UpdateSpec`.
 - **REQS**: only when the requirements destination is the lane's own repository
   and base branch, the archive reads the REQS file at `landing.TargetCommit` and
   at the landed commit (`MergeSHA`, or `SquashCommit` for a squash) from the

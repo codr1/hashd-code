@@ -336,7 +336,10 @@ work attributed to them.
 Before accepting work, each runner reports hashd's own setup checks through
 its existing check-in: Git 2.46 or newer (including the authenticated URL-reset
 capability), the runner user's configured Git committer (and author in Solo), writable
-runner storage, and directory/file creation under the actual stage fence.
+runner storage, directory/file creation under the actual stage fence, and
+every installed agent at or above its `minimum_version` in
+`server/internal/config/defaults.yaml` (an agent whose version output names
+no release is not judged).
 The runner reports again on reconnect. These observations do not install tools,
 set an identity, change placement eligibility, or describe a project's build tools.
 

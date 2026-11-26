@@ -66,11 +66,11 @@ computer running the client. Use an absolute path in the TUI.
 
 #### System Tools
 
-The only OS-level prerequisite is **git**. Python is handled by the installer.
+The only OS-level prerequisite is **git 2.46 or newer**; hashd refuses an older Git. Python is handled by the installer.
 
 | Tool | Required | Purpose |
 |------|----------|---------|
-| git | yes | Version control, worktrees |
+| git 2.46+ | yes | Version control, worktrees |
 | [gh (GitHub CLI)](https://cli.github.com/) | for GitHub | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
 | [bkt (Bitbucket CLI)](https://github.com/avivsinai/bitbucket-cli) | for Bitbucket | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
 | [glab (GitLab CLI)](https://gitlab.com/gitlab-org/cli) | for GitLab | PR workflow, repo operations; auto-installed by `install.sh`, link is the manual fallback |
@@ -87,7 +87,7 @@ The only OS-level prerequisite is **git**. Python is handled by the installer.
 > `~/.hashd/tools/bin/`. If a tool install fails (e.g. offline),
 > `hashd` will retry on first use.
 
-**Install git by platform:**
+**Install git 2.46 or newer by platform:**
 
 ```bash
 # --- Arch Linux ---
@@ -96,9 +96,13 @@ sudo pacman -S git
 # --- macOS (Homebrew) ---
 brew install git
 
-# --- Debian/Ubuntu 24.04+ ---
-sudo apt install git
+# --- Ubuntu 24.04 (ships 2.43.0): add the git-core PPA, then upgrade ---
+sudo add-apt-repository ppa:git-core/ppa
+sudo apt update && sudo apt install git
 ```
+
+Debian 12 ships git 2.39.5, below the floor; install a newer git before installing hashd.
+Check with `git --version`.
 
 The installer fetches pinned prebuilt forge CLIs for GitHub, GitLab,
 Bitbucket, and Gitea. After install, authenticate the forge(s) you use:
@@ -209,12 +213,12 @@ npm i -g @anthropic-ai/claude-code
 npm i -g @openai/codex
 ```
 
-Each agent needs either **OAuth login** or an **API key**. If both are configured, the agent CLI's own precedence rules apply. Hashd verifies authentication by asking the CLI for its status and preserves API-key env vars unless you explicitly force OAuth mode:
+Each agent needs either a **sign-in for hashd** or an **API key**. hashd runs every agent from its own profile and never uses the agent CLI's own login on this machine, so signing the CLI in yourself (`claude auth login`, `codex login`) is not enough. If both are configured, the agent CLI's own precedence rules apply, and hashd preserves API-key env vars unless you explicitly force OAuth mode:
 
 ```bash
-# Option A: OAuth (interactive login, no API key needed)
-claude auth login
-codex login
+# Option A: sign in for hashd (runs the agent's own sign-in into hashd's profile, no API key needed)
+hashd agents login claude
+hashd agents login codex
 
 # Option B: API keys (add to your shell profile)
 export ANTHROPIC_API_KEY="sk-ant-..."    # for Claude Code

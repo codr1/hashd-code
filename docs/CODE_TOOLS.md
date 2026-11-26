@@ -116,8 +116,7 @@ Each hashd project keeps its indexes in its own folder, `<ops>/cbm/<project>`, s
 - **The stage MCP shim** records each code tool call it serves (kind `code`) through `POST /workstreams/{id}/code-tool-calls` for a workstream or `POST /code/tool-calls` for planning, authenticated with the launch's token. Planning launch attribution reaches the shim through the code server's MCP environment (`HASHD_LAUNCH_ID`). A post the server refuses is logged once in the shim's log, with the server's Diagnostic.
   - The agent forwards the token to its MCP servers by name, never as a value in its config, in the way it declares (`mcp_env_forwarding`):
     - codex: the server's `env_vars` list;
-    - claude and qwen: their MCP servers inherit their environment;
-    - gemini: a `"$HASHD_TOKEN"` reference it expands.
+    - claude and qwen: their MCP servers inherit their environment.
   - kimi, copilot and opencode declare none: their forwarding is not proven.
 - **Each agent attempt** records the search and read tools its own stdout shows (kinds `grep`, `read`, `glob`). An agent that declares `tool_calls` in its registry entry (codex) is read as it declares:
   - a finished shell command counts once per search or read program it runs;

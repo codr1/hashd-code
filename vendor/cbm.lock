@@ -10,9 +10,9 @@
     },
     "linux-amd64": {
       "attestation_repo": "codr1/codebase-memory-mcp",
-      "binary_sha256": "d85f792f5869a889371df19c9017ad4b5893161fc0f961592895272dcfde38e4",
-      "sha256": "de811a178bfb8406ab894d4d717a98c2cabca8fc7965cfc17787e34388e6363e",
-      "url": "https://github.com/codr1/codebase-memory-mcp/releases/download/v0.12.1-hashd.2/codebase-memory-mcp-linux-amd64-portable.tar.gz"
+      "binary_sha256": "c845476cb63329608bd4d5c5f57d41f65d20f7c4c247cb1d0ede05be40b496ec",
+      "sha256": "2bba0b10475957910696156a03c9c8ae25c5ecbd0e763be08547d2e7d02429aa",
+      "url": "https://github.com/codr1/codebase-memory-mcp/releases/download/v0.12.1-hashd.3/codebase-memory-mcp-linux-amd64-portable.tar.gz"
     },
     "linux-arm64": {
       "attestation_repo": "codr1/codebase-memory-mcp",

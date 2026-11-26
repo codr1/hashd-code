@@ -1040,8 +1040,9 @@ test-stage run of that cycle, its rebuilds after a per-commit reject included. T
 so a deferred test does not block the commit.
 
 The project setting `workflow.final_commit_test` selects `none` (defer),
-`fast` (the default: the usual touched-file check, irrespective of `gates.commit_check`), or
-`full` (the merge gate's command, whose same-tree pass the gate reuses). It is
+`fast` (the usual touched-file check, irrespective of `gates.commit_check`), or
+`full` (the merge gate's command, whose same-tree pass the gate reuses); unset, it is `fast` when the scope has a
+`fast_test_cmd` and `full` otherwise, as an unset `gates.commit_check` is. It is
 read once when the test stage starts; changes apply to the next stage. Earlier
 commits keep `gates.commit_check`, and final review, gate and push keep their
 order. Explicit skips and judge re-runs retain their existing semantics.
@@ -2513,8 +2514,8 @@ and the prompt's largest sections with their sizes, so the stored section
 that grew is named instead of an agent reporting an exhausted context.
 
 No agent reads an instruction file from a folder above its checkout, nor its
-own home's personal file (Claude's `CLAUDE.md`, Codex's `AGENTS.override.md` and `AGENTS.md`, Gemini's
-`.gemini/GEMINI.md`, Qwen's `QWEN.md`, OpenCode's `opencode/AGENTS.md`), whatever the settings. Each agent
+own home's personal file (Claude's `CLAUDE.md`, Codex's `AGENTS.override.md` and `AGENTS.md`,
+Qwen's `QWEN.md`, OpenCode's `opencode/AGENTS.md`), whatever the settings. Each agent
 declares in defaults.yaml how it finds such files
 (`agents.<name>.instructions`), and the launch keeps it from the ones the
 settings do not give it: Claude by excluding them by path in its launch
@@ -2536,7 +2537,7 @@ prompt copy the server reads from that same path: list a copy outside its
 home). Any other home -- one the environment names that no registered
 credential made, or, for a run hashd gave no agent home of its own, the
 agent's default home in the host user's `HOME` (`~/.claude`, `~/.codex`,
-`~/.gemini`, `~/.qwen`, `~/.config` for OpenCode) -- is the host's: Claude is kept from the personal
+`~/.qwen`, `~/.config` for OpenCode) -- is the host's: Claude is kept from the personal
 file there by path, and any other agent is refused, naming the file
 (`agents.instructions.own_home_file`, with `hashd agents login <agent>` as the
 next step) -- hashd moves nothing out of a home it does not own. A checkout
@@ -2692,7 +2693,9 @@ follows the same rule. Lineage an earlier attempt left after its row was
 deleted is attributed history of the single implementation. A closed
 workstream kept after the story's close or abandon keeps its story link with
 the story's forward link cleared: it is the story's single ended
-implementation. The link is the story's number within the project
+implementation, and reopening the abandoned story restores the story's forward
+link (`LockStoryToWorkstream`) back to that workstream in the reopen
+transaction. The link is the story's number within the project
 (`workstreams.story_number`), so every alias of the story names one owner;
 reads still serve the textual `story_id`. Temporal executions are unaffected.
 The claim (`LockStoryToWorkstream`), the unique index
@@ -2751,7 +2754,10 @@ In `spec_mode repo` for a PR landing (`MergeMode == pr`, whether hashd-,
 forge-, or person-merged, external merges included), the archive completes the
 landing record before registering destinations and skips any documentation
 artifact the PR already delivered: SPEC is skipped when `landing.SourceCommit`
-is recorded as `merge_doc_update` (including clean rebase replays), and REQS is
+is recorded as `merge_doc_update`, or the merge gate's documentation step
+completed on it -- by committing documentation or by finding nothing to change,
+recorded in `merge_gate_docs_checks` -- including clean rebase replays of
+either, and REQS is
 skipped when the requirements destination is the lane's repository and base
 branch and `reqs.RemoveStorySections` extracts the story's text at
 `landing.TargetCommit` and finds none at the landed commit (`MergeSHA`, or
@@ -5580,10 +5586,10 @@ Retirement clears status and `blocked_reason`, but `gate_reason` remains
 in the data JSON. `hashd show` and the TUI therefore render it according to
 the workstream's stage, not merely the stored row.
 
-`POST /workstreams/{id}/open` is the one caller outside
-`fsm.TransitionWorkstream` — its reopen writes status, worktree and the
-closed metadata in a single guarded CAS — so it calls the shared rule
-directly rather than keeping a second copy of which edges retire.
+`POST /workstreams/{id}/open` moves the workstream `closed` /
+`closed_no_changes` -> `active` through `fsm.TransitionWorkstream`
+(`fsm.TransitionWorkstreamReopen`), which writes status, worktree and cleared
+close metadata in one CAS and retires any parked run row in the same write.
 
 The order is load-bearing and the failure path follows from it. The
 close is the **first irreversible step**, not a preparation ahead of
@@ -6050,7 +6056,97 @@ or merge is wedged still has a route out.
 | Run / retry | Resume eligible work under its current state and evidence. A human gate requires approve/reject rather than a new run; retry does not bypass a pending decision. |
 | Answer | Record the human ruling and follow the entity's clarification continuation. Answer persistence and dispatch ordering are specified under [Questions and Answers](#questions-and-answers) and [Question & Answer Commands](#question--answer-commands). |
 | Rebase | The rebasing stage: rebase the story's branch onto the base it recorded on a working branch, on its runner, and land it pushed with lease first when origin has it. Offered only while no step runs; at its conflict, AI resolve, Go (from a fix by hand) or cancel; see **Rebase** below. |
-| Close / reopen / remove | Close confirms execution closure before terminal state and worktree removal. Reopen does not revive an old singleton owner. Remove confirms its workflows stopped, refuses an agent still flushing or a project docs writer, and deletes its records atomically while preserving stories, other workstreams and the lineage of merged work. |
+| Close / reopen / remove | Close confirms execution closure before terminal state and worktree removal. Reopen moves `closed` / `closed_no_changes` -> `active` through `fsm.TransitionWorkstream` and does not revive an old singleton owner. Remove confirms its workflows stopped, refuses an agent still flushing or a project docs writer, and deletes its records atomically while preserving stories, other workstreams and the lineage of merged work. |
+
+**Reopen.** `POST /workstreams/{id}/open` (`hashd open`) first checks whether
+`<id>` is a story form (`ResolveStoryRef`, with fuzzy suggestions from the
+shared resolver). When it names a story in `abandoned` or `abandoning`, reopen
+takes the story path; completed story references (`implemented`,
+`closed_by_person`) are refused with `open.state` before falling through, while
+legacy workstream IDs and non-terminal story references fall through to the
+workstream path unchanged.
+
+On the story path, reopen refuses with a structured `open.*` Diagnostic and
+changes nothing when: the story is `abandoning` (names `hashd close` to finish
+abandonment), `$.requirement_met` is set (a `--no-changes` close met and burned
+its requirement), the story is an Arc, the story is an Arc child whose Arc
+(`arc_number`) is terminal or `abandoning`, or `abandoned_from` is unrecorded
+and cannot be derived from prior `story_changed` lifecycle history (no target
+position is guessed). When the story still owns a retained closed
+workstream (`GetWorkstreamForProjectStory` by `story_number`), if the
+workstream has `pr_number`, reopen reads the PR once before
+`LockProjectLifecycle` through `ForgeFor` (`story.UserID`) and `GetPRStatus`:
+an open PR whose head equals the recorded revision (`last_commit_sha`, or
+`base_sha` when no commit is recorded) is kept untouched and named in the
+response (`pr_number`, `pr_url`, `pr_state`); a merged PR refuses
+(`open.pr_merged`) naming the merged PR and explaining that the work already
+landed outside this story so the story stays abandoned; a
+closed PR refuses (`open.pr_closed`) with help to reopen it on the forge; an
+open PR at another head refuses (`open.pr_head_mismatch`) naming both heads;
+an unreadable PR or forge resolution failure refuses (`open.pr_unreadable`)
+surfacing the forge's credential or access Diagnostic; and every refusal names
+the PR, observed state and head, and a `WorkstreamOpen` retry step. Under
+`LockProjectLifecycle`, reopen confirms `pr_number`, the recorded revision,
+and the resolved repository path did not change since that read
+(`open.pr_changed`), takes
+workstream execution admission (`open`, admitted for `abandoned` stories and
+refused for `abandoning` ones) for the whole operation, and resolves the
+recorded revision. For a
+placed workstream (`workplacement.Current` with an epoch), the server never
+inspects its checkout: reopen refuses before dispatch when the runner is
+withdrawn (`open.runner_withdrawn`) or offline (`runner.offline`, naming the
+runner), and otherwise dispatches the `restore` operation of `activate_worktree`
+(exempted in `RunnerStartAbandonedRefusal` for `abandoned` stories, never
+`abandoning` ones) on the owning runner at its current placement epoch. On the
+runner, `restore` verifies or recreates the branch at the recorded revision on
+the runner's clone without fetching (local branch, origin tracking ref, or local
+commit object; refusing a diverged branch or missing revision with the exact
+runner fetch command), runs the staleness gate against the target branch
+(`--force` bypasses only that gate, rolling back any recreated branch before
+creating a checkout when refused), reuses an existing checkout only when it is
+on that branch at that revision (never deleting or resetting it), and persists
+pending setup before creating a missing checkout via
+`runnerworkspace.Worktree.PrepareWithResult` only once the branch exists at the
+revision. For an unplaced workstream, reopen checks the recorded
+revision on the server repository without fetching -- using a local branch at
+the revision as-is, refusing a diverged local branch (`open.branch_diverged`,
+naming both revisions without moving it), recreating a missing branch from
+`refs/remotes/origin/<branch>` at that revision or a local commit object
+(`cat-file -e <rev>^{commit}`), or refusing with the exact server fetch command
+-- runs the staleness gate (`--force` bypasses only that gate), and creates a
+missing checkout with `RecreateOpenWorktree` or reuses an existing path only
+when it is a valid checkout of that repository on the branch at the revision
+(anything else is refused without removing or resetting the path). In one write
+(`reqs.WithStory`), it runs
+`fsm.TransitionStory` through `reopen` to
+`fsm.StoryReopenPosition(abandoned_from)` (`implementing` / `approved` ->
+`approved`; `draft`, `draft_failed`, `pending` -> same state; `queued` /
+`drafting` -> `queued`), clears `closure` (preserving acceptance criteria,
+plan, decisions, history and the abandonment timeline), and for a retained
+workstream transitions the workstream `closed` / `closed_no_changes` -> `active`
+through `fsm.TransitionWorkstreamReopen` (after the story transition so
+`StoryAbandoningRefusal` passes), restores the story's forward link via
+`LockStoryToWorkstream`, and records `state_changed` alongside `story_changed`
+with reason `"reopened"` (both published after commit). The checkpoint,
+implementer session and runner claim cleared at abandonment are not restored; a
+story abandoned from `implementing` or `approved` lands at `approved` with an
+active, held lane (`laneHoldingStory`) whose next run fires `start_impl`
+through `startAcceptedLaneStory`. Restoring to `queued` renews
+`drafting_started` and dispatches planning after commit; a refused dispatch is
+recorded through `storydeps.RecordDispatchFailure` and reported in the
+response. A restored `pending` story whose prerequisites are already met is
+released by the existing `RecoverStrandedPendingStories` sweep.
+
+On the workstream path, `POST /workstreams/{id}/open` validates the state,
+branch and staleness gate and establishes the checkout first, then moves the
+workstream `closed` / `closed_no_changes` -> `active` through
+`fsm.TransitionWorkstream` (`fsm.TransitionWorkstreamReopen`), setting the
+worktree path, clearing `closed_at` / `close_reason`, advancing the command
+generation, retiring any parked run row and recording `state_changed` in one
+write (published after commit). If the transition fails after this request
+created the checkout, the created checkout is removed and nothing in the DB
+needs rolling back. `StoryAbandoningRefusal` refuses reopening a workstream
+whose story is `abandoning` or `abandoned`.
 
 **Go's availability.** A workstream's detail, snapshot and available-actions
 reads carry a `run` capability row: whether a plain `hashd run` is eligible to
@@ -6416,6 +6512,11 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
+    abandoned --> approved : reopen
+    abandoned --> draft : reopen
+    abandoned --> draft_failed : reopen
+    abandoned --> pending : reopen
+    abandoned --> queued : reopen
     abandoning --> abandoned : abandon
     approved --> abandoned : abandon
     approved --> abandoning : begin_abandon
@@ -6484,6 +6585,11 @@ stateDiagram-v2
 
 | trigger | source -> dest | dispatch |
 |---|---|---|
+| `reopen` | `abandoned` -> `approved` | operator -- internal/api/mutations_open.go |
+| `reopen` | `abandoned` -> `draft` | operator -- internal/api/mutations_open.go |
+| `reopen` | `abandoned` -> `draft_failed` | operator -- internal/api/mutations_open.go |
+| `reopen` | `abandoned` -> `pending` | operator -- internal/api/mutations_open.go |
+| `reopen` | `abandoned` -> `queued` | operator -- internal/api/mutations_open.go |
 | `abandon` | `abandoning` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
 | `abandon` | `approved` -> `abandoned` | operator -- internal/api/mutations_cancel.go, internal/api/mutations_story.go, internal/reqs/edit_gate.go |
 | `begin_abandon` | `approved` -> `abandoning` | operator -- internal/api/abandon.go |
@@ -6564,7 +6670,7 @@ stateDiagram-v2
 
 | trigger | source -> dest | dispatch |
 |---|---|---|
-| `claim` | `available` -> `claimed` | operator -- internal/api/mutations_plan.go |
+| `claim` | `available` -> `claimed` | operator -- internal/api/mutations_open.go, internal/api/mutations_plan.go |
 | `dismiss` | `available` -> `dismissed` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `complete` | `claimed` -> `done` | operator -- internal/api/mutations_story.go, internal/pm/story_result.go |
 | `revert` | `claimed` -> `available` | operator -- internal/api/mutations_plan.go, internal/api/mutations_plan_reconcile.go |
@@ -6780,9 +6886,9 @@ stateDiagram-v2
 | `reset` | `awaiting_human_review` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `skip` | `awaiting_human_review` -> `awaiting_human_review` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `start_impl` | `awaiting_human_review` -> `implementing` | system -- internal/runflow/selectstage.go |
-| `reopen` | `closed` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reopen` | `closed` -> `active` | operator -- internal/api/mutations_open.go |
 | `reset` | `closed` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
-| `reopen` | `closed_no_changes` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
+| `reopen` | `closed_no_changes` -> `active` | operator -- internal/api/mutations_open.go |
 | `reset` | `closed_no_changes` -> `active` | operator -- internal/api/mutations_reset.go, internal/api/runners/runner_stage_checkpoint_reset.go |
 | `address_concerns` | `final_review_with_concerns` -> `active` | dynamic -- name referenced in dispatch code; dispatched as a variable (e.g. a generic /transition route) |
 | `close` | `final_review_with_concerns` -> `closed` | system -- resolved from source->dest by an empty-trigger call |
@@ -7199,6 +7305,11 @@ stateDiagram-v2
     draft --> closed_by_person : close_by_person (work landed outside hashd)
     approved --> closed_by_person : close_by_person (work landed outside hashd)
     implementing --> closed_by_person : close_by_person (work landed outside hashd)
+    abandoned --> approved : reopen (from implementing or approved)
+    abandoned --> draft : reopen (from draft)
+    abandoned --> draft_failed : reopen (from draft_failed)
+    abandoned --> pending : reopen (from pending)
+    abandoned --> queued : reopen (from queued or drafting)
     note right of implementing : hashd cancel stops the workstream's open rebase, run, merge or resolve (refused if paused or nothing in flight; merge past attempt still lands)
 ```
 
@@ -7400,6 +7511,19 @@ stateDiagram-v2
     `manual`, who, when, the reason and the verified reference -- in the
     transition's own write, and every story read serves it whole as
     `closure`.
+- `hashd open <story>` (`POST /workstreams/{id}/open`) restores an abandoned
+  story with no retained workstream to the lifecycle state mapped from its
+  recorded `abandoned_from` (`draft`, `draft_failed`, `pending`, `queued`, or
+  `approved`), clears its `abandoned` closure, leaves acceptance criteria,
+  plan, decisions, history and the abandonment timeline untouched, and records
+  `story_changed` (`"reopened"`). It refuses `abandoning` stories (pointing to
+  `hashd close` to finish abandonment), stories closed with `--no-changes`
+  (`requirement_met`), Arcs, Arc children whose Arc is terminal or
+  `abandoning`, and stories with no recorded `abandoned_from`. A story restored
+  to `queued` dispatches planning after commit (recording a refused dispatch
+  via `storydeps.RecordDispatchFailure`); a restored `pending` story whose
+  prerequisites are already met is released by the existing stranded-pending
+  sweep.
 - `hashd close <ws>` unlocks story (returns to approved)
 - `hashd story clone STORY-xxx` creates editable copy of locked story
 

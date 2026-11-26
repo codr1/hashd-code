@@ -888,7 +888,6 @@ Snapshot is copied by `snapshot_connector_caches()` during `provision_workstream
 | ----------- | --------------------------------------------------------- |
 | Claude Code | `--mcp-config` flag with JSON file                        |
 | Codex       | `.codex/config.toml` in worktree                          |
-| Gemini CLI  | `.gemini/settings.json` in worktree                       |
 | OpenCode    | `OPENCODE_CONFIG_CONTENT` environment overlay (`mcp` key) |
 | Kimi Code   | `--mcp-config-file` flag with JSON file                   |
 | Qwen Code   | `.qwen/settings.json` in worktree                         |

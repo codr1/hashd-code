@@ -657,9 +657,9 @@ PY
     # the temp dir on exactly the failure paths. The script exits right
     # after install_cbm in every call path, so cleaning at exit is
     # equivalent for the success case.
-    # Expand tmp_dir now, not at trap time:
+    # Expand tmp_dir now, not at trap time, quoted for any path:
     # shellcheck disable=SC2064
-    trap "rm -rf '$tmp_dir'" EXIT
+    trap "rm -rf $(printf '%q' "$tmp_dir")" EXIT
 
     local archive="$tmp_dir/$archive_name"
     echo "Fetching cbm $version for $platform"
@@ -692,15 +692,22 @@ PY
     [[ -f "$binary" ]] || cbm_die "archive did not contain expected cbm binary"
     [[ -z "$binary_sha256" ]] || cbm_verify_sha256 "$binary" "$binary_sha256"
     mkdir -p "$(dirname "$dest")"
-    # Write to a FRESH inode. macOS caches a Mach-O's code signature by vnode and
-    # does not flush it when the file is rewritten in place (cp truncates in place,
-    # reusing the inode). On a re-install over a previously-run binary that stale
-    # cache can keep an old/invalid signature, so even a correct re-sign below would
-    # silently not take effect. rm first so cp creates a new inode the kernel has
-    # not cached.
-    rm -f "$dest"
-    cp "$binary" "$dest"
-    chmod 755 "$dest"
+    # The new binary is staged beside the old one and replaces it only once it
+    # has run: a binary this host cannot run (a CPU it was not built for, a
+    # damaged file) fails the install and leaves the installed one in place.
+    # The rename also gives "$dest" a FRESH inode. macOS caches a Mach-O's code
+    # signature by vnode and does not flush it when the file is rewritten in
+    # place, so a stale cache could otherwise keep an old/invalid signature and a
+    # correct re-sign below would silently not take effect.
+    # Each attempt stages under its own name, in dest's directory so the rename
+    # stays on one filesystem: installers running at once into one tools dir
+    # never touch each other's staged file, and each removes only its own.
+    local staged
+    staged="$(mktemp "$(dirname "$dest")/.$(basename "$dest").XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf $(printf '%q' "$tmp_dir") $(printf '%q' "$staged")" EXIT
+    cp "$binary" "$staged"
+    chmod 755 "$staged"
 
     # macOS (especially Apple Silicon) SIGKILLs any binary whose code signature is
     # invalid or merely linker-signed, and cbm ships such darwin binaries (its own
@@ -712,19 +719,21 @@ PY
     # tools; failures are tolerated so a stripped-down host degrades to prior
     # behavior, not aborts.
     if [[ "$platform" == darwin-* ]]; then
-        xattr -d com.apple.quarantine "$dest" 2>/dev/null || true
-        codesign --remove-signature "$dest" 2>/dev/null || true
-        codesign --sign - --force "$dest" 2>/dev/null || true
+        xattr -d com.apple.quarantine "$staged" 2>/dev/null || true
+        codesign --remove-signature "$staged" 2>/dev/null || true
+        codesign --sign - --force "$staged" 2>/dev/null || true
     fi
 
     local host_platform
     host_platform="$(cbm_detect_host_platform || true)"
     if [[ -n "$host_platform" && "$platform" == "$host_platform" && "$platform" != windows-* ]]; then
         local actual expected
-        actual="$("$dest" --version | awk '{print $2}')"
+        # A binary that cannot run fails the pipeline; it gets the same report.
+        actual="$("$staged" --version 2>/dev/null | awk '{print $2}')" || actual=""
         expected="${version#v}"
-        [[ "$actual" == "$expected" ]] || cbm_die "cbm version mismatch: expected $expected, got $actual"
+        [[ "$actual" == "$expected" ]] || cbm_die "cbm version mismatch: expected $expected, got ${actual:-no version (it did not run)}; the installed binary at $dest is unchanged"
     fi
+    mv -f "$staged" "$dest"
 
     log "cbm" "$version -> $dest"
 }

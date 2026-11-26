@@ -57,14 +57,14 @@ agent that supports that shape; `*_resume` stages inherit their base stage's age
 `hashd project config get stage_agents` (or `show stage_agents`) lists the agent each stage launches and the entry that chose it; `config list` shows only the raw entries, which role entries make an incomplete answer.
 
 ```bash
-# Assign gemini to the breakdown stage
-hashd project config set stage.breakdown gemini
+# Assign qwen to the breakdown stage
+hashd project config set stage.breakdown qwen
 
 # Assign claude to review
 hashd project config set stage.review claude
 ```
 
-Resume stages are not separately configurable. A `*_resume` stage continues a session its base stage opened, and that session id is specific to the agent that minted it, so `review_resume` always runs on whatever `review` runs on. It has no agent key of its own at any layer: the agent comes from the base stage's ladder alone, role entries included -- project `stage_agents.review` > project `stage_agents.reviewer` > system `stage_agents.review` > system `stage_agents.reviewer` > the stage's `default_agent`. `adjudicate` and `scope_adjudicate` add two rungs before their default, project then system `stage_agents.reviewer`, so they fall back to the reviewers' agent when nothing names theirs. A matched entry whose agent is unknown leaves the stage on its default rather than falling to a lower rung; one whose agent has no shape for the stage keeps the stage on that agent, and its launch is refused with a Diagnostic naming the stage, the agent and the missing shape (no other agent runs in its place). The full ladder is in [WF.md, Stage-agent roles](../WF.md#stage-agent-roles). Assigning a base stage therefore carries its resume with it, and a write to a resume stage's agent key is refused.
+Resume stages are not separately configurable. A `*_resume` stage continues a session its base stage opened, and that session id is specific to the agent that minted it, so `review_resume` always runs on whatever `review` runs on. It has no agent key of its own at any layer: the agent comes from the base stage's ladder alone, role entries included -- project `stage_agents.review` > project `stage_agents.reviewer` > system `stage_agents.review` > system `stage_agents.reviewer` > the stage's `default_agent`. `adjudicate` and `scope_adjudicate` add two rungs before their default, project then system `stage_agents.reviewer`, so they fall back to the reviewers' agent when nothing names theirs. A matched entry whose agent is not declared in the registry or has no shape for the stage keeps the stage on that agent rather than falling to a lower rung or its default, and its launch is refused with a Diagnostic naming the stage, the agent, the setting key and layer (and either the valid agents or the missing shape), so no other agent runs in its place. The full ladder is in [WF.md, Stage-agent roles](../WF.md#stage-agent-roles). Assigning a base stage therefore carries its resume with it, and a write to a resume stage's agent key is refused.
 
 A `stage_agents.<x>_resume` entry left in an existing config file loads without error and is ignored: nothing rewrites the file, and there is no migration for it. Reset still accepts those keys on purpose, so clear a leftover with `hashd project config reset stage_agents.<x>_resume`, or `hashd config reset stage_agents.<x>_resume` for a system-level one. The refusal a write returns names that same command.
 
@@ -92,14 +92,14 @@ After every write or reset the panel reads the grid again and redraws it, so a r
 
 The panel resolves nothing itself. It makes four reads and needs all of them: `/stage-agents` for the stage rows, and `/config/show` for `stage_agents`, `stage_models` and `stage_effort` for the role rows. If any of them fails, the panel reports the stages as unknown and draws no grid, so a partial answer is never shown as the whole one. The roster cards below the grid still list each agent and its install state, and each card's "Use for every stage" runs `PUT /projects/{name}/config/stages-use`, or `PUT /config/stages-use` at system scope.
 
-`GET /projects/{name}/stage-agents` is the read behind the grid's stage rows. It reports, per declared stage, the agent that will actually launch, where it came from (`agent_key`, the `stage_agents` key that chose it -- the stage's own key, the base stage's on a resume row, or a role key such as `stage_agents.reviewer` when a role entry chose it; empty when the stage runs its default -- and `agent_layer`, `project`, `system` or `default`), which role chose it (`agent_role`, present only when a role entry did), whether an adjudicator stage is borrowing the reviewer role's agent because nothing chose one for it (`reviewer_fallback`), and the default the stage falls back to. All of it comes from `agents.EffectiveStageAgents`, the layered resolver that reads the system and project layers separately -- the same resolver `buildStageCommand` and the run preflight use. The merged config cannot answer this: a hand-edited `stages.<name>.default_agent` is inert, and an assignment whose agent has no shape for the stage is reported on that agent and refused at launch (`stages-use` still accepts it, with a warning naming the gap).
+`GET /projects/{name}/stage-agents` is the read behind the grid's stage rows. It reports, per declared stage, the agent that will actually launch, where it came from (`agent_key`, the `stage_agents` key that chose it -- the stage's own key, the base stage's on a resume row, or a role key such as `stage_agents.reviewer` when a role entry chose it; empty when the stage runs its default -- and `agent_layer`, `project`, `system` or `default`), which role chose it (`agent_role`, present only when a role entry did), whether an adjudicator stage is borrowing the reviewer role's agent because nothing chose one for it (`reviewer_fallback`), and the default the stage falls back to. All of it comes from `agents.EffectiveStageAgents`, the layered resolver that reads the system and project layers separately -- the same resolver `buildStageCommand` and the run preflight use. The merged config cannot answer this: a hand-edited `stages.<name>.default_agent` is inert, and an assignment whose agent is undeclared or has no shape for the stage is reported on that agent and refused at launch (`stages-use` still accepts a shape gap, with a warning naming it).
 
 Assignments are validated against the agent registry before they are saved.
 
 Agents with `available` status (not yet verified with hashd) require `--force`:
 
 ```bash
-hashd project config set stage.breakdown gemini --force
+hashd project config set stage.breakdown qwen --force
 ```
 
 ### Bulk assignment by role
@@ -114,8 +114,8 @@ Every configurable stage belongs to exactly one role, and a resume stage follows
 | `reviewer_adjudicator` | `adjudicate`, `scope_adjudicate` |
 
 ```bash
-# Set the planner role's stages to gemini
-hashd project config set planner gemini --force
+# Set the planner role's stages to qwen
+hashd project config set planner qwen --force
 
 # Set the coder role's stages to claude (implement_resume follows implement)
 hashd project config set coder claude
@@ -143,7 +143,6 @@ Which agents can serve which stage shapes, as declared by `agents.<name>.shapes`
 |-------|-------|------|------|--------|---------------|-----------|-----------------|
 | claude | x | x | x | x | x | x | x |
 | codex | x | x | x | x | x | x | x |
-| gemini | x | x | x | x | x | x | x |
 | opencode | x | x | -- | x | x | x | x |
 | kimi | x | x | x | x | x | x | x |
 | qwen | x | x | x | x | x | x | x |
@@ -280,7 +279,7 @@ A value is sent only where the launched command has a slot: the command carries
 `{model}` / `{effort}` and the agent declares `model_template` /
 `effort_template`. Every shape of an agent that declares a template carries its
 placeholder, so a stage reassigned to claude, codex or opencode gets its model
-(and claude's or codex's effort); gemini, kimi, qwen and copilot declare no
+(and claude's or codex's effort); kimi, qwen and copilot declare no
 templates. A value with no slot sends nothing and is reported as not
 applicable.
 
@@ -292,13 +291,62 @@ All stage overrides can also be set by editing `config.yaml` directly. See `../c
 
 ### ACP agents
 
+In an ACP agent declaration (`kind: acp`), `tool_allowlist_path`,
+`instructions_path`, `model_option`, `model_category`, `effort_option`,
+`effort_category`, `permission_mode` and `resume_method` are
+optional. When `tool_allowlist_path` is omitted, `session/new` sends no
+allowlist metadata and hashd's `session/request_permission` answer enforces the
+stage shape's read, write and shell capabilities (the same decision used when an
+allowlist is declared). When `instructions_path` is omitted, the stage's
+instructions lead the prompt as its first text block. When `resume_method` is
+declared (`session/resume` or `session/load`), hashd uses that method and checks
+its advertised capability; when it is omitted, resume negotiates
+`session/resume` if `initialize` advertised `sessionCapabilities.resume`, else
+`session/load` if it advertised `loadSession`, and otherwise refuses the resume.
+With either method, notifications the agent replays before `session/prompt` is
+sent do not count toward the turn's response text, `text_delta` stream events or
+recorded usage. A permission request counts as an MCP tool call — and is allowed
+regardless of kind — only when it names a server supplied for this launch
+through `_meta.mcp` (server and tool), `_meta.serverId`, or the declared
+`mcp_tool_name` template; a request naming an unsupplied server, or no server,
+gets only what its kind allows.
+
+An ACP declaration's `auth_methods` may be env-only: every entry carries
+`env`, naming a variable that already holds its API key. A launch whose
+environment sets a declared method's variable authenticates with that method
+before `session/new`. Such an agent offers no interactive or headless
+sign-in — no Fleet **Sign in** action, no `hashd agents login` browser or ACP
+method prompt, and no per-owner machine-local login home — and its credential
+registers through the existing credential form. An entry without `env` names
+an interactive method, which the sign-in flows offer.
+
+A stage's model and effort apply through the slot the declaration names:
+`model_option` / `effort_option` is a fixed config-option id, sent with
+`session/set_config_option`; `model_category` / `effort_category` names the ACP
+config category (a declaration sets an id or a category for one setting, never
+both), and once the session is established hashd sends the id of the option the
+session advertises in that category. Each `session/set_config_option` response
+carries the session's complete configuration state, which hashd re-reads before
+resolving the next setting, so a model selection that introduces its reasoning
+option still gets the effort applied. A model whose category the session does not
+advertise is sent with `session/set_model` when the session advertises
+`models.availableModels`. A declared `permission_mode` is sent with
+`session/set_config_option` on the session's advertised mode-category option
+when it has one, else with `session/set_mode` as before. When a configured model
+or effort has no way to be applied, the attempt fails before `session/prompt`
+is sent — the prompt never goes out with the setting dropped — with a Diagnostic
+naming the setting and its value.
+
 `agy` is Google's Antigravity CLI, which serves ACP itself (`agy acp`). Install
 it yourself on each runner (`curl -fsSL https://antigravity.google/cli/install.sh | bash`,
 into `~/.local/bin`); hashd checks the declared minimum version (1.5.1) and
 never installs or updates it. The CLI takes its profile as `--gemini-dir`, which
 the declaration fills from the run's `GEMINI_HOME`. It is listed as
-`available`, so selecting it uses the existing force rule. Inspect-only shell
-shapes remain unavailable; the native transport cannot enforce them.
+`available`, so selecting it uses the existing force rule. It offers review
+shapes (review, review_resume). Over ACP an inspect-shell shape gets the policy
+every agent's review gets: its tool allowlist carries the read, finish and shell
+tools and no write tools, hashd's permission answer allows execute requests and
+rejects edit and delete requests, and the stage fence contains the launch.
 
 The CLI reports an upstream API failure as an ordinary reply and records it in
 the session's own log. hashd reads that log (read-only, only the steps the
@@ -332,6 +380,8 @@ tools are excluded. Stages use the same process-group cleanup as other agents.
 
 Most CLI coding agents support both OAuth (interactive login) and API key authentication. When both are configured, agents differ on which takes precedence -- leading to silent auth failures or unexpected billing. Hashd verifies auth by delegating to each agent CLI's own status command and only strips API-key env vars when the project explicitly forces OAuth mode.
 
+Every agent that `hashd agents login` supports runs from hashd's own profile and never uses the agent CLI's own login on this machine. Sign it in for hashd with `hashd agents login <agent>`; doctor and the stage preflight check that sign-in, not the CLI's status command.
+
 ### Auth mode
 
 Set with `hashd project config set auth-mode <mode>`:
@@ -351,7 +401,6 @@ Each agent handles the OAuth/API-key conflict differently:
 | Agent | Key overrides OAuth? | What hashd does | verify_auth command |
 |-------|---------------------|-----------------|---------------------|
 | **Claude** | Yes (`ANTHROPIC_API_KEY` wins) | Keeps key in `auto`; strips key in `oauth` | `claude auth status` |
-| **Gemini** | Yes (`GEMINI_API_KEY` wins) | Keeps key in `auto`; strips key in `oauth` | Not declared; no verified non-interactive status command |
 | **Codex** | No (OAuth wins) | Nothing to strip | `codex login status` |
 | **Kimi** | No (OAuth wins) | Nothing to strip | Not declared; no verified non-interactive status command |
 | **Qwen** | Mutually exclusive | Nothing to strip | Not declared; `qwen auth status` always exits 0 since qwen-code v0.15.11 |
@@ -360,11 +409,12 @@ Each agent handles the OAuth/API-key conflict differently:
 
 ### Login and logout commands
 
+These sign the agent CLI itself in and out on this machine. hashd's runs do not use that sign-in: `hashd agents login <agent>` is what signs an agent in for hashd.
+
 | Agent | Login | Logout |
 |-------|-------|--------|
 | Claude | `claude` (opens browser) | N/A |
 | Codex | `codex login` | `codex logout` |
-| Gemini | Interactive `/auth` in TUI | Interactive `/auth signout` in TUI |
 | Kimi | `kimi login` | `kimi logout` |
 | Qwen | `qwen auth` | `qwen auth` (select different method) |
 | OpenCode | N/A (set env vars) | N/A |
@@ -395,7 +445,6 @@ The TUI has the same surface: press `s` on the dashboard for Settings -- view cr
 |-------|-------------------|------------------------|
 | **Claude** | An Anthropic API key with `--method api-key`, or a push sign-in (`hashd agents login claude --push`) | Yes: Claude's own sign-in on each runner (`hashd agents login claude`, hashd never sees the token), or pushed from the server (below) |
 | **Codex** | A push sign-in (`hashd agents login codex --push`), your `~/.codex/auth.json` (run `codex login` first), or `--method api-key` | Yes, as push (below). An uploaded `auth.json` is refreshed by the server from then on: run `codex login` again locally, since sharing one login between laptop and server breaks both |
-| **Gemini** | Your `~/.gemini/oauth_creds.json`, or `--method api-key`. Workspace accounts add `--options google_cloud_project=<id>` | Yes; agent runs burn quota fast, so expect a paid tier |
 | **Copilot** | `gh auth token` output (harvested automatically), or a fine-grained PAT with the "Copilot Requests" permission | Yes; classic `ghp_` tokens are rejected -- the Copilot CLI silently ignores them |
 | **Qwen** | An API key plus `--base-url` (Coding Plan or any OpenAI-compatible endpoint) | Key-based only; the free OAuth tier was discontinued upstream |
 | **Kimi** | A Moonshot platform API key plus `--model` | Key-based only today |
@@ -409,14 +458,14 @@ Behavior at run time (registered-credential-wins):
 - `hashd agents login claude --proxy` is the same sign-in, kept and refreshed on the server the same way, but its runs never hold the access token (#2893 step 4). A run gets a placeholder key and the address of a forwarder on its own host (claude: `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, pointing at `127.0.0.1`); the forwarder admits only that placeholder and only the paths the agent declares (`proxy.paths` in `defaults.yaml`), and sends each request over the runner's paired connection to the server, which puts the access token on it and sends it to the provider. What the provider answers, a usage limit included, comes back unchanged. The placeholder is worthless anywhere else and ends with the run; the server refuses the request once the run's attempt ends. A sign-in the server cannot keep current answers the run with an authentication error naming `hashd agents login claude --proxy`. There is no fallback to push or to another credential. Only agents that declare `proxy:` take it; codex stays on push, since its ChatGPT sign-in keeps a token codex reads itself.
 - Each agent with a sign-in the server can keep (claude, codex) has a sign-in mode (#2893 step 5), stored on that sign-in (`delivery` in its non-secret settings): `manual` (runs use your own sign-in on each machine that runs them; the server sign-in stays kept, unused, and never leaves the server), `push`, or `proxy` (claude). With no mode set it is `auto`: push when the server keeps a sign-in for you, manual when it does not, shown as `auto — using push now` or `auto — using manual now`. `hashd agents mode <agent>` shows it and `hashd agents mode <agent> <auto|manual|push|proxy>` sets it; without a server sign-in there is nothing to set, and push or proxy is refused naming `hashd agents login <agent> --push`. `hashd agents login <agent> --push`, `--proxy` and `--manual` sign in and set the mode in one act (`--manual` signs in on this machine). Plain `hashd agents login <agent>` never changes the mode; when it is push or proxy, it ends naming `hashd agents mode <agent> manual` and `--manual`. `hashd agents`, the Web Agent logins row and the TUI settings modal (`m`) name the two sign-ins by where they are ("Server sign-in: kept / none", "Your sign-in on <machine>: signed in / not signed in"), show the mode and set it among the modes the server offers (`GET /agents/credentials` `modes`, `PUT /agents/{agent}/mode`). An API-key registration has no mode.
 - Where a browser likely cannot reach the agent's localhost sign-in callback -- an SSH session (`SSH_CONNECTION`/`SSH_TTY`), WSL, a terminal multiplexer (`HERDR_ENV`, `TMUX`, `STY`, `ZELLIJ`), a container, or Linux with no `DISPLAY`/`WAYLAND_DISPLAY` -- `hashd agents login` says so and runs the agent's declared `headless_sign_in` instead: codex's device code (`codex login --device-auth`: a link and a one-time code for a browser on any device), claude's paste-the-code sign-in (`claude auth login` prints a link whose page shows a code to paste back). An agent declaring none gets its browser sign-in, with the reason it may not finish. A device-code sign-in the account refuses is reported and, on a terminal, the browser sign-in starts in its place, saying why; with no terminal the refusal (`agents.login.headless_refused`) is the result, and no browser sign-in is left waiting. The sign-in still lands in the same per-owner agent home.
-- Claude, codex, OpenCode, Copilot, Qwen, Kimi and Gemini runs never use the server host's own login or configuration, in either mode. Every run starts from a home of its own under the runner's `runnerlayout.AgentHomesRoot(ops, serverID, runnerID)`, set as `HOME` (claude also gets `CLAUDE_CONFIG_DIR` inside it; OpenCode gets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` inside it, and an empty `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`; Copilot gets an empty `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`, so neither its config nor its gh login fallback points back at the host; Qwen gets an empty `QWEN_RUNTIME_DIR`, `QWEN_CODE_TRUSTED_FOLDERS_PATH`, `QWEN_CODE_MCP_APPROVALS_PATH`, `QWEN_CODE_HOOK_APPROVALS_PATH` and `QWEN_CODE_MEMORY_BASE_DIR`, so its state and config files all fall under `QWEN_HOME`; Kimi reads its config and state only from `KIMI_CODE_HOME`; Gemini gets an empty `GEMINI_CLI_TRUSTED_FOLDERS_PATH`, so its config and state all fall under `GEMINI_CLI_HOME`, and an empty `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI`, `CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC` and `GOOGLE_APPLICATION_CREDENTIALS`, so no auth selector or credential file admitted from the server turns a `GEMINI_API_KEY` run into the host's Google login), holding only a `.gitconfig` with the project's `git_name`/`git_email` and `safe.directory` for the worktree. The home is removed after its sessions are saved. Startup salvages abandoned Claude sessions before sweeping run homes; a failed save retains the source for recovery. So the host user's plugins, skills, settings, hooks, MCP servers, `~/.gitconfig` and `gh` login never reach a stage. A claude resume finds its session because hashd keeps each run's session files (only those) for the owner and copies the one being resumed into the next run's home. OpenCode keeps every session in one database, which hashd keeps in the owner's agent home (`OPENCODE_DB`); only that database, with its SQLite WAL files, is kept there between runs. `XDG_CACHE_HOME` is left to follow the run's `HOME`, as for the other agents: every tool reads it, so the caches tools build in it (go, uv, pip) go with the run, and OpenCode fetches its model list again on each run. A project that wants its runs to share the server's cache admits `XDG_CACHE_HOME` through a host entry of its environment. On those runs Copilot's `COPILOT_HOME` is the owner's agent home, and only its `session-state/` (what `copilot --resume <id>` reads) is kept there between runs. Qwen's `QWEN_HOME` is the owner's agent home the same way, and only each project's `projects/<cwd>/chats/` (whose `<id>.jsonl` is what `qwen --resume <id>` reads) is kept there between runs; the project memory and metadata beside it are not. Kimi's `KIMI_CODE_HOME` is the owner's agent home too, and only its `sessions/` (whose `<workdir>/<id>/` is what `kimi --session <id>` reads) is kept there between runs; the `config.toml` each run's credential writes goes with the rest. Gemini's `GEMINI_CLI_HOME` is the owner's agent home as well; Gemini nests its state in `.gemini/`, and only each project's `.gemini/tmp/<project>/chats/` (what `gemini --resume <id>` reads) and the `.project_root` beside it (which checkout the project folder belongs to) are kept there between runs. The `.gemini/settings.json` and `.gemini/oauth_creds.json` each run's credential writes go with the rest.
-- With nothing registered, a claude, codex, Copilot or Gemini run proceeds only when a credential variable survives the project's auth-mode filtering and `agents.<name>.env` precedence (claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`; codex: `CODEX_API_KEY`; Copilot: `COPILOT_GITHUB_TOKEN`; Gemini: `GEMINI_API_KEY`). Otherwise the stage is refused with `hashd agents login <agent>`, in single-user mode too. An OpenCode run always needs a registered credential: its provider keys have no single variable name. So does a Qwen run: `DASHSCOPE_API_KEY` alone selects no auth type (Qwen Code 0.27.0 refuses "No auth type is selected" from a home with no settings), so it does not count. Nor does a Kimi run's `KIMI_API_KEY`: it binds no model (Kimi Code 2.5.2 refuses "No model configured" from a home with no `config.toml`), so a Kimi run needs a registered credential too. Gemini's `GOOGLE_API_KEY` does not count either: alone it selects no auth type (Gemini CLI 0.49.0 asks for an auth method from a home with no settings). Project-level work such as detect uses the registered credential of the person who asked for it, the server owner on a single-user server.
-- Package caches and toolchains that live in the server user's home (`~/go`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`) are not reachable from a claude, codex, OpenCode, Copilot, Qwen, Kimi or Gemini run's home. Export `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `CARGO_HOME` or `RUSTUP_HOME` in the server's environment to share them.
+- Claude, codex, OpenCode, Copilot, Qwen and Kimi runs never use the server host's own login or configuration, in either mode. Every run starts from a home of its own under the runner's `runnerlayout.AgentHomesRoot(ops, serverID, runnerID)`, set as `HOME` (claude also gets `CLAUDE_CONFIG_DIR` inside it; OpenCode gets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` inside it, and an empty `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`; Copilot gets an empty `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`, so neither its config nor its gh login fallback points back at the host; Qwen gets an empty `QWEN_RUNTIME_DIR`, `QWEN_CODE_TRUSTED_FOLDERS_PATH`, `QWEN_CODE_MCP_APPROVALS_PATH`, `QWEN_CODE_HOOK_APPROVALS_PATH` and `QWEN_CODE_MEMORY_BASE_DIR`, so its state and config files all fall under `QWEN_HOME`; Kimi reads its config and state only from `KIMI_CODE_HOME`), holding only a `.gitconfig` with the project's `git_name`/`git_email` and `safe.directory` for the worktree. The home is removed after its sessions are saved. Startup salvages abandoned Claude sessions before sweeping run homes; a failed save retains the source for recovery. So the host user's plugins, skills, settings, hooks, MCP servers, `~/.gitconfig` and `gh` login never reach a stage. A claude resume finds its session because hashd keeps each run's session files (only those) for the owner and copies the one being resumed into the next run's home. OpenCode keeps every session in one database, which hashd keeps in the owner's agent home (`OPENCODE_DB`); only that database, with its SQLite WAL files, is kept there between runs. `XDG_CACHE_HOME` is left to follow the run's `HOME`, as for the other agents: every tool reads it, so the caches tools build in it (go, uv, pip) go with the run, and OpenCode fetches its model list again on each run. A project that wants its runs to share the server's cache admits `XDG_CACHE_HOME` through a host entry of its environment. On those runs Copilot's `COPILOT_HOME` is the owner's agent home, and only its `session-state/` (what `copilot --resume <id>` reads) is kept there between runs. Qwen's `QWEN_HOME` is the owner's agent home the same way, and only each project's `projects/<cwd>/chats/` (whose `<id>.jsonl` is what `qwen --resume <id>` reads) is kept there between runs; the project memory and metadata beside it are not. Kimi's `KIMI_CODE_HOME` is the owner's agent home too, and only its `sessions/` (whose `<workdir>/<id>/` is what `kimi --session <id>` reads) is kept there between runs; the `config.toml` each run's credential writes goes with the rest.
+- With nothing registered, a claude, codex or Copilot run proceeds only when a credential variable survives the project's auth-mode filtering and `agents.<name>.env` precedence (claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`; codex: `CODEX_API_KEY`; Copilot: `COPILOT_GITHUB_TOKEN`). Otherwise the stage is refused with `hashd agents login <agent>`, in single-user mode too. An OpenCode run always needs a registered credential: its provider keys have no single variable name. So does a Qwen run: `DASHSCOPE_API_KEY` alone selects no auth type (Qwen Code 0.27.0 refuses "No auth type is selected" from a home with no settings), so it does not count. Nor does a Kimi run's `KIMI_API_KEY`: it binds no model (Kimi Code 2.5.2 refuses "No model configured" from a home with no `config.toml`), so a Kimi run needs a registered credential too. Project-level work such as detect uses the registered credential of the person who asked for it, the server owner on a single-user server.
+- Package caches and toolchains that live in the server user's home (`~/go`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`) are not reachable from a claude, codex, OpenCode, Copilot, Qwen or Kimi run's home. Export `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `CARGO_HOME` or `RUSTUP_HOME` in the server's environment to share them.
 - When hashd injects MCP servers for Claude, it passes `--mcp-config` without `--strict-mcp-config`, so Claude's own MCP discovery stays on; only the `browser_classify` launch keeps an empty strict config (`--mcp-config {"mcpServers":{}} --strict-mcp-config`), and launches with no injected servers pass no MCP flags. The isolated run home removes host-user MCP configuration. When `mcp.project_servers` is on, hashd injects the servers the repository's root `.mcp.json` defines at the story's pinned base commit: an absent file, a file with no servers, or a launch with no pinned source injects none, while a refused read (malformed or non-regular file, missing pinned commit, or unreadable repository) refuses the launch before the agent starts with no fallback to the working tree, lane, or branch tip. Servers the harness discovers on its own come from the working tree and its other sources, not the pinned base, and the harness's own precedence decides a shared name.
 - Every agent attempt's transcript meta records the MCP configuration hashd delivered as `mcp_delivery`: `project_servers` and its config layer (`project_servers_source`), `project_source_outcome` (`disabled`, `absent`, `no_servers`, `servers`, or `no_pinned_source`, with `repository` and full `commit` when a pinned read ran), and every delivered server in `servers` (`name`, `origin` as `project` or `hashd`, `transport` as `stdio` or the definition's declared type, and for `stdio` servers `command` and sorted `env_keys`). It records env variable names only — never env values, header values, args, or harness-substituted values — and launches refused for MCP reasons record no attempt. `agent_profile` remains the agent's own report of what it loaded or connected.
 - Every claude run records what the agent itself reported loading: plugins, skills, MCP servers, slash commands, subagents and the settings files in its config directory. The record goes on the run's transcript as `agent_profile`. `hashd doctor` lists, per stage agent, the most recent run's record with that run's stage, id and time, or "not reported yet" before any run has made one. Doctor starts no agent. A field the agent version does not report reads "not reported by this agent version", never "none".
 - Every run acts for a person. A launch that names nobody (no acting user, and no workstream or story to read an owner from) is refused before it starts, with a Diagnostic that names the launch (`ownership.launch_without_owner`); a launch of unassigned work is refused naming `hashd assign` (`ownership.unassigned`). Project-level stages that a user asks for act for that user: discovery and its tech tree, project description and build detection have no story or workstream to read an owner from, so their agent acts for the requesting user (`RunStageOptions.ActingOwner`) and runs from a run home on that user's credential like any owned run. Only then can the stage fence hold the launch to what its shape allows; a launch left on the host's own profile is not contained by shape, and an agent with an OS sandbox of its own (codex) cannot run commands there.
-- The run home keeps the host's configuration out of a run, not the repository's. Gemini, Copilot, Qwen and Kimi still read their config files committed in the worktree (for example `.gemini/settings.json` or `.qwen/settings.json`), and hashd does not yet check those for a setting that would send the run's credential somewhere else, the way Claude's credential guard checks Claude's project settings (`server/internal/agents/claude_settings.go`; [Project settings and the run's credential](#project-settings-and-the-runs-credential)). That check is follow-up work, held the same way as OpenCode's (#1775).
+- The run home keeps the host's configuration out of a run, not the repository's. Copilot, Qwen and Kimi still read their config files committed in the worktree (for example `.qwen/settings.json`), and hashd does not yet check those for a setting that would send the run's credential somewhere else, the way Claude's credential guard checks Claude's project settings (`server/internal/agents/claude_settings.go`; [Project settings and the run's credential](#project-settings-and-the-runs-credential)). That check is follow-up work, held the same way as OpenCode's (#1775).
 - Team-server runs on an owned workstream **refuse to dispatch** when the owner has no live credential for the run's agents. The refusal names the exact command to fix it.
 - When a run proves a credential dead (expired, revoked, or a token-rotation conflict), the server records it: the next dispatch fails instantly with the recovery steps instead of burning another run. Re-registering clears the state.
 
@@ -470,8 +519,8 @@ For project scope, `hashd agents`, `hashd agents login` and `hashd agents logout
 select the hashd project from `--project`, then the saved current project
 (`hashd project use <name>`), then `HASHD_PROJECT`, then the only configured local
 project. Agent-specific settings go in `--options key=value` on `hashd agents login`,
-repeated for more (Gemini's Google Cloud project is
-`--options google_cloud_project=<id>`). A remote client does not use its local project
+repeated for more (for example `--options provider=bedrock --options region=us-east-1`
+for a shared Claude Bedrock key). A remote client does not use its local project
 list as a fallback. Project scope is refused when no hashd project resolves;
 server scope needs no project selection.
 
@@ -648,7 +697,7 @@ It just works. `auto` mode keeps the API key in the environment.
 
 **"I use OAuth but also have an API key in my shell"**
 
-`auto` mode keeps the API key and lets the CLI decide. If you want OAuth to win for agents where keys override OAuth (Claude, Gemini), set:
+`auto` mode keeps the API key and lets the CLI decide. If you want OAuth to win for agents where keys override OAuth (Claude, Antigravity), set:
 
 ```bash
 hashd project config set auth-mode oauth
@@ -706,8 +755,7 @@ winning:
 3. **The agent's credential variables** (agents only): the `credential_env`
    its registry entry in `defaults.yaml` declares (claude:
    `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`;
-   gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`; and so
-   on). A run carrying a registered credential inherits none of them, from
+   codex: `CODEX_API_KEY`; and so on). A run carrying a registered credential inherits none of them, from
    this layer or from the project environment: the injected credential sets
    its own.
 4. **`agents.<name>.env`** (agents only): values the operator declares in
@@ -883,7 +931,7 @@ are withheld:
 | Env var | Agent |
 |---------|-------|
 | `ANTHROPIC_API_KEY` | Claude |
-| `GEMINI_API_KEY` | Gemini |
+| `GEMINI_API_KEY` | Antigravity (`agy`) |
 
 ---
 
@@ -1113,7 +1161,7 @@ refuses everything that reaches past the page under test: session lifecycle,
 another session, `run-code` and the debugger, commands that read or write files
 the agent names, a `--filename` that is a path, and pages that are not http(s).
 Codex is told to approve hashd's servers' tool calls
-(`default_tools_approval_mode`) and Gemini and Qwen to trust them, since a
+(`default_tools_approval_mode`) and Qwen to trust them, since a
 headless stage has no one to answer a confirmation.
 
 A project can declare the app a browser check looks at:
@@ -1443,7 +1491,6 @@ because they are not stage-backed agent-run shapes.
 |---|---|
 | Claude Code | Every shape denies the `Agent` tool that starts subagents and the tools through which the stage agent starts or resumes work outside its turn: `Monitor`, `RemoteTrigger`, `ScheduleWakeup`, `SendMessage` and `Workflow`, and its launch settings refuse messages other Claude Code sessions send into it (see "Background work"). `writes:false` also denies write tools; `bash:none` also denies shell and other side-effect tools. `writes:true` uses edit or full-permission mode based on `bash`. |
 | Codex | `bash:none` sets Codex's read-only sandbox through a config override that works for both start and resume; `bash:inspect` (reviews) and `bash:full` (implementation) run `--dangerously-bypass-approvals-and-sandbox`; an edit-only shape uses workspace-write. Every launch, including chat over app-server, also turns off subagents and goal continuation through `-c features.multi_agent=false`, `-c agents.enabled=false` and `-c features.goals=false` (see "Background work"). |
-| Gemini | `bash:none` maps to plan approval mode; `bash:inspect` (reviews) and `bash:full` use yolo; an edit-only shape uses auto-edit. Every launch also loads hashd's shipped `agent_policies/gemini.toml`, whose one rule denies `invoke_agent`, the tool that starts subagents, through `--admin-policy`, a flag Gemini CLI added in 0.35.0, so a launch on an older Gemini CLI is expected to fail; user settings and admin or system policy can still outrank or drop the file, and no flag or variable turns off background shell processes or Auto Memory, so none is pinned for them (see "Background work"). |
 | Qwen | `bash:none` maps to plan approval mode; `bash:inspect` (reviews) and `bash:full` use yolo; an edit-only shape uses auto-edit. Every launch also excludes the `agent`, `monitor` and `send_message` tools through `--exclude-tools` and sets `QWEN_CODE_DISABLE_WORKFLOWS=1` and `QWEN_CODE_DISABLE_CRON=1`; no flag or variable turns off background shell commands, so none is pinned for them (see "Background work"). |
 | Copilot | `writes:false` excludes write, and also excludes shell for `bash:none`; implementation uses yolo. Every launch, including yolo, also excludes the `task` and `write_agent` tools in the same `--excluded-tools` list; no flag or variable turns off async or detached shell commands, so none is pinned for them (see "Background work"). |
 | OpenCode | No native read-only knob is declared. `writes:false` is best-effort and unsafe for read-only-critical stages until the agent has an enforceable mode. Every launch also sets `OPENCODE_PERMISSION` with `task` denied, keeping any other rules the variable already holds, so no subagent starts, and `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false`, which still refuses background subagents where an agent's own configured permission allows `task` again; no flag or variable stops a shell command from backgrounding itself, so none is pinned for it (see "Background work"). |
@@ -1559,34 +1606,6 @@ The opt-in live check `TestLiveCodexBackground` (`server/internal/agents/live_co
 | any | any | async command hooks | not run: hooks come from operator hook config, which the check never writes | not run |
 
 Every route's rollout records the background command's tool call. In this run no background-terminal process was alive when the run returned and no marker appeared. An earlier run on the same version, with the same probes, found the `chat` route's background-terminal process still alive when the run returned; it was gone by the end of the 60-second wait, and its marker could not be written under the read-only sandbox. That run failed on it, so a `chat` background terminal has outlived its turn on this host. The runs do not show what ends these processes: codex itself on exit, the exec launcher's SIGKILL of the agent's process group when codex exits, or the app-server transport's kill of codex when the turn returns. No pinned override controls the background terminal. Control leg (0) shows that on this host, with the overrides removed, the stage agent starts a subagent and creates a goal, and Codex starts a further turn after the stage's result; with them in place, leg (1) and every route record neither call. In the earlier run, the pinned leg (1) agent searched its own tool list for spawn and goal tools, and the rollout records an empty result. A code-mode script that calls the goal tool can print nothing, so its recorded output need not carry the created goal; the check counts such a script once its output reports it completed.
-
-Every Gemini CLI launch pins one control: `geminiStageOwnedArgs` in `server/internal/agents/runner.go` adds `--admin-policy <install root>/agent_policies/gemini.toml` after the permission flags (`--skip-trust` and `--approval-mode plan|auto_edit|yolo` from `geminiPermFlags`) at the end of argv, after credential and MCP injection, which fresh and `--resume` launches both accept. Gemini CLI added `--admin-policy` in 0.35.0 (2026-03-24): its argument parser (`packages/cli/src/config/config.ts`) is strict, and at [v0.34.0](https://github.com/google-gemini/gemini-cli/blob/v0.34.0/packages/cli/src/config/config.ts) it defines `--policy` but not `--admin-policy`, which [v0.35.0](https://github.com/google-gemini/gemini-cli/blob/v0.35.0/packages/cli/src/config/config.ts) adds. hashd declares no minimum Gemini CLI version and does not check the installed one, so a launch on a release older than 0.35.0 is expected to fail on the unknown flag. `agent_policies/gemini.toml` is an authored file in the hashd source that the core wheel ships next to `agent_policies/kimi.md` and that the launcher reads from `$HASHD_ROOT` the same way; with `HASHD_ROOT` unset, no file there, or a path holding a comma (Gemini CLI splits the flag's value on commas, so such a path would load no policy), the stage fails with a diagnostic before gemini starts. The file holds one rule: `toolName = "invoke_agent"`, `decision = "deny"`, `priority = 999`. The worktree `.gemini/settings.json` MCP file, the permission flags and the credential environment do not change. That reaches every shape (`print`, `print_resume`, `json`, `edit`, `review`, `review_resume`, `implement`, `implement_resume`, `chat`, `chat_resume`, `detect`) and `stage_agents` reassignments. Gemini CLI 0.49.0 documents these ways a stage agent can start work that runs on after its call returns:
-
-- Background shell processes. `run_shell_command` takes `is_background`, and a command run in the background with `&` "will return immediately and the process will continue to run in the background" ([shell tool](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/tools/shell.md)); `tools.shell.backgroundCompletionBehavior: "inject"` returns a finished background command's output to the agent ([configuration](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/reference/configuration.md)). The documented controls are settings keys (`tools.core`, the deprecated `tools.exclude`) and policy engine rules loaded from TOML files (`~/.gemini/policies`, `--policy`, `--admin-policy`) ([policy engine](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/reference/policy-engine.md)). hashd writes neither, does not deny `run_shell_command` (which would also remove foreground shell use), and does not treat a rule matching command text as a control for `&`.
-- Subagents. A subagent reports back when it finishes ([subagents](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/core/subagents.md)), and the docs name the `experimental.enableAgents` setting, per-agent `agents.overrides` and policy rules as the ways to turn subagents off. The subagents page describes each subagent as a tool of its own name; in the installed 0.49.0 bundle every subagent call instead runs through one tool, `invoke_agent` (`AGENT_TOOL_NAME`), which takes `agent_name` and `prompt`, the system prompt tells the model to invoke subagents through it, and the policy check receives that call name. Pinned: `--admin-policy` naming the shipped file, whose rule denies `invoke_agent`; the policy engine docs say a call a matching deny rule blocks is not executed and the tool is excluded from the model's memory ([policy engine](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/reference/policy-engine.md)). This also removes subagents that finish inside the turn. `--admin-policy` and `--policy` both take files or directories; in the installed bundle `--admin-policy` paths are added at the admin tier after the system policies directory, while `--policy` paths replace the user policies directory (`~/.gemini/policies`), which is why hashd uses `--admin-policy`. The installed bundle numbers the admin tier 5 (the policy engine page says base 4) and adds a rule's priority divided by 1000, so the rule's 999, the largest priority the schema accepts, gives it 5.999, the highest a rule can have. Loaded through that bundle's own policy loader, the file produced one admin-tier rule at 5.999 and no errors, and the bundle's policy engine returned deny for an `invoke_agent` call and allow for other tools in yolo mode; no gemini run has exercised it. Remote (A2A) agents ([remote subagents](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/core/remote-agents.md)) are a separate surface, and the rule is not claimed to cover them.
-- Auto Memory, "a background extraction agent" that starts at session boot. It is off by default and turned on by `experimental.autoMemory` in user or project settings ([auto memory](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/cli/auto-memory.md)); no flag or environment variable controls it, so off by default is not off on every host. The docs do not say whether it keeps running after a headless turn ends.
-- Hooks run synchronously, with Gemini CLI waiting for them, except `PreCompress`, which is "fired asynchronously" ([hooks](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/hooks/index.md), [hooks reference](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/hooks/reference.md)). Hooks, and extensions that bundle hooks, subagents and MCP servers, come from operator configuration; the only extension flag, `-e none`, turns off every extension, and hashd passes it nowhere.
-
-Gemini CLI applies command-line arguments over environment variables, those over the system settings file, and that over project, user and system-default settings ([configuration layers](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/reference/configuration.md#configuration-layers)); admin-tier policy outranks user and extension policy, and upstream documents that supplemental admin policies are ignored when any `.toml` policy file is found in the standard system location (`/etc/gemini-cli/policies`, `/Library/Application Support/GeminiCli/policies`, `C:\ProgramData\gemini-cli\policies`) ([policy engine](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/docs/reference/policy-engine.md)). The additive ordering above is what the installed bundle shows; that ignore branch was not verified there. The shipped file therefore covers ordinary, default Gemini CLI use: a system policy file on the host drops it, and the operator's own settings and any admin or system policy remain theirs and can outrank it or turn subagents back on, which hashd cannot observe and does not claim to contain. hashd does not read, write, override or probe Gemini settings (`experimental.enableAgents`, `agents.overrides` among them), `~/.gemini/policies`, workspace policies, admin or system policy, or the credential home. All pages retrieved 2026-09-14 at the v0.49.0 tag of google-gemini/gemini-cli, the installed version, and checked against [geminicli.com](https://geminicli.com/docs/reference/configuration) ([shell tool](https://geminicli.com/docs/tools/shell), [subagents](https://geminicli.com/docs/core/subagents)).
-
-The opt-in live check `TestLiveGeminiBackground` (`server/internal/agents/live_gemini_background_test.go`, `HASHD_LIVE_GEMINI=1`) launches the real gemini binary through `RunStageWithOptions` in one temp git repo with a temp project config naming gemini in `stage_agents`, with `HASHD_ROOT` at the source checkout, so `--admin-policy` names the `agent_policies/gemini.toml` the wheel ships. Routes: review, review_resume, implement, implement_resume, chat and chat_resume. The implement shape prints plain text with no session id, so implement_resume resumes the latest session an earlier route in the same repo produced. Each turn asks for a short foreground command, a shell command started with `is_background` and left running, and a command delegated to a subagent. Every command ends by printing a nonce the test wrote to a file outside the repo; the background and subagent work is a `sh -c` command whose `$0` is a random token, which sleeps and writes a marker file. After the run returns, the check looks for the process with `pgrep -f` and for the marker, waits out the work's duration, then looks again. On the chat routes a stream-json `tool_use` frame whose `parameters` carry a probe's token records the call through its `tool_name`, one that also sets `is_background` records a background start, and frames after the first `result` frame are work after the stage's result; the review routes' json envelope and the implement routes' plain text list no tool calls, so their results rest on the process, marker, nonce and the agent's report. Results use the same six values as the Codex check. It fails when a route cannot run, when a resume route has nothing to resume, when the foreground command's nonce does not reach an implement route, on a subagent probe that ran, in the background or the foreground, and on a capability with no attempt or not exercised; a background shell start, work after the turn and frames after the result are recorded, not failed, because no documented invocation-level control turns them off. On the chat routes a subagent probe counts against the policy only when the stream records it running through `invoke_agent`: one recorded only through `run_shell_command` or another tool is not exercised. The review and implement routes record no calls, so a subagent probe that ran there fails with a note that the output does not show which tool ran it. On the chat routes the reply arrives as assistant message frames, so the check rebuilds the agent text from them before reading the report lines. It writes no settings, hooks or extensions and no policy beyond the shipped file the launcher passes; the launcher writes the chat routes' MCP settings file into the temp repo's `.gemini/settings.json`, which Gemini CLI loads as project settings, with its hashd MCP server command pointed at a path that does not exist. It never reads Gemini CLI's session files and never contacts a remote agent; authentication and the host's user, system and admin settings and policy still load. Once opted in, a missing gemini binary or a missing `pgrep` fails it, and a host with no gemini authentication fails the first route, with gemini's own error in the logged stderr.
-
-The check has not produced a result, and it has not run since the launch added `--admin-policy`: this host still has no gemini authentication (`GEMINI_API_KEY` unset), so live proof of the policy is unavailable. It last ran on Gemini CLI 0.49.0, before the policy file, and stopped at the first route: gemini exited 41 with "Please set an Auth method in your `~/.gemini/settings.json` or specify one of the following environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA", which the launcher classified as `transient`, not as an agent authentication failure. No row below is a live result, and nothing here shows how Gemini CLI 0.49.0 behaves:
-
-| Route | Shape | Capability | Result | Work after turn end |
-|---|---|---|---|---|
-| review | review | short foreground command, background shell process, subagent | not run: gemini exited 41, no auth method configured on the host | not run |
-| review_resume | review_resume | short foreground command, background shell process, subagent | not run: the review route did not run | not run |
-| implement | implement | short foreground command, background shell process, subagent | not run: the check stopped at the review route | not run |
-| implement_resume | implement_resume | short foreground command, background shell process, subagent | not run: the check stopped at the review route | not run |
-| chat | chat | short foreground command, background shell process, subagent | not run: the check stopped at the review route | not run |
-| chat_resume | chat_resume | short foreground command, background shell process, subagent | not run: the check stopped at the review route | not run |
-| any | any | Auto Memory | not run: turned on only through a settings key the check never writes, and it mines sessions idle for at least three hours | not run |
-| any | any | remote (A2A) subagent | not run: the check never contacts a remote agent | not run |
-| any | any | hooks and extensions | not run: they come from operator configuration, which the check never writes | not run |
-| any | any | `tools.shell.backgroundCompletionBehavior` inject | not run: a settings key the check never writes | not run |
-| any | any | subagent with the shipped `--admin-policy` file | not run: no gemini authentication on the host (`GEMINI_API_KEY` unset); verified offline only, as above | not run |
-| user settings or admin or system policy that outrank or drop the shipped policy file | any | subagent | not run: the check writes no Gemini settings or policy and never reads the host's; a documented limitation | not run |
 
 Every Qwen Code launch pins three controls (`qwenStageOwnedArgs` and `qwenLaunchEnvPins` in `server/internal/agents/runner.go`): `--exclude-tools agent,monitor,send_message`, and `QWEN_CODE_DISABLE_WORKFLOWS=1` and `QWEN_CODE_DISABLE_CRON=1` in the agent process environment. The launcher adds them after credential and MCP injection; the flag goes after the permission flags at the end of argv, which fresh and `--resume` launches both accept. That reaches every shape (`print`, `print_resume`, `json`, `edit`, `review`, `review_resume`, `implement`, `implement_resume`, `chat`, `chat_resume`, `detect`) and `stage_agents` reassignments. The worktree `.qwen/settings.json` MCP file, the permission flags and the credential environment are unchanged. Qwen Code 0.23.4 documents these ways a stage agent can start work that runs on after its call returns:
 
@@ -1809,8 +1828,8 @@ capability-derived permission flags (see Agent Tool Permissions above).
 |---|---|---|---|
 | C1 | Non-interactive prompt intake on **stdin** | `{prompt}` is a stdin sentinel, never argv; agents with no bare-stdin mode declare `prompt_stdin_sentinel` (codex `-`) or `prompt_value_flags` (`-p`/`--prompt`) | Prompts exceed argv limits and must not leak into `ps` |
 | C2 | Machine-parseable output for structured stages | shape templates carry the agent's JSON/stream flags (`--output-format json`, `--json`, ...) | Verdicts, results, and session ids are parsed, never scraped |
-| C3 | **Session identity**: emit a session id in machine-readable output | per-agent extractor in `server/internal/agents/session_id.go` (codex JSONL events, gemini/qwen `session_id` keys, opencode `sessionID`, copilot's `result` event `sessionId`, kimi stderr hint; copilot and qwen declare `session_id_template`, naming the session of shapes that print no id) | Resume is impossible without capturing the id |
-| C4 | **Session resume**: an invocation that continues the same conversation from that id | `_resume` shape templates with `{session_id}` (claude/gemini/kimi/qwen/copilot `--resume`, codex `exec resume` / app-server `thread/resume`, opencode `--session`) | Dirty-tree continuity on retry, and the token payoff: a resumed turn sends only the new instruction instead of re-sending the full prompt |
+| C3 | **Session identity**: emit a session id in machine-readable output | per-agent extractor in `server/internal/agents/session_id.go` (codex JSONL events, qwen `session_id` keys, opencode `sessionID`, copilot's `result` event `sessionId`, kimi stderr hint; copilot and qwen declare `session_id_template`, naming the session of shapes that print no id) | Resume is impossible without capturing the id |
+| C4 | **Session resume**: an invocation that continues the same conversation from that id | `_resume` shape templates with `{session_id}` (claude/kimi/qwen/copilot `--resume`, codex `exec resume` / app-server `thread/resume`, opencode `--session`) | Dirty-tree continuity on retry, and the token payoff: a resumed turn sends only the new instruction instead of re-sending the full prompt |
 | C5 | Distinguishable missing-session errors | `sessionResumePatterns` in `server/internal/agents/classifier.go` (`session_not_found` classification) | A dead session must fall back to a fresh run, not retry-loop |
 | C6 | Permission flags mappable to `shape_capabilities` | per-agent flag translators in `runner.go` (`--dangerously-skip-permissions`, `sandbox_mode=...`, `--approval-mode ...`); agents without a read-only mode are best-effort and documented as such; an agent whose modes run its commands in an OS sandbox of its own declares `os_sandbox_off_args` (codex), and inside the stage fence launches with that sandbox off: the fence holds a read-only shape to reading and an edit shape to its checkout, for every agent | Shape intent (writes/bash) is enforced per agent |
 | C7 | Auth verification verb | `verify_auth` (`claude auth status`, `codex login status`, ...); omit rather than guess when the CLI has no reliable verb | Preflight without inspecting private credential files |
@@ -2422,8 +2441,29 @@ does not set its own override; a project-scope override
 (`hashd project config set|reset mcp.project_servers`) takes precedence for
 that project. `hashd project config` (and `hashd project config show
 mcp.project_servers`) displays the effective value alongside its provenance:
-`(default)`, `(system)`, or `(project)`. TUI and Web controls for this setting
-are tracked in STORY-0763.
+`(default)`, `(system)`, or `(project)`.
+
+In the TUI (`hashd watch`), press `s` to open Settings: the **Repository MCP
+servers** section shows `mcp.project_servers` at both scopes -- one row for
+this project and one for the system -- and the key also appears in the
+**Project config** list. Each row shows the effective value with its
+`(default)`, `(system)`, or `(project)` provenance label (`true` by default).
+Select a row to open the edit dialog, where `ctrl-s` saves a value and `ctrl-r`
+resets an override. A project value overrides the system value, and resetting
+it restores inheritance (system, then the enabled default); a system change
+affects only projects without their own override. Changes govern later stage
+launches.
+
+In the Web UI, open **Settings > Agents**: the **Repository MCP servers**
+section (below **Isolation**) exposes `mcp.project_servers` for **This project**
+and **Global**, each with a checkbox, **Save changes**, and a provenance chip
+(`project`, `system`, or `default`; enabled by default). Nothing changes until
+**Save changes** is pressed. Saving **This project** overrides the global value
+for that project, and **Use inherited** clears the project override when one is
+set so it inherits from the system layer or the enabled default. Saving
+**Global** writes the system layer and affects only projects without their own
+override; **Reset to default** clears the system override back to the enabled
+default when the system layer sets it. Changes govern later agent launches.
 
 The setting governs only whether hashd injects repository-declared servers
 (read from the repository's root `.mcp.json` at the launch's pinned base
@@ -2488,7 +2528,6 @@ registration in `defaults.yaml`.
 |---|---|---|
 | `claude` | Local version `2.1.306`; [official MCP limits](https://code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings) document a 25,000-token default and an independent 50,000-character persistence threshold. Both apply to Claude only. | Measure the harness wrapper and token estimate for the actual encoded boundary page; documentation is not versioned implementation evidence. |
 | `codex` | Local version `0.167.1`; [MCP call handling](https://github.com/openai/codex/blob/rust-v0.167.1/codex-rs/core/src/mcp_tool_call.rs) and [serialized-result truncation](https://github.com/openai/codex/blob/rust-v0.167.1/codex-rs/utils/output-truncation/src/lib.rs) distinguish event byte limits from model/history truncation. | Trace the effective model/history budget and its framing; the event byte cap alone is insufficient. |
-| `gemini` | [v0.49.0 MCP invocation and content transformation](https://github.com/google-gemini/gemini-cli/blob/v0.49.0/packages/core/src/tools/mcp-tool.ts) forwards a text block's text to the model-facing parts. | Qualify the scheduler/model wrapper and token budget; binary not installed here. |
 | `agy` | Registry minimum `1.5.1`; [official ACP changelog, v1.4.0](https://antigravity.google/docs/changelog) introduces `_meta.antigravity.mcpMaxOutputBytes`. | The documented configurable limit does not establish its default or framing; a runtime boundary probe against the installed CLI is still needed. |
 | `opencode` | Local version `1.19.5`; [v1.19.5 truncation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/truncate.ts) checks both 2000 lines and 50 KiB by default. Our page text escapes internal newlines. | Qualify MCP conversion and model wrapper, including effective configuration, rather than treating the generic truncation helper as the whole path. |
 | `kimi` | [1.50.0 MCP conversion](https://github.com/MoonshotAI/kimi-cli/blob/1.50.0/src/kimi_cli/soul/toolset.py) budgets content characters; [text conversion](https://github.com/MoonshotAI/kimi-cli/blob/1.50.0/packages/kosong/src/kosong/tooling/mcp.py) retains text. Local executable reports `2.5.2`, so this source does not qualify it. | Inspect the installed version's path and model-facing framing or run a version-recorded boundary probe. |

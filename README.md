@@ -8,8 +8,11 @@
 
 **Requirements**
 
-- **git**
-- **A working AI agent** — Claude Code by default, or Codex, Gemini, OpenCode, Kimi, Qwen, or Copilot. [Install and authenticate an agent →](QUICKSTART.md#ai-coding-agents), you can also [set different agents for different stages](docs/AGENT_MANAGEMENT.md).
+- **Git 2.46 or newer** — hashd refuses an older Git.
+  - Ubuntu 24.04 ships 2.43.0: add `ppa:git-core/ppa`, then upgrade git.
+  - Debian 12 ships 2.39.5.
+  - A minimal Linux image also needs `libatomic1` for the browser runtime.
+- **A working AI agent** — Claude Code by default, or Codex, Antigravity, OpenCode, Kimi, Qwen, or Copilot. [Install and authenticate an agent →](QUICKSTART.md#ai-coding-agents), you can also [set different agents for different stages](docs/AGENT_MANAGEMENT.md).
 
 hashd installs everything else — Python, the forge CLIs (`gh`/`glab`/`bkt`/`tea`), diff tools — on its own.
 
@@ -107,7 +110,7 @@ file -> git log -> commit message (COMMIT-XX-NNN)
 
 **Runs in parallel, safely.** Multiple workstreams execute against the same project concurrently. Each gets its own git worktree. A Temporal workflow singleton rejects a second run while that workstream's run is still open, and server FSM and lifecycle guards gate competing operator actions. `hashd conflicts` reports recorded file overlap between workstreams. With grounded agents and parallel execution working together, hashd users routinely ship 10x more debugged code per day than they would driving an agent by hand.
 
-**Works with any agent.** Use Claude Code, Codex, Copilot, Gemini, OpenCode, Kimi, or Qwen -- any combination, any stage. Stages declare their required invocation shape; any agent that supports the shape can fill the slot. You're not locked to one vendor.
+**Works with any agent.** Use Claude Code, Codex, Copilot, Antigravity, OpenCode, Kimi, or Qwen -- any combination, any stage. Stages declare their required invocation shape; any agent that supports the shape can fill the slot. You're not locked to one vendor.
 
 **Spans multiple repositories.** A single project can include a backend repo, a frontend repo, and an infra repo. Planning happens at the project level; execution happens in the right repo automatically.
 
@@ -637,7 +640,7 @@ Transient failures are retried automatically in two layers: the agent runner ret
 
 See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions including platform-specific commands. Building from source instead? See **[DEVELOPMENT.md](DEVELOPMENT.md)**.
 
-- **Git** - the only OS-level prerequisite. (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
+- **Git 2.46 or newer** - the only OS-level prerequisite (a minimal Linux image also needs `libatomic1` for the browser runtime). (Python 3.11+ is handled by the installer; it bootstraps a runtime via [uv](https://github.com/astral-sh/uv) when your system has none.)
 - **At least one AI coding agent** - Claude Code by default (see [Agent Configuration](#agent-configuration)). Agent CLIs are npm packages, so installing one needs **Node.js 20+**; that is the agent's prerequisite, not hashd's. `hashd doctor` prints the exact OS-correct install commands.
 - A forge CLI for your host: [gh](https://cli.github.com/) (GitHub), [glab](https://gitlab.com/gitlab-org/cli) (GitLab), [bkt](https://github.com/avivsinai/bitbucket-cli) (Bitbucket), or [tea](https://about.gitea.com/products/tea/) (Gitea). The curl installer auto-installs pinned prebuilt versions; links are manual fallbacks. Azure Repos needs no CLI: hashd calls its REST API with a stored credential.
 - [delta (git-delta)](https://github.com/dandavison/delta) - bundled TUI side-by-side, syntax-highlighted, word-level diff renderer (auto-installed by the installer / `setup.sh`)
@@ -764,10 +767,15 @@ Minimum agent/tool versions verified for this release:
 |------|---------|-------|
 | Claude Code | 2.1.312 | required - the default agent for every stage |
 | Codex CLI | 0.163.0 | optional - swap in per stage if you want it |
+| OpenCode | 1.19.5 | optional |
+| Kimi Code | 2.5.2 | optional |
+| Qwen Code | 0.27.0 | optional |
+| GitHub Copilot CLI | 1.0.107 | optional |
+| Antigravity | 1.5.1 | optional - an older runtime is refused at launch |
 | uv | 0.11+ | |
 | Go | 1.26+ | |
 
-Run `hashd doctor` to check your setup.
+The agent minimums are each agent's `minimum_version` in `server/internal/config/defaults.yaml`. Run `hashd doctor` to check your setup: it reports an installed agent older than its minimum.
 
 
 ## Configuration
@@ -1113,7 +1121,6 @@ Hashd supports seven CLI coding agents. Any agent can be assigned to any workflo
 | **Claude Code** | `claude` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @anthropic-ai/claude-code` | Anthropic API key |
 | **Codex** | `codex` | active | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @openai/codex` | OpenAI API key |
 | **GitHub Copilot** | `copilot` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @github/copilot` | GitHub Copilot subscription |
-| **Gemini CLI** | `gemini` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @google/gemini-cli` | Google account (free) |
 | **Antigravity** | `agy` | available | print, json, edit, implement, implement_resume | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google account or Gemini API key |
 | **OpenCode** | `opencode` | available | print, json, review, review_resume, implement, implement_resume | `npm install -g opencode-ai` | Depends on model |
 | **Kimi Code** | `kimi` | available | print, json, edit, review, review_resume, implement, implement_resume | `npm i -g @moonshot-ai/kimi-code` | Moonshot (~$19/mo) |
@@ -1130,8 +1137,8 @@ hashd agents                                # See installed agents and credentia
 hashd agents --suggest                      # Scan agents and apply a default for all stages
 hashd config stages-use codex               # Use one agent for every stage system-wide
 hashd project config set coder codex        # Use Codex for implementation (this project)
-hashd project config set planner gemini     # Planning stages (see the agent guide for each role)
-hashd project config set stage.review gemini  # Single stage override
+hashd project config set planner qwen       # Planning stages (see the agent guide for each role)
+hashd project config set stage.review qwen  # Single stage override
 ```
 
 ### Stage Reference
